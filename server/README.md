@@ -8,7 +8,7 @@ Courtesy of Wireless Lab @ UCLA. - Ethan Ge
 
 - **Local Linux Computer**: You will need a linux based machine to run the server, along with the networking that goes along with it.
 
-- **Python 3.12 or later**: This codebase requires Python 3.12+. If you don’t have Python installed, you can download it from the [official Python website](https://www.python.org/downloads/).
+- **Python 3.12**: Honestly I am not sure what minimum version is required. But 3.12 for sure works. If you don’t have Python installed, you can download it from the [official Python website](https://www.python.org/downloads/).
 To check your current Python version, open a terminal and run:
 
 ```bash
