@@ -1,0 +1,255 @@
+import sqlite3
+import threading
+from typing import Tuple 
+from pathlib import Path
+from datetime import datetime
+
+from functools import wraps
+
+from ..common.utils import *
+from .device_manager import get_all_devices
+
+class userperms:
+    def __init__(self): # default user perms settings
+        self.id = 'user'
+        self.max_reservations = 1
+        self.max_reservation_time_sec = 3600
+        self.devices_allowed = [0, 1] # ex: only pluto
+        
+        # can only cancel personal reservations, and can only view reservations on the devices they have access to
+        
+    def __str__(self):
+        return f"Max Reservations: {self.max_reservations}\nMax Reservation Time: {int(self.max_reservation_time_sec/60)} minutes\nDevice IDs Accessible: {self.devices_allowed}"
+
+class perms_db:
+    def __init__(self):
+        self.filepath = Path(__file__).resolve().parent/'db'/'perms.db'
+        self.db = sqlite3.connect(self.filepath)
+        self.cursor = self.db.cursor()
+        
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Users (
+            UserID INTEGER PRIMARY KEY AUTOINCREMENT,
+            Username TEXT NOT NULL UNIQUE
+        );
+        ''')
+        
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS PowerUsers (
+                UserID INTEGER PRIMARY KEY AUTOINCREMENT,
+                Username TEXT NOT NULL UNIQUE,
+                MaxReservations INTEGER NOT NULL,
+                MaxReservationTimeSec INTEGER NOT NULL,
+                DevicesAllowed TEXT NOT NULL
+            );
+        ''')
+
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS Admins (
+                AdminID INTEGER PRIMARY KEY AUTOINCREMENT,
+                Username TEXT NOT NULL UNIQUE
+            );
+        ''')
+
+        self.db.commit()
+        self.cursor.close()
+        self.db.close()
+        self.userperms = userperms()
+        self.lock = threading.Lock()
+        self.min_reservation_time_sec = 600 # 10 minutes
+
+    @db_connection
+    def get_perms(self, username) -> Tuple[str, list[int], int, int]:
+        # SQL query to search for a user in all three tables
+        query = """
+        SELECT 'Normal User' as Type, UserID, Username, NULL as MaxReservations, NULL as MaxReservationTimeSec, NULL as DevicesAllowed FROM Users WHERE Username = ?
+        UNION ALL
+        SELECT 'Power User', UserID, Username, MaxReservations, MaxReservationTimeSec, DevicesAllowed FROM PowerUsers WHERE Username = ?
+        UNION ALL
+        SELECT 'Admin', AdminID as UserID, Username, NULL, NULL, NULL FROM Admins WHERE Username = ?
+        """
+
+        # Execute the query
+        self.cursor.execute(query, (username, username, username))
+
+        # Fetch all results
+        results = self.cursor.fetchall()
+
+        # Return the results
+        return results
+        
+
+    def validate_reservation_request(self, username, device_id, start_time, end_time, current_reservation_count:int, is_server=False) -> Tuple[bool, str]:
+        # check basic reservation requirements
+        if start_time > end_time:
+            return False, 'Start time must be before end time'
+        if end_time < datetime.now():
+            return False, 'End time must not be in the past'
+        
+        # check if device exists
+        devices = get_all_devices()
+        if device_id not in devices:
+            return False, 'Invalid device ID. Device either does not exist or is disconnected.'
+        
+        # check reservation duration
+        reservation_duration = (end_time - start_time).total_seconds()
+        if reservation_duration < 600:
+            return False, 'Minimum reservation time is 10 minutes.'
+        
+        if is_server:
+            return True, ''
+        
+        # Perm check
+        perms = self.get_perms(username)[0]
+        
+        if perms[0] == 'Normal User':
+            # check if user has permission to reserve device
+            if device_id not in self.userperms.devices_allowed:
+                return False, 'Invalid device ID. Device either does not exist or is disconnected.'
+            
+            # check if user has reached max reservations
+            if current_reservation_count >= self.userperms.max_reservations:
+                return False, 'User has reached max reservations.'
+            
+            # check if user has reached max reservation time
+            if reservation_duration > self.userperms.max_reservation_time_sec:
+                return False, f'Max Reservation Duration allowed is {self.userperms.max_reservation_time_sec/60} minutes.'
+            
+        elif perms[0] == 'Power User':
+            # check if user has permission to reserve device
+            if device_id not in str_to_list(perms[5]):
+                return False, 'Invalid device ID. Device either does not exist or is disconnected.'
+            
+            # check if user has reached max reservations
+            if current_reservation_count >= int(perms[3]):
+                return False, f'Max Reservations allowed is {perms[3]}.'
+            
+            # check if user has reached max reservation time
+            if reservation_duration > int(perms[4]):
+                return False, f'Max Reservation Duration allowed is {perms[4]/60} minutes.'
+            
+        elif perms[0] == 'Admin':
+            pass # admin has no restrictions
+        else:
+            return False, 'Perms could not be found. Access Denied.'
+        return True, ''
+
+    @db_connection
+    def set_user(self, username):
+        self.remove_user(username)
+        # SQL command to insert a new user
+        insert_query = 'INSERT INTO Users (Username) VALUES (?)'
+
+        try:
+            # Execute the SQL command
+            self.cursor.execute(insert_query, (username,))
+            
+        except sqlite3.Error as e:
+            print("An error occurred:", e)
+
+    @db_connection
+    def set_admin(self, username:str):
+        print(f"Setting {username} as an admin")
+        self.remove_user(username)
+        if input(f"Are you sure you want to set {username} as an admin? \nThis gives them unrestricted access. (Y/N): ") != 'Y':
+            print(f"Admin set is canceled for user: {username}.")
+            return
+        
+        # SQL command to insert a new user
+        insert_query = 'INSERT INTO Admins (Username) VALUES (?)'
+
+        try:
+            # Execute the SQL command
+            self.cursor.execute(insert_query, (username,))
+            print("Admin added successfully")
+            
+        except sqlite3.Error as e:
+            print("An error occurred:", e)
+
+    @db_connection
+    def set_poweruser(self, username:str, max_reservations:int, max_reservation_time_sec:int, devices_allowed:list[int]):
+        self.remove_user(username)
+        print(f"Setting {username} as a PowerUser")
+        
+        # SQL command to insert a new user
+        insert_query = 'INSERT INTO PowerUsers (Username, MaxReservations, MaxReservationTimeSec, DevicesAllowed) VALUES (?, ?, ?, ?)'
+
+        try:
+            # Execute the SQL command
+            self.cursor.execute(insert_query, (username, max_reservations, max_reservation_time_sec, list_to_str(devices_allowed)))
+            print(f"PowerUser perm for {username} added successfully")
+            
+        except sqlite3.Error as e:
+            print("An error occurred:", e)
+
+
+    def remove_user(self, username:str) -> bool:
+        # List of tables to check
+        tables = ['Users', 'PowerUsers', 'Admins']
+
+        try:
+            # Attempt to delete the user from each table
+            for table in tables:
+                self.cursor.execute(f'DELETE FROM {table} WHERE Username = ?', (username,))
+
+        except sqlite3.Error as e:
+            print("An error occurred:", e)
+            
+    @db_connection
+    def delete_user_from_reservation_handler(self, username:str):
+        self.remove_user(username)
+    
+    @db_connection
+    def print_perms(self):
+        print("Printing all permissions:")
+        print("Users:")
+        # SQL query to select all users from the Users table
+        query = 'SELECT * FROM Users'
+
+        # Execute the query
+        self.cursor.execute(query)
+
+        # Fetch all results
+        results = self.cursor.fetchall()
+
+        # Print the results
+        for result in results:
+            print(result)
+            
+        print("\nPowerUsers:")
+        # SQL query to select all users from the PowerUsers table
+        query = 'SELECT * FROM PowerUsers'
+        
+        # Execute the query
+        self.cursor.execute(query)
+        
+        # Fetch all results
+        results = self.cursor.fetchall()
+        
+        # Print the results
+        for result in results:
+            print(result)
+            
+        print("\nAdmins:")
+        # SQL query to select all users from the Admins table
+        query = 'SELECT * FROM Admins'
+        
+        # Execute the query
+        self.cursor.execute(query)
+        
+        # Fetch all results
+        results = self.cursor.fetchall()
+        
+        # Print the results
+        for result in results:
+            print(result)
+    
+    @db_connection
+    def rm_db(self):
+        # SQL command to delete all entries from all tables
+        query = 'DELETE FROM Users; DELETE FROM PowerUsers; DELETE FROM Admins'
+
+        # Execute the query
+        self.cursor.executescript(query)
+            
+perms = perms_db()
