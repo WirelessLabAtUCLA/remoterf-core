@@ -74,6 +74,8 @@ class perms_db:
 
         # Fetch all results
         results = self.cursor.fetchall()
+        
+        # print(f"Results: {results}")
 
         # Return the results
         return results
@@ -136,12 +138,12 @@ class perms_db:
 
     @db_connection
     def set_user(self, username):
-        self.remove_user(username)
         # SQL command to insert a new user
         insert_query = 'INSERT INTO Users (Username) VALUES (?)'
 
         try:
             # Execute the SQL command
+            self.remove_user(username)
             self.cursor.execute(insert_query, (username,))
             
         except sqlite3.Error as e:
@@ -150,16 +152,18 @@ class perms_db:
     @db_connection
     def set_admin(self, username:str):
         print(f"Setting {username} as an admin")
-        self.remove_user(username)
-        if input(f"Are you sure you want to set {username} as an admin? \nThis gives them unrestricted access. (Y/N): ") != 'Y':
+        inpu = input(f"Are you sure you want to set {username} as an admin? \nThis gives them unrestricted access. (Y/N): ") 
+        if inpu != 'Y' and inpu != 'y':
             print(f"Admin set is canceled for user: {username}.")
             return
+        
         
         # SQL command to insert a new user
         insert_query = 'INSERT INTO Admins (Username) VALUES (?)'
 
         try:
             # Execute the SQL command
+            self.remove_user(username)
             self.cursor.execute(insert_query, (username,))
             print("Admin added successfully")
             
@@ -168,7 +172,7 @@ class perms_db:
 
     @db_connection
     def set_poweruser(self, username:str, max_reservations:int, max_reservation_time_sec:int, devices_allowed:list[int]):
-        self.remove_user(username)
+        
         print(f"Setting {username} as a PowerUser")
         
         # SQL command to insert a new user
@@ -176,11 +180,13 @@ class perms_db:
 
         try:
             # Execute the SQL command
+            self.remove_user(username)
             self.cursor.execute(insert_query, (username, max_reservations, max_reservation_time_sec, list_to_str(devices_allowed)))
             print(f"PowerUser perm for {username} added successfully")
             
         except sqlite3.Error as e:
             print("An error occurred:", e)
+            return
 
 
     def remove_user(self, username:str) -> bool:

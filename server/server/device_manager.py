@@ -45,8 +45,8 @@ devices = { # device, salt, hash
     
     # iio_info -s
     # ^ find usb serial ports
-    0: (connect_pluto(usb='1.7.5'),'',''),
-    1: (connect_pluto(usb='1.8.5'),'',''),
+    0: (connect_pluto(usb='1.6.5'),'',''),
+    # 1: (connect_pluto(usb='1.8.5'),'',''),
     
     # hackrf
     10: (connect_hackrf(0),'',''),

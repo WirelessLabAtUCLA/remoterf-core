@@ -70,9 +70,9 @@ def serve():
 
     # Read key and certificate
     
-    cert_key = Path(__file__).resolve().parent.parent/'certs'/'server.key'
+    cert_key = Path(__file__).resolve().parent/'certs'/'server.key'
     
-    cert_crt = Path(__file__).resolve().parent.parent/'certs'/'server.crt'
+    cert_crt = Path(__file__).resolve().parent/'certs'/'server.crt'
     
     with cert_key.open('rb') as f:
         private_key = f.read()
@@ -109,7 +109,7 @@ def clear():
     
 def set_acc():
     while True:
-        username = session.prompt("Enter username to manage: ")
+        username = session.prompt("Enter username to manage (c to cancel): ")
         if username == 'exit' or username == 'c' or username == 'e':
             return
         perm = perms.get_perms(username)
