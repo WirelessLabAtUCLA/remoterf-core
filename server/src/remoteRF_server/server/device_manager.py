@@ -1,6 +1,6 @@
 import adi
-import uhd
-from hackrf import *
+# import uhd
+# from hackrf import *
 from ..common.utils import *
 
 #* Device manager *
@@ -24,19 +24,19 @@ def connect_pluto(*, ip='', usb=''):
         print(f"Pluto {ip}: {e}")
         return None
 
-def connect_hackrf(device_index):
-    try:
-        device = HackRF(device_index=device_index)
-        print(f"Connected to HackRF {device_index}")
-        return device
-    except Exception as e:
-        print(f"HackRF {device_index}: {e}")
-        return None
+# def connect_hackrf(device_index):
+#     try:
+#         device = HackRF(device_index=device_index)
+#         print(f"Connected to HackRF {device_index}")
+#         return device
+#     except Exception as e:
+#         print(f"HackRF {device_index}: {e}")
+#         return None
     
-def connect_usrp2901():
-    usrp = uhd.usrp.MultiUSRP()
-    print(f"Connected to USRP 2901")
-    return usrp
+# def connect_usrp2901():
+#     usrp = uhd.usrp.MultiUSRP()
+#     print(f"Connected to USRP 2901")
+#     return usrp
     
 class temp:
     pass
@@ -49,10 +49,15 @@ devices = { # device, salt, hash
     # 1: (connect_pluto(usb='1.8.5'),'',''),
     
     # hackrf
-    10: (connect_hackrf(0),'',''),
+    # 10: (connect_hackrf(0),'',''),
     
     # 20: (connect_usrp2901(),'',''),
     
+}
+
+devices_info = {    # device, info
+    0: "PlutoSDR",
+    1: "PlutoSDR",
 }
 
 def get_device(device_id):
@@ -60,6 +65,9 @@ def get_device(device_id):
 
 def get_all_devices() -> dict:
     return {k: v for k, v in devices.items() if v is not None}
+
+def get_all_devices_str() -> dict:
+    return devices_info
 
 def get_device(*, api_token):
     for key, value in devices.items():

@@ -19,7 +19,7 @@ from .reservation import reservation_handler
 from .rpc_manager import rpc_manager
 from .acc_perms import perms
 from ..common.utils import *
-from .device_manager import get_all_devices
+from .device_manager import get_all_devices, get_all_devices_str
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -70,9 +70,9 @@ def serve():
 
     # Read key and certificate
     
-    cert_key = Path(__file__).resolve().parent/'certs'/'server.key'
+    cert_key = Path(__file__).resolve().parent.parent/'certs'/'server.key'
     
-    cert_crt = Path(__file__).resolve().parent/'certs'/'server.crt'
+    cert_crt = Path(__file__).resolve().parent.parent/'certs'/'server.crt'
     
     with cert_key.open('rb') as f:
         private_key = f.read()
@@ -226,15 +226,15 @@ def set_acc():
         print("Canceled. Exiting ...")
 
 def get_devices():
-    data = get_all_devices()
+    data = get_all_devices_str()
     
     printf("Devices:", Sty.BOLD)
     for key, value in data.items():
-        printf(f"Device ID:", Sty.DEFAULT, f' {key}', Sty.MAGENTA, f" Device Name: ", Sty.DEFAULT, f"{(value[0])}", Sty.GRAY)
+        printf(f"Device ID:", Sty.DEFAULT, f' {key}', Sty.MAGENTA, f" Device Name: ", Sty.DEFAULT, f"{(value)}", Sty.GRAY)
 
 def help():
     printf("/------- HELP -------/", Sty.BOLD)
-    printf("exit", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
+    printf("'exit'", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
     printf("'help'", Sty.MAGENTA, " - Help.", Sty.DEFAULT)
     printf("'clear'", Sty.MAGENTA, " - Clear terminal screen.", Sty.DEFAULT)
     printf("'printa'", Sty.MAGENTA, " - Print all accounts", Sty.DEFAULT)
@@ -276,5 +276,9 @@ def server_input(inpu:str) -> bool:
         
 welcome()
 
-while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
-    pass
+def main():
+    while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
+        pass
+
+if __name__ == '__main__':
+    main()

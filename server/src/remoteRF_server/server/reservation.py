@@ -7,14 +7,14 @@ from pathlib import Path
 from functools import wraps
 
 from ..common.utils import *
-from .device_manager import get_all_devices, set_device
+from .device_manager import get_all_devices, set_device, get_all_devices_str
 from .acc_perms import perms, userperms
 
 allow_connections = True
 
 class ReservationHandler:
     def __init__(self):
-        self.filepath = Path(__file__).resolve().parent/'db'/'reservations.db'
+        self.filepath = Path(__file__).resolve().parent.parent/'db'/'reservations.db'
         self.db = sqlite3.connect(self.filepath)
         self.cursor = self.db.cursor()
 
@@ -274,7 +274,7 @@ class ReservationHandler:
         return result
     
     def grab_all_devices(self, username:str):
-        devices = get_all_devices()
+        devices = get_all_devices_str()
         perm = perms.get_perms(username)[0]
         if perm[0] == 'Admin':
             return {str(k): map_arg(str(v)) for k, v in devices.items()}
