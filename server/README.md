@@ -83,6 +83,8 @@ To add more devices, simply duplicate the item and increment the device id. You 
 ```
 Under `devices` there is also `device_info`. Update this accordingly. This is what is displayed when users request to see what devices there are.
 
+Remember to update default permissions and the like! Otherwise users won't be able to add the new devices.
+
 ### Permission parameters:
 
 In the repo, navigate to `src/remoteRF_server/server/acc_perms.py`. You should see:
