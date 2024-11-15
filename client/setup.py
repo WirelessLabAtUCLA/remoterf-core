@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="remoteRF",
-    version="0.0.6.1",
+    version="0.0.6.2",
     author="Ethan Ge",
     author_email="84103791+ethange1@users.noreply.github.com",
     description="A python API to remotely access signal centric hardware. Client-side only!",
