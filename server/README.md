@@ -40,3 +40,19 @@ I had a variety of issues setting up the server. Here is a list of steps to take
 - **Local Firewall**: Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server.
 
 - **ISP Firewall**: If doing this on UCLA Campus, they block and manage much of the traffic. You will need to submit a [Firewall Access Form](https://www.seasnet.ucla.edu/firewall-access-request/).
+
+#### Personal Procedure
+
+If RRRFserver is not recognized,
+
+- cd to proj. repo from global terminal
+- pip install -e .
+- if modules not found
+- cd ~/pyadi-iio
+- sudo pip install .
+- Rebuild iio if needed.
+- cd ~/libiio
+- rm -rf build
+- mkdir build
+- cd build
+- cmake -DPYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3) ..

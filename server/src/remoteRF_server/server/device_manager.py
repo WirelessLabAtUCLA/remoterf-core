@@ -47,6 +47,8 @@ devices = { # device, salt, hash
     # ^ find usb serial ports
     0: (connect_pluto(usb='1.6.5'),'',''),
     # 1: (connect_pluto(usb='1.8.5'),'',''),
+    # 2: (connect_pluto(usb='1.10.5'),'',''),
+    # 1: (connect_pluto(usb='1.8.5'),'',''),
     
     # hackrf
     # 10: (connect_hackrf(0),'',''),
@@ -58,6 +60,7 @@ devices = { # device, salt, hash
 devices_info = {    # device, info
     0: "PlutoSDR",
     1: "PlutoSDR",
+    2: "PlutoSDR",
 }
 
 def get_device(device_id):
