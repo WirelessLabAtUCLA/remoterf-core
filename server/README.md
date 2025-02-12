@@ -98,7 +98,11 @@ In the repo, navigate to `src/remoteRF_server/server/acc_perms.py`. You should s
 ```
 Here, you can set the default user perms. This default is given to all 'normal users', and is also the permission level when users first make their accounts. For the other two tiers of users, they are configured on run time when the server is running. The server saves all run time changes so no data hypothetically can be lost.
 
-## Run Time
+### Transmitter:
+I implemented this as requested by Ian, and its function is have a script run only when a reservation is active on any device. It is not on github at the moment as there were ssh key issues and I was too lazy to do so ... I will update the github whenever I get to it. (located in reservation.py and device_manager.py).
+The transmitter script is in the root of the proj. repo (/transmitter.py)
+
+## Time to Serve!
 
 Once your basic config is setup, you can begin testing the basics of the server! 
 
@@ -129,10 +133,35 @@ I would suggest first trying to connect locally (on the same machine), and then 
 ## Troubleshooting
 I had a variety of issues setting up the server. Here is a list of steps to take if the server refuses to connect:
 
-- **Server Certificates**: Confirm that the server certs were generated with the right IPs, and that the existing server certs weren't expired. If you are not sure how to check them, just regenerate them. Remember that if you do regenerate you will need to give the client a exact copy of those certs as well.
+### Server Certificates:
+Confirm that the server certs were generated with the right IPs, and that the existing server certs weren't expired. If you are not sure how to check them, just regenerate them. Remember that if you do regenerate you will need to give the client a exact copy of those certs as well.
 
-- **Local Firewall**: Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server.
+### Local Firewall: 
+Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server.
 
-- **Port Forwarding**: If you are using this on a private network, you will need to configure port forwarding on your router in order for external networks to access the server.
+### Port Forwarding
+If you are using this on a private network, you will need to configure port forwarding on your router in order for external networks to access the server.
 
-- **ISP Firewall**: Some ISPs may not have static IPs. You will need to contact them regarding it. If doing this on UCLA Campus, they block and manage much of the traffic. You will need to submit a [Firewall Access Form](https://www.seasnet.ucla.edu/firewall-access-request/).
+### ISP Firewall:
+Some ISPs may not have static IPs. You will need to contact them regarding it. If doing this on UCLA Campus, they block and manage much of the traffic. You will need to submit a [Firewall Access Form](https://www.seasnet.ucla.edu/firewall-access-request/).
+
+### Linux Issues: 
+Getting the python packages to link properly, especially the ones not on pypi, is somewhat non-trivial. I'll provide what I did in order to get it to work. 
+
+The server generally much easier to run on a global env due to Pluto's weird drivers.
+
+If RRRFserver is not recognized globally:
+* cd to proj. repo from global terminal
+* pip install -e .
+* RRRFserver
+
+If modules not found:
+* cd ~/pyadio-iio
+* sudo pip install .
+
+Rebuild iio if iio is also not found:
+* cd ~/libiio
+* rm -rf build
+* mkdir build
+* cd build
+* cmake -DPYTHON_BINDINGS=ON -DPYTHON_EXECUTABLE=$(which python3) ..
