@@ -2,6 +2,10 @@ import adi
 # import uhd
 # from hackrf import *
 from ..common.utils import *
+import subprocess
+
+import time
+import gc
 
 #* Device manager *
 '''
@@ -24,6 +28,28 @@ def connect_pluto(*, ip='', usb=''):
         print(f"Pluto {ip}: {e}")
         return None
 
+import subprocess
+import re
+
+def get_usb_port_from_serial(serial):
+    try:
+        # Run iio_info -s and get the output
+        output = subprocess.check_output(["iio_info", "-s"]).decode("utf-8")
+    except Exception as e:
+        print(f"Error running iio_info: {e}")
+        return None
+
+    # Regex to find the USB port associated with the given serial number
+    pattern = re.compile(rf"\d+:.*serial={serial}\s+\[usb:(\S+)\]")
+
+    for line in output.splitlines():
+        match = pattern.search(line)
+        if match:
+            return match.group(1)  # Return the USB port
+
+    print(f"No device found with serial {serial}")
+    return None
+
 # def connect_hackrf(device_index):
 #     try:
 #         device = HackRF(device_index=device_index)
@@ -41,13 +67,22 @@ def connect_pluto(*, ip='', usb=''):
 class temp:
     pass
 
+device_serialization = {
+    0: '10447392da11001009001500f02af8a678',
+    1: '10447392da110010f9ff1500612ff8ecb0'
+}
+
 devices = { # device, salt, hash
     
     # iio_info -s
     # ^ find usb serial ports
-    0: (connect_pluto(usb='1.6.5'),'',''),
-    # 1: (connect_pluto(usb='1.8.5'),'',''),
-    # 2: (connect_pluto(usb='1.10.5'),'',''),
+    
+    0: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[0])),'',''),
+    1: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[1])),'',''),
+    
+    # 0: (connect_pluto(usb='1.8.5'),'',''),
+    # 1: (connect_pluto(usb='1.18.5'),'',''),
+    # 2: (connect_pluto(usb='1.8.5'),'',''),
     # 1: (connect_pluto(usb='1.8.5'),'',''),
     
     # hackrf
@@ -60,8 +95,23 @@ devices = { # device, salt, hash
 devices_info = {    # device, info
     0: "PlutoSDR",
     1: "PlutoSDR",
-    2: "PlutoSDR",
+    # 2: "PlutoSDR",
 }
+
+transmitter = subprocess.Popen(['python3', 'transmitter.py'])
+transmitter.terminate()
+
+def start_transmitter():
+    global transmitter
+    transmitter = subprocess.Popen(['python3', 'transmitter.py'])
+    
+def terminate_transmitter():
+    global transmitter
+    transmitter.terminate()
+    
+def get_transmitter_state():
+    global transmitter
+    return transmitter.poll() == None
 
 def get_device(device_id):
     return devices[device_id]

@@ -47,7 +47,13 @@ class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
 
 # Function to start the server
 def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    
+    options = [
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024)
+    ]
+    
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
     
     # For generating server credentials for secure connections

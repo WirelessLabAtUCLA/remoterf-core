@@ -7,7 +7,7 @@ from pathlib import Path
 from functools import wraps
 
 from ..common.utils import *
-from .device_manager import get_all_devices, set_device, get_all_devices_str
+from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
 from .acc_perms import perms, userperms
 
 allow_connections = True
@@ -326,10 +326,21 @@ class ReservationHandler:
             
         self.cursor.execute('SELECT * FROM Reservations')
         reservations = self.cursor.fetchall()
-        for reservation in reservations:
+        
+        reservations_now = 0
+        
+        for reservation in reservations:    # Update tokens for each device
             if datetime.strptime(reservation[3], '%Y-%m-%d %H:%M:%S') <= datetime.now() and datetime.strptime(reservation[4], '%Y-%m-%d %H:%M:%S') > datetime.now():
                 del devices[reservation[2]]
                 set_device(reservation[2], reservation[5], reservation[6])
+                
+                if not get_transmitter_state(): # Turn transmitter on
+                    start_transmitter()
+                    
+                reservations_now += 1
+                
+        if reservations_now == 0: # Turn transmitter off if no resservations
+            terminate_transmitter()
                 
         for device in devices:
             set_device(device, '', '')
