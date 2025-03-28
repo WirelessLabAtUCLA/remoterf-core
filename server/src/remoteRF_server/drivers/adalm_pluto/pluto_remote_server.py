@@ -8,7 +8,7 @@ class PlutoServer: # server
     @staticmethod
     def handle_call(*, function_name, args):
         try:
-            print(f'fn {function_name}')
+            # print(f'fn {function_name}')
             
             function_name_args = function_name.split(':')
             function_name = function_name_args[1]
@@ -24,7 +24,7 @@ class PlutoServer: # server
                 # One function to handle both zero-arg and one-arg calls
                 # print(f'CALL: {function_name}, ARGS: {args}')
                 
-                print(f'CALL: {function_name}, ARGS: {args}')
+                # print(f'CALL: {function_name}, ARGS: {args}')
                 
                 return PlutoServer.call_func(
                     function_name=function_name,
@@ -60,7 +60,7 @@ class PlutoServer: # server
         
         # print(f"[DEBUG] call_func: calling {function_name} on {device} with type={function_type}")
         
-        print(f"raw values: {args['arg1']}")
+        # print(f"raw values: {args['arg1']}")
         
         if function_type == "CALL0":
             # Zero-argument function call
@@ -73,8 +73,8 @@ class PlutoServer: # server
             # if PlutoServer.DEBUG:
             #     print(f"[DEBUG] call_func: unmap_arg(args['arg1']) => {python_arg}")
             # print(f"Pluto.{method} \n unmapped arg: {python_arg}")
-            print(f"unmapped values: {python_arg}")
-            print(f"{function_name} is called on {device}")
+            # print(f"unmapped values: {python_arg}")
+            # print(f"{function_name} is called on {device}")
             result = method(python_arg)
         else:
             raise ValueError(f"Unsupported call type: {function_type} (arg length not supported)")
