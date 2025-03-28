@@ -375,37 +375,59 @@ def _save_logs (logs):
 # Store a reference to the original handle_call so we can wrap it
 ReservationHandler._original_handle_call = ReservationHandler.handle_call
 
-def handle_call_wrapper (self, *, function_name, args):
+def sanitize_for_logging(obj):
+    """
+    Recursively converts non-primitive objects into a string
+    representation, so that the object becomes pickleable.
+    """
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, dict):
+        return {sanitize_for_logging(key): sanitize_for_logging(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_logging(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(sanitize_for_logging(item) for item in obj)
+    else:
+        return repr(obj)
+
+# Store a reference to the original handle_call so we can wrap it
+ReservationHandler._original_handle_call = ReservationHandler.handle_call
+
+def handle_call_wrapper(self, *, function_name, args):
     """
     Wrapper around the original handle_call.
     Ensures thread-safe logging to .npy by acquiring a global lock
-    before loading/writing logs.
+    and sanitizes the args/result for pickling.
     """
     with log_lock:
-        # 1) Load logs (thread-safe)
+        # Load logs (thread-safe)
         activity_log = _load_logs()
 
-        # 2) Make a sanitized copy of args (to hide passwords in the logs)
-        sanitized_args = dict(args)
+        # Make a sanitized copy of args (to hide passwords and non-pickleable objects)
+        sanitized_args = sanitize_for_logging(dict(args))
         if 'pw' in sanitized_args:
             sanitized_args['pw'] = '*'
 
-        # 3) Call the original handle_call
+        # Call the original handle_call
         result = self._original_handle_call(function_name=function_name, args=args)
 
-        # 4) Append a new entry to our logs
-        username = unmap_arg(args['un']) if 'un' in args else 'N/A'
+        # Sanitize the result
+        sanitized_result = sanitize_for_logging(result)
+
+        # Append a new entry to our logs
+        username = sanitize_for_logging(unmap_arg(args['un'])) if 'un' in args else 'N/A'
         activity_log.append({
             "timestamp": datetime.now().isoformat(),
             "action": function_name,
             "username": username,
             "details": {
                 "args": sanitized_args,
-                "result": result
+                "result": sanitized_result
             }
         })
 
-        # 5) Save logs back to .npy (thread-safe)
+        # Save logs back to .npy (thread-safe)
         _save_logs(activity_log)
 
     return result
