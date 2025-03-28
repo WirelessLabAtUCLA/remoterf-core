@@ -12,6 +12,8 @@ class RpcManager:
             
         function_name_args = function_name.split(':')
         
+        # print(f"RPC: {function_name}, ARGS: {args}")
+        
         # try:
         if function_name_args[0] == "Pluto":
             if 'a' in args:

@@ -69,7 +69,10 @@ class temp:
 
 device_serialization = {
     0: '10447392da11001009001500f02af8a678',
-    1: '10447392da110010f9ff1500612ff8ecb0'
+    1: '10447392da110010f9ff1500612ff8ecb0',
+    2: '104473b04a06000ffbff3900f5de83267e',
+    3: '10447376de0b00130b00200023119a89c6',
+    4: '1044732a98110002faff1500f92ae517bf'
 }
 
 devices = { # device, salt, hash
@@ -79,6 +82,9 @@ devices = { # device, salt, hash
     
     0: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[0])),'',''),
     1: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[1])),'',''),
+    2: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[2])),'',''),
+    3: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[3])),'',''),
+    4: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[4])),'',''),
     
     # 0: (connect_pluto(usb='1.8.5'),'',''),
     # 1: (connect_pluto(usb='1.18.5'),'',''),
@@ -93,9 +99,11 @@ devices = { # device, salt, hash
 }
 
 devices_info = {    # device, info
-    0: "PlutoSDR",
-    1: "PlutoSDR",
-    # 2: "PlutoSDR",
+    0: "Pluto SDR (loopback)",
+    1: "Pluto SDR (loopback)",
+    2: "Pluto SDR (OTA)",
+    3: "Pluto SDR (OTA)",
+    4: "Pluto SDR (OTA)"
 }
 
 transmitter = subprocess.Popen(['python3', 'transmitter.py'])

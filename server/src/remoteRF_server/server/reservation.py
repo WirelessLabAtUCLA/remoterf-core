@@ -334,15 +334,17 @@ class ReservationHandler:
                 del devices[reservation[2]]
                 set_device(reservation[2], reservation[5], reservation[6])
                 
-                if not get_transmitter_state(): # Turn transmitter on
-                    start_transmitter()
+                # if not get_transmitter_state(): # Turn transmitter on
+                #     start_transmitter()
                     
                 reservations_now += 1
                 
         if reservations_now == 0: # Turn transmitter off if no resservations
-            terminate_transmitter()
+            # terminate_transmitter()
+            pass
                 
         for device in devices:
             set_device(device, '', '')
         
+start_transmitter()
 reservation_handler = ReservationHandler()
