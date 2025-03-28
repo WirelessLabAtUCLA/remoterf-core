@@ -359,7 +359,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Path to your activity logs file
-LOG_PATH = Path(__file__).resolve().parent.parent / 'server' / 'db' / 'activity_logs.npy'
+LOG_PATH = Path(__file__).resolve().parent.parent / 'db' / 'activity_logs.npy'
 
 # A global lock to ensure thread-safe access to the log file
 log_lock = threading.Lock()
