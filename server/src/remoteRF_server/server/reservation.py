@@ -348,3 +348,69 @@ class ReservationHandler:
         
 start_transmitter()
 reservation_handler = ReservationHandler()
+
+
+
+# region Logging purposes
+
+import numpy as np
+import threading
+from datetime import datetime
+from pathlib import Path
+
+# Path to your activity logs file
+LOG_PATH = Path(__file__).resolve().parent.parent / 'server' / 'db' / 'activity_logs.npy'
+
+# A global lock to ensure thread-safe access to the log file
+log_lock = threading.Lock()
+
+def _load_logs ():
+    if LOG_PATH.exists():
+        return np.load(LOG_PATH, allow_pickle=True).tolist()
+    return []
+
+def _save_logs (logs):
+    np.save(LOG_PATH, logs, allow_pickle=True)
+
+# Store a reference to the original handle_call so we can wrap it
+ReservationHandler._original_handle_call = ReservationHandler.handle_call
+
+def handle_call_wrapper (self, *, function_name, args):
+    """
+    Wrapper around the original handle_call.
+    Ensures thread-safe logging to .npy by acquiring a global lock
+    before loading/writing logs.
+    """
+    with log_lock:
+        # 1) Load logs (thread-safe)
+        activity_log = _load_logs()
+
+        # 2) Make a sanitized copy of args (to hide passwords in the logs)
+        sanitized_args = dict(args)
+        if 'pw' in sanitized_args:
+            sanitized_args['pw'] = '*'
+
+        # 3) Call the original handle_call
+        result = self._original_handle_call(function_name=function_name, args=args)
+
+        # 4) Append a new entry to our logs
+        username = unmap_arg(args['un']) if 'un' in args else 'N/A'
+        activity_log.append({
+            "timestamp": datetime.now().isoformat(),
+            "action": function_name,
+            "username": username,
+            "details": {
+                "args": sanitized_args,
+                "result": result
+            }
+        })
+
+        # 5) Save logs back to .npy (thread-safe)
+        _save_logs(activity_log)
+
+    return result
+
+# Replace the original handle_call with our wrapper
+ReservationHandler.handle_call = handle_call_wrapper
+
+# endregion
