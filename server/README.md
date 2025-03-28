@@ -98,9 +98,18 @@ In the repo, navigate to `src/remoteRF_server/server/acc_perms.py`. You should s
 ```
 Here, you can set the default user perms. This default is given to all 'normal users', and is also the permission level when users first make their accounts. For the other two tiers of users, they are configured on run time when the server is running. The server saves all run time changes so no data hypothetically can be lost.
 
-### Transmitter:
-I implemented this as requested by Ian, and its function is have a script run only when a reservation is active on any device. It is not on github at the moment as there were ssh key issues and I was too lazy to do so ... I will update the github whenever I get to it. (located in reservation.py and device_manager.py).
-The transmitter script is in the root of the proj. repo (/transmitter.py)
+### .Proto regen:
+Only needed if, well, you need to update the base networking.
+```bash
+pip install --upgrade grpcio grpcio-tools protobuf
+
+cd src/remoteRF_server/common/grpc
+python -m grpc_tools.protoc \
+      -I=. \
+      --python_out=. \
+      --grpc_python_out=. \
+      grpc/grpc.proto
+```
 
 ## Time to Serve!
 
