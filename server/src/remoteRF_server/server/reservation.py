@@ -300,6 +300,14 @@ class ReservationHandler:
         else:
             print("No reservations found.")
             
+    @db_connection
+    def get_all_accounts(self):
+        cursor = self.db.cursor()
+        cursor.execute("SELECT * FROM Accounts")
+        accounts = cursor.fetchall()
+        cursor.close()
+        return accounts
+            
     @db_connection    
     def print_all_accounts(self):
         print("Printing all accounts...")

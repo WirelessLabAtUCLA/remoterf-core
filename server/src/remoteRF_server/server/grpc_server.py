@@ -288,3 +288,96 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
+# region Remote Admin Calls
+    
+from typing import List, Optional
+
+def remove_all_users_remote() -> str:
+    """
+    Removes all user accounts from the system and returns a message about the operation.
+    """
+    reservation_handler.remove_all_users()
+    return "All user accounts have been removed successfully."
+
+
+def remove_user_remote(username: str) -> str:
+    """
+    Removes a single user account from the system and returns a message about the operation.
+    """
+    reservation_handler.remove_user(username=username)
+    return f"User '{username}' has been removed successfully."
+
+
+def remove_all_reservations_remote() -> str:
+    """
+    Removes all reservations from the system and returns a message about the operation.
+    """
+    reservation_handler.remove_all_reservations()
+    return "All reservations have been removed successfully."
+
+
+def set_account_remote(
+    username: str,
+    permission: str,
+    device_list: Optional[List[int]] = None,
+    max_reservations: Optional[int] = None,
+    max_reservation_time_sec: Optional[int] = None
+) -> str:
+    """
+    Sets user permission. Valid permission strings: 
+    'U' (User), 'P' (PowerUser), 'A' (Admin).
+    For 'P' (PowerUser), device_list, max_reservations, and max_reservation_time_sec
+    must be provided.
+
+    Returns a string describing the outcome of setting the account.
+    """
+    messages = []
+
+    current_perm = perms.get_perms(username)
+    if not current_perm:
+        messages.append(f"User '{username}' does not exist. Creating a new entry.")
+
+    if permission == 'U':
+        perms.set_user(username)
+        messages.append(f"User '{username}' set to User level.")
+    elif permission == 'P':
+        if device_list is None or max_reservations is None or max_reservation_time_sec is None:
+            raise ValueError("For PowerUser, device_list, max_reservations, and "
+                             "max_reservation_time_sec must all be provided.")
+        perms.set_poweruser(
+            username,
+            devices_allowed=device_list,
+            max_reservations=max_reservations,
+            max_reservation_time_sec=max_reservation_time_sec
+        )
+        messages.append(f"User '{username}' set to PowerUser level with devices: "
+                        f"{device_list}, max_reservations: {max_reservations}, "
+                        f"max_reservation_time_sec: {max_reservation_time_sec}")
+    elif permission == 'A':
+        perms.set_admin(username)
+        messages.append(f"User '{username}' set to Admin level.")
+    else:
+        messages.append("Invalid permission input. Use 'U', 'P', or 'A'.")
+
+    return "\n".join(messages)
+
+
+def print_all_accounts_remote() -> str:
+    """
+    Returns information about all user accounts (instead of printing it).
+    """
+    # If reservation_handler.print_all_accounts() normally prints directly,
+    # you'll need a way to retrieve that same data. For example, if there's
+    # a hypothetical function get_all_accounts() returning a list/dict of user info:
+    accounts = reservation_handler.get_all_accounts()  # or any equivalent method
+    if not accounts:
+        return "No user accounts found."
+
+    # Build a multiline string describing each account
+    result_lines = ["All user accounts:"]
+    for acc in accounts:
+        # Customize formatting as desired; for example:
+        result_lines.append(str(acc))
+
+    return "\n".join(result_lines)
