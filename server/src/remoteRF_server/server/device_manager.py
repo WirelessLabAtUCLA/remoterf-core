@@ -106,6 +106,8 @@ devices_info = {    # device, info
     4: "Pluto SDR (OTA)"
 }
 
+master_token = '***REMOVED***123'
+
 transmitter = subprocess.Popen(['python3', 'transmitter.py'])
 transmitter.terminate()
 
@@ -131,6 +133,17 @@ def get_all_devices_str() -> dict:
     return devices_info
 
 def get_device(*, api_token):
+    
+    # Check for master token
+    
+    if api_token == master_token:
+        # Check for the first empty device
+        for key, value in devices.items():
+            if value[1] == '' and value[2] == '':
+                return value[0]
+            
+        return None
+    
     for key, value in devices.items():
         if validate_token(value[1], value[2], api_token):
             return value[0]
