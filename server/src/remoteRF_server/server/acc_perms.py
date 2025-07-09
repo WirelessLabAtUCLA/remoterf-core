@@ -13,7 +13,7 @@ class userperms:
     def __init__(self): # default user perms settings
         self.id = 'user'
         self.max_reservations = 3
-        self.max_reservation_time_sec = 60 * 60 / 2 # 30 min
+        self.max_reservation_time_sec = 60 * 60  # 60 min
         self.devices_allowed = [0, 1, 2, 3, 4] # ex: only pluto
         
         # can only cancel personal reservations, and can only view reservations on the devices they have access to
