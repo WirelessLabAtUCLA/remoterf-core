@@ -12,8 +12,8 @@ from .device_manager import get_all_devices
 class userperms:
     def __init__(self): # default user perms settings
         self.id = 'user'
-        self.max_reservations = 3
-        self.max_reservation_time_sec = 60 * 60  # 60 min
+        self.max_reservations = 30
+        self.max_reservation_time_sec = 2_500_000  # about a month
         self.devices_allowed = [0, 1, 2, 3, 4] # ex: only pluto
         
         # can only cancel personal reservations, and can only view reservations on the devices they have access to
