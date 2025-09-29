@@ -80,9 +80,9 @@ devices = { # device, salt, hash
     # iio_info -s
     # ^ find usb serial ports
     
-    0: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[0])),'',''),
-    1: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[1])),'',''),
-    2: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[2])),'',''),
+    # 0: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[0])),'',''),
+    # 1: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[1])),'',''),
+    # 2: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[2])),'',''),
     3: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[3])),'',''),
     4: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[4])),'',''),
     
@@ -99,9 +99,9 @@ devices = { # device, salt, hash
 }
 
 devices_info = {    # device, info
-    0: "Pluto SDR (loopback)",
-    1: "Pluto SDR (loopback)",
-    2: "Pluto SDR (OTA)",
+    # 0: "Pluto SDR (loopback)",
+    # 1: "Pluto SDR (loopback)",
+    # 2: "Pluto SDR (OTA)",
     3: "Pluto SDR (OTA)",
     4: "Pluto SDR (OTA)"
 }
