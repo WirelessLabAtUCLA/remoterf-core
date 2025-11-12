@@ -70,19 +70,26 @@ class temp:
 device_serialization = {
     0: '10447392da11001009001500f02af8a678',
     1: '10447392da110010f9ff1500612ff8ecb0',
-    2: '104473b04a06000ffbff3900f5de83267e',
+    # 2: '104473b04a06000ffbff3900f5de83267e', # GONE?
+    2: '10447318ac0f0003050036008365171a2d',
     3: '10447376de0b00130b00200023119a89c6',
-    4: '1044732a98110002faff1500f92ae517bf'
+    4: '1044732a98110002faff1500f92ae517bf',
+    
+    5: '10447318ac0f001915003200073317bbca',
+    6: '104473e6a60f00020d003900e21716bf22',
+    7: '104473e6a60f000cf3ff17000b3917d48f'
 }
+
+# print("New Version")
 
 devices = { # device, salt, hash
     
     # iio_info -s
     # ^ find usb serial ports
     
-    # 0: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[0])),'',''),
-    # 1: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[1])),'',''),
-    # 2: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[2])),'',''),
+    0: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[0])),'',''),
+    1: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[1])),'',''),
+    2: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[2])),'',''),
     3: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[3])),'',''),
     4: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[4])),'',''),
     
@@ -99,9 +106,9 @@ devices = { # device, salt, hash
 }
 
 devices_info = {    # device, info
-    # 0: "Pluto SDR (loopback)",
-    # 1: "Pluto SDR (loopback)",
-    # 2: "Pluto SDR (OTA)",
+    0: "Pluto SDR (loopback)",
+    1: "Pluto SDR (loopback)",
+    2: "Pluto SDR (OTA)",
     3: "Pluto SDR (OTA)",
     4: "Pluto SDR (OTA)"
 }

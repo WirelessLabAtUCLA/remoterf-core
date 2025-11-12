@@ -284,6 +284,7 @@ welcome()
 
 def main():
     while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
+        # print("New")
         pass
 
 if __name__ == '__main__':

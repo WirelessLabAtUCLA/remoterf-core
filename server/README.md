@@ -122,8 +122,8 @@ Once your basic config is setup, you can begin testing the basics of the server!
 Given my weird setup, this is what I did to make it work:
 New Terminal
 cd Documents/GitHub/RemoteRF-Server
-pip install -e . (don't use pip3)
-RRRFserver
+sudo pip install -e . (don't use pip3)
+sudo RRRFserver
 
 IF the changes you make don't seem to apply ...
 which RRRFserver
