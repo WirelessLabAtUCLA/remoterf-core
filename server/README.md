@@ -119,6 +119,26 @@ Once your basic config is setup, you can begin testing the basics of the server!
     RRRFserver  # Start the server
 ```
 
+Given my weird setup, this is what I did to make it work:
+New Terminal
+cd Documents/GitHub/RemoteRF-Server
+pip install -e . (don't use pip3)
+RRRFserver
+
+IF the changes you make don't seem to apply ...
+which RRRFserver
+What worked for me (if u accidently use pip3)
+sudo python3 -m pip uninstall RemoteRF-Server (destroy pip3)
+
+Bruh ....
+
+python3 -m pip uninstall -y remoteRF_server RRRFserver || true
+rm -f ~/.local/bin/RRRFserver
+hash -r
+
+python3 -m pip install -e . --user --force-reinstall
+hash -r
+
 Type `help` to see the list of commands. They are pretty self explanatory. Run them and try it out! You can use arrow keys to cycle commands.
 
 ```bash
