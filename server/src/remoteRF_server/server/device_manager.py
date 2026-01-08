@@ -77,7 +77,8 @@ device_serialization = {
     
     5: '10447318ac0f001915003200073317bbca',
     6: '104473e6a60f00020d003900e21716bf22',
-    7: '104473e6a60f000cf3ff17000b3917d48f'
+    7: '104473e6a60f000cf3ff17000b3917d48f',
+    8: '10447318ac0f0016faff2500998717eacf',
 }
 
 # print("New Version")
@@ -93,6 +94,12 @@ devices = { # device, salt, hash
     3: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[3])),'',''),
     4: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[4])),'',''),
     
+    
+    5: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[5])),'',''),
+    6: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[6])),'',''),
+    7: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[7])),'',''),
+    8: (connect_pluto(usb=get_usb_port_from_serial(device_serialization[8])),'',''),
+    
     # 0: (connect_pluto(usb='1.8.5'),'',''),
     # 1: (connect_pluto(usb='1.18.5'),'',''),
     # 2: (connect_pluto(usb='1.8.5'),'',''),
@@ -106,11 +113,15 @@ devices = { # device, salt, hash
 }
 
 devices_info = {    # device, info
-    0: "Pluto SDR (loopback)",
-    1: "Pluto SDR (loopback)",
-    2: "Pluto SDR (OTA)",
-    3: "Pluto SDR (OTA)",
-    4: "Pluto SDR (OTA)"
+    0: "Pluto SDR (Loopback)",
+    1: "Pluto SDR (Loopback)",
+    2: "Pluto SDR (OTA + BPF)",
+    3: "Pluto SDR (OTA + BPF)",
+    4: "Pluto SDR (OTA + BPF)",
+    5: "Pluto SDR (OTA)",
+    6: "Pluto SDR (OTA)",
+    7: "Pluto SDR (OTA)",
+    8: "Pluto SDR (OTA)",
 }
 
 master_token = '***REMOVED***123'
@@ -142,6 +153,8 @@ def get_all_devices_str() -> dict:
 def get_device(*, api_token):
     
     # Check for master token
+    
+    # todo: per device master token
     
     if api_token == master_token:
         # Check for the first empty device
