@@ -63,9 +63,6 @@ def get_usb_port_from_serial(serial):
 #     usrp = uhd.usrp.MultiUSRP()
 #     print(f"Connected to USRP 2901")
 #     return usrp
-    
-class temp:
-    pass
 
 device_serialization = {
     0: '10447392da11001009001500f02af8a678',
@@ -80,6 +77,8 @@ device_serialization = {
     7: '104473e6a60f000cf3ff17000b3917d48f',
     8: '10447318ac0f0016faff2500998717eacf',
 }
+
+master_token = '***REMOVED***'
 
 # print("New Version")
 
@@ -124,8 +123,6 @@ devices_info = {    # device, info
     8: "Pluto SDR (OTA)",
 }
 
-master_token = '***REMOVED***123'
-
 transmitter = subprocess.Popen(['python3', 'transmitter.py'])
 transmitter.terminate()
 
@@ -150,11 +147,44 @@ def get_all_devices() -> dict:
 def get_all_devices_str() -> dict:
     return devices_info
 
+def parse_mastertoken(token: str):
+    """
+    Matches:
+      {master_token}_0
+      {master_token}-1
+      {master_token}_0_force
+
+    Returns (device_id:int, force:bool) or None.
+    """
+    if not token:
+        return None
+
+    prefix = re.escape(master_token)
+    pattern = re.compile(rf"^{prefix}[_-](\d+)(?:_force)?$")
+
+    m = pattern.match(token)
+    if not m:
+        return None
+
+    device_id = int(m.group(1))
+    force = token.endswith("_force")
+    return (device_id, force)
+def device_exists(device_id: int) -> bool:
+    if device_id not in devices:
+        return False
+    dev, _, _ = devices[device_id]
+    return dev is not None
+
+def device_is_available(device_id: int) -> bool:
+    if device_id not in devices:
+        return False
+    dev, salt, hsh = devices[device_id]
+    return (dev is not None) and (salt == '') and (hsh == '')
+
+def get_device_by_id(device_id: int):
+    return devices[device_id]
+
 def get_device(*, api_token):
-    
-    # Check for master token
-    
-    # todo: per device master token
     
     if api_token == master_token:
         # Check for the first empty device
@@ -164,6 +194,24 @@ def get_device(*, api_token):
             
         return None
     
+    parsed = parse_mastertoken(api_token) # Special args for specific devices
+    if parsed:
+        device_id, force = parsed
+
+        if not device_exists(device_id):
+            return None
+
+        if force:
+            # Force access if the device exists (ignores reservation state)
+            return devices[device_id][0]
+
+        # Non-force: only if device exists AND is not reserved
+        if device_is_available(device_id):
+            return devices[device_id][0]
+
+        return None
+    
+    # Regular Behavior
     for key, value in devices.items():
         if validate_token(value[1], value[2], api_token):
             return value[0]
