@@ -55,7 +55,7 @@ def serve():
     
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
-    
+
     # For generating server credentials for secure connections
     
     # Rasp
@@ -77,7 +77,6 @@ def serve():
     # Read key and certificate
     
     cert_key = Path(__file__).resolve().parent.parent/'certs'/'server.key'
-    
     cert_crt = Path(__file__).resolve().parent.parent/'certs'/'server.crt'
     
     with cert_key.open('rb') as f:
@@ -88,6 +87,9 @@ def serve():
     # Create server credentials
     server_credentials = grpc.ssl_server_credentials(
         ((private_key, certificate_chain,),))
+    
+    from .cert_provider import start_cert_provider
+    cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(os.getenv("CERT_PORT", "61006")))
 
     # Add secure port
     server.add_secure_port(f'{local_ip}:{local_port}', server_credentials)
