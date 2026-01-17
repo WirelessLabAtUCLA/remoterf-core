@@ -123,16 +123,18 @@ devices_info = {    # device, info
     8: "Pluto SDR (OTA)",
 }
 
-transmitter = subprocess.Popen(['python3', 'transmitter.py'])
-transmitter.terminate()
+# transmitter = subprocess.Popen(['python3', 'transmitter.py'])
+# transmitter.terminate()
 
 def start_transmitter():
-    global transmitter
-    transmitter = subprocess.Popen(['python3', 'transmitter.py'])
+    pass
+    # global transmitter
+    # transmitter = subprocess.Popen(['python3', 'transmitter.py'])
     
 def terminate_transmitter():
-    global transmitter
-    transmitter.terminate()
+    pass
+    # global transmitter
+    # transmitter.terminate()
     
 def get_transmitter_state():
     global transmitter
