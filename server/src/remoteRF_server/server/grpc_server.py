@@ -14,6 +14,9 @@ from datetime import datetime
 
 import grpc
 
+import traceback
+import contextlib
+
 from ..common.grpc import *
 from .reservation import reservation_handler
 from .rpc_manager import rpc_manager
@@ -42,8 +45,26 @@ print(f"Local Port: {local_port}")
 # Implement the GenericRPC service
 class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
     def Call(self, request, context):
+        
+        # Remote Admin
+        function_name_args = request.function_name.split(':')
+        if function_name_args[0] == "RemoteAdmin":
+            ok, err, caller = verify_remote_admin(request.args)
+            if not ok:
+                # You can also: context.abort(grpc.StatusCode.PERMISSION_DENIED, err)
+                return grpc_pb2.GenericRPCResponse(results={
+                    "Ok": map_arg(False),
+                    "Error": map_arg(err),
+                })
+
+            return grpc_pb2.GenericRPCResponse(
+                results=remote_admin_call(function_name=function_name_args[1], args=request.args)
+            )
+            
+        # Normal RPC
         response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
         return grpc_pb2.GenericRPCResponse(results=response)
+    
 
 # Function to start the server
 def serve():
@@ -292,7 +313,7 @@ def main():
 if __name__ == '__main__':
     main()
     
-# region Remote Admin Calls
+# region Remote Admin
     
 from typing import List, Optional
 
@@ -318,7 +339,6 @@ def remove_all_reservations_remote() -> str:
     """
     reservation_handler.remove_all_reservations()
     return "All reservations have been removed successfully."
-
 
 def set_account_remote(
     username: str,
@@ -365,22 +385,292 @@ def set_account_remote(
 
     return "\n".join(messages)
 
+import io
+import contextlib
+
+def print_all_reservations_remote() -> str:
+    """
+    Returns information about all reservations (instead of printing it).
+
+    Tries (in order):
+      1) reservation_handler.grab_all_reservations_server() if available
+      2) capture stdout from reservation_handler.print_all_reservations()
+    """
+    # Preferred path: structured data
+    if hasattr(reservation_handler, "grab_all_reservations_server"):
+        reservations = reservation_handler.grab_all_reservations_server()
+        if not reservations:
+            return "No reservations found."
+
+        lines = ["All reservations:"]
+        # reservations: {res_id(int): (username, device_id, start_time, end_time)}
+        for res_id in sorted(reservations.keys()):
+            res = reservations[res_id]
+            try:
+                username, device_id, start_time, end_time = res
+            except Exception:
+                # fallback if structure differs
+                lines.append(f"ID: {res_id} -> {res}")
+                continue
+            lines.append(
+                f"ID: {res_id}, User: {username}, Device: {device_id}, Start: {start_time}, End: {end_time}"
+            )
+        return "\n".join(lines)
+
+    # Fallback: capture whatever the existing print function emits
+    if hasattr(reservation_handler, "print_all_reservations"):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            reservation_handler.print_all_reservations()
+        out = buf.getvalue().strip()
+        return out if out else "No reservations found."
+
+    return "No reservation listing method found on reservation_handler."
 
 def print_all_accounts_remote() -> str:
     """
     Returns information about all user accounts (instead of printing it).
+
+    Tries (in order):
+      1) reservation_handler.get_all_accounts() if you implemented it
+      2) capture stdout from reservation_handler.print_all_accounts()
     """
-    # If reservation_handler.print_all_accounts() normally prints directly,
-    # you'll need a way to retrieve that same data. For example, if there's
-    # a hypothetical function get_all_accounts() returning a list/dict of user info:
-    accounts = reservation_handler.get_all_accounts()  # or any equivalent method
-    if not accounts:
-        return "No user accounts found."
+    if hasattr(reservation_handler, "get_all_accounts"):
+        accounts = reservation_handler.get_all_accounts()
+        if not accounts:
+            return "No user accounts found."
+        return "\n".join(["All user accounts:"] + [str(a) for a in accounts])
 
-    # Build a multiline string describing each account
-    result_lines = ["All user accounts:"]
-    for acc in accounts:
-        # Customize formatting as desired; for example:
-        result_lines.append(str(acc))
+    if hasattr(reservation_handler, "print_all_accounts"):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            reservation_handler.print_all_accounts()
+        out = buf.getvalue().strip()
+        return out if out else "No user accounts found."
 
-    return "\n".join(result_lines)
+    return "No account listing method found on reservation_handler."
+
+def print_all_perms_remote() -> str:
+    """
+    Returns permission information for all users (instead of printing it).
+
+    Tries (in order):
+      1) capture stdout from perms.print_perms()
+      2) fall back to a minimal message if no print method exists
+    """
+    if hasattr(perms, "print_perms"):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            perms.print_perms()
+        out = buf.getvalue().strip()
+        return out if out else "No permissions found."
+    return "No permission listing method found on perms."
+
+
+def print_all_devices_remote() -> str:
+    """
+    Returns device information (instead of printing it).
+
+    Uses get_all_devices_str() (preferred structured source) and formats it.
+    Falls back to the server's get_devices() printing path if needed.
+    """
+    try:
+        data = get_all_devices_str()
+        if not data:
+            return "No devices found."
+
+        lines = ["All devices:"]
+        # data: {device_id: device_name_or_desc}
+        for dev_id in sorted(data.keys()):
+            lines.append(f"Device ID: {dev_id} Device Name: {data[dev_id]}")
+        return "\n".join(lines)
+    except Exception:
+        # Fallback: capture whatever get_devices() prints
+        if "get_devices" in globals() and callable(get_devices):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                get_devices()
+            out = buf.getvalue().strip()
+            return out if out else "No devices found."
+        return "Failed to retrieve devices."
+
+def _safe_unmap(v):
+    try:
+        return unmap_arg(v)
+    except Exception:
+        return v
+
+def _safe_map(v):
+    try:
+        return map_arg(v)
+    except Exception:
+        return v
+    
+def verify_remote_admin(args: map) -> Tuple[bool, str, str]:
+    """
+    Returns: (ok, error_message, username)
+    """
+    try:
+        raw_args = dict(args) if args is not None else {}
+    except Exception:
+        raw_args = {}
+
+    # Use auth_un/auth_pw to avoid colliding with "username" (target) args
+    if "auth_un" not in raw_args or "auth_pw" not in raw_args:
+        return False, "Missing admin credentials (auth_un/auth_pw).", ""
+
+    username = _safe_unmap(raw_args.get("auth_un"))
+    password = _safe_unmap(raw_args.get("auth_pw"))
+
+    if not username or not password:
+        return False, "Missing admin credentials (auth_un/auth_pw).", ""
+
+    # 1) Validate username/password against Accounts DB
+    login_res = reservation_handler.login_user(str(username), str(password))
+    if not isinstance(login_res, dict) or ("UC" not in login_res):
+        return False, "Invalid login credentials.", str(username)
+
+    # 2) Validate perms DB says this user is Admin
+    try:
+        rows = perms.get_perms(str(username))
+    except Exception:
+        return False, "Failed to read permissions database.", str(username)
+
+    if not rows:
+        return False, "Permissions not found. Access denied.", str(username)
+
+    # Your get_perms UNION returns one row if you enforce exclusivity; be safe anyway:
+    is_admin = any((r and len(r) > 0 and r[0] == "Admin") for r in rows)
+    if not is_admin:
+        return False, f"User '{username}' is not an Admin.", str(username)
+
+    return True, "", str(username)
+    
+def remote_admin_call(function_name: str, args: map) -> map:
+    # Normalize protobuf map containers to a plain dict and unmap values
+    try:
+        raw_args = dict(args) if args is not None else {}
+    except Exception:
+        raw_args = {}
+
+    args_py = {str(k): _safe_unmap(v) for k, v in raw_args.items()}
+
+    def get_arg(name, *, required=False, default=None, aliases=()):
+        if name in args_py:
+            return args_py[name]
+        for a in aliases:
+            if a in args_py:
+                return args_py[a]
+        if required:
+            raise KeyError(f"Missing required arg '{name}'")
+        return default
+
+    # Normalize function name
+    fn = (function_name or "").strip()
+    if fn.endswith("_remote"):
+        fn = fn[:-7]
+    fn_key = fn.lower()
+
+    try:
+        # ---- remove_all_users ----
+        if fn_key in ("remove_all_users", "remove_all_accounts", "rm_all_users", "rm_aa"):
+            msg = remove_all_users_remote()
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- remove_user ----
+        if fn_key in ("remove_user", "rm_user", "rm_a"):
+            username = get_arg("username", required=True, aliases=("user", "u"))
+            msg = remove_user_remote(str(username))
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- remove_all_reservations ----
+        if fn_key in ("remove_all_reservations", "rm_all_reservations", "rm_ar"):
+            msg = remove_all_reservations_remote()
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- set_account ----
+        if fn_key in ("set_account", "set_acc", "set_user_perm", "setperm"):
+            username = get_arg("username", required=True, aliases=("user", "u"))
+            permission = get_arg("permission", required=True, aliases=("perm", "p"))
+
+            device_list = get_arg(
+                "device_list",
+                default=None,
+                aliases=("devices", "devices_allowed", "device_ids"),
+            )
+            if isinstance(device_list, str):
+                device_list = [int(x) for x in device_list.split(",") if x.strip() != ""]
+            elif device_list is not None:
+                device_list = [int(x) for x in list(device_list)]
+
+            max_reservations = get_arg(
+                "max_reservations",
+                default=None,
+                aliases=("max_res", "maxRes"),
+            )
+            if max_reservations is not None:
+                max_reservations = int(max_reservations)
+
+            max_reservation_time_sec = get_arg(
+                "max_reservation_time_sec",
+                default=None,
+                aliases=("max_time", "max_res_time_sec", "maxResTimeSec"),
+            )
+            if max_reservation_time_sec is not None:
+                max_reservation_time_sec = int(max_reservation_time_sec)
+
+            msg = set_account_remote(
+                username=str(username),
+                permission=str(permission),
+                device_list=device_list,
+                max_reservations=max_reservations,
+                max_reservation_time_sec=max_reservation_time_sec,
+            )
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- print_all_accounts ----
+        if fn_key in ("print_all_accounts", "print_accounts", "printa"):
+            msg = print_all_accounts_remote()
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- print_all_reservations ----
+        if fn_key in ("print_all_reservations", "print_reservations", "printr"):
+            msg = print_all_reservations_remote()
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- print_all_perms ----
+        if fn_key in ("print_all_perms", "print_perms", "printp"):
+            msg = print_all_perms_remote()
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- print_all_devices ----
+        if fn_key in ("print_all_devices", "print_devices", "printd"):
+            msg = print_all_devices_remote()
+            return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
+
+        # ---- unknown ----
+        supported = [
+            "remove_all_users",
+            "remove_user (username)",
+            "remove_all_reservations",
+            "set_account (username, permission, ...)",
+            "print_all_accounts",
+            "print_all_reservations",
+            "print_all_perms",
+            "print_all_devices",
+        ]
+        return {
+            "Ok": _safe_map(False),
+            "Error": _safe_map(f"Unknown RemoteAdmin function '{fn}'. Supported: {supported}"),
+        }
+
+    except Exception as e:
+        tb = traceback.format_exc(limit=5)
+        return {
+            "Ok": _safe_map(False),
+            "Error": _safe_map(str(e)),
+            "Traceback": _safe_map(tb),
+        }
+
+
+# endregion
