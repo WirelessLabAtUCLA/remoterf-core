@@ -9,6 +9,7 @@ from functools import wraps
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
 from .acc_perms import perms, userperms
+from .user_groups import user_group_handler
 
 allow_connections = True
 
@@ -104,15 +105,30 @@ class ReservationHandler:
                     return {'UC': map_arg(str(data))}
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
+            elif function_name == 'set_enroll':
+                username = unmap_arg(args['un'])
+                password = unmap_arg(args['pw'])
+                if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+                    code_name = unmap_arg(args['ec'])
+                    self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
+                    row = self.cursor.fetchone()
+                    acc_id = int(row[0]) if row else -1
+                    if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
+                        return {'UC': map_arg(f'Enrolled {username} with code {code_name}')}
+                    else:
+                        return {'UE': map_arg(f'Failed to enroll {username} with code {code_name}. Invalid or expired code.')}
+                else:
+                    return {"ace": map_arg("Invalid login credentials.")}
             return {"ace": map_arg(f"No matching server function to call: {function_name}")}
         except Exception as e:
             return {"RPC Acc Error", map_arg(f'{e}')}
     
     @db_connection
-    def create_user(self,*, un, pw, em, ad:bool=False):
+    def create_user(self,*, un, pw, em, ec, ad:bool=False):
         un = unmap_arg(un)
         pw = unmap_arg(pw)
         em = unmap_arg(em)
+        ec = unmap_arg(ec)
         
         # check if username and password fit the bill
         if len(un) < 5:
@@ -123,11 +139,19 @@ class ReservationHandler:
             return {"UE": map_arg("Invalid email address.")}
         
         try:
+            if not user_group_handler.validate_enrollment_code(code_name=ec):
+                return {"UE": map_arg("Invalid or expired enrollment code.")}
+        except Exception:
+            return {"UE": map_arg("Invalid or expired enrollment code.")}
+        
+        try:
             passwords = hash_token(pw)
             self.cursor.execute('''
             INSERT INTO Accounts (username, email, pass_salt, pass_hash, created_at) VALUES (?, ?, ?, ?, ?)
             ''', (un, em, passwords[0], passwords[1], datetime.now()))
-            perms.set_user(un) # set perms as regular user
+            uid = int(self.cursor.lastrowid)
+            user_group_handler.enroll_user_with_code(uid=uid, code_name=ec)
+            perms.set_user(un) # set perms
             return {"UC": map_arg(f'{un}')}
         except Exception as e:
             return {"UE": map_arg(f'{e}')}

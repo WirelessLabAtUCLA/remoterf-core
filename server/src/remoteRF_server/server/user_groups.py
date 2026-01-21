@@ -510,6 +510,33 @@ class UserGroupHandler:
             return out
         except Exception:
             return []
+        
+    @db_connection
+    def validate_enrollment_code(self, *, code_name: str) -> bool:
+        # Check if enrollment code exists and has remaining uses
+        try:
+            if not isinstance(code_name, str):
+                return False
+            code_name = code_name.strip()
+            if not code_name:
+                return False
+
+            self.cursor.execute(
+                "SELECT uses FROM EnrollmentCodes WHERE code_name = ? LIMIT 1",
+                (code_name,),
+            )
+            row = self.cursor.fetchone()
+            if row is None:
+                return False
+
+            try:
+                uses_left = int(row[0])
+            except Exception:
+                return False
+
+            return uses_left > 0
+        except Exception:
+            return False
     
     @db_connection
     def enroll_user_with_code(self, *, uid: int, code_name: str) -> bool:
