@@ -47,8 +47,9 @@ class UserGroupHandler:
         
         self.cursor.execute('''
         CREATE TABLE IF NOT EXISTS UsersLookup (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER
+            user_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, group_id)
         );
         ''')
         
@@ -771,5 +772,156 @@ class UserGroupHandler:
             return (allowed, best if allowed else 0)
         except Exception:
             return (False, 0)
+        
+    def _parse_whitelist(self, wl_str) -> set[int]:
+        try:
+            if wl_str is None:
+                return set()
+            if isinstance(wl_str, str):
+                parsed = json.loads(wl_str)
+                if isinstance(parsed, list):
+                    return {int(x) for x in parsed}
+            return set()
+        except Exception:
+            # tolerate old formats like "1,2,3"
+            try:
+                return {int(p.strip()) for p in str(wl_str).split(",") if p.strip() != ""}
+            except Exception:
+                return set()
+
+    @db_connection
+    def get_user_group_reservation_quota_rows(
+        self,
+        *,
+        uid: int,
+        reserved_device_ids: list[int],
+    ) -> list[list[int]]:
+        """
+        Returns rows: [group_id, used_reservations_in_group, max_reservations_in_group]
+        for every group the user is in.
+        """
+        try:
+            uid = int(uid)
+            if uid < 0:
+                return []
+
+            # sanitize reserved_device_ids
+            try:
+                rdevs = [int(d) for d in (reserved_device_ids or [])]
+            except Exception:
+                rdevs = []
+
+            # groups for user
+            self.cursor.execute("SELECT group_id FROM UsersLookup WHERE user_id = ?", (uid,))
+            group_rows = self.cursor.fetchall() or []
+            group_ids = [int(r[0]) for r in group_rows if r and r[0] is not None]
+            if not group_ids:
+                return []
+
+            placeholders = ",".join(["?"] * len(group_ids))
+            self.cursor.execute(
+                f"""
+                SELECT group_id, devices_whitelist, max_reservations
+                FROM UserGroups
+                WHERE group_id IN ({placeholders})
+                """,
+                tuple(group_ids),
+            )
+            rows = self.cursor.fetchall() or []
+
+            out: list[list[int]] = []
+            for gid, wl_str, max_res in rows:
+                try:
+                    gid = int(gid)
+                    max_res = int(max_res)
+                except Exception:
+                    continue
+
+                wl = self._parse_whitelist(wl_str)
+                used = 0
+                for d in rdevs:
+                    if d in wl:
+                        used += 1
+
+                out.append([gid, used, max_res])
+
+            # stable order
+            out.sort(key=lambda x: x[0])
+            return out
+        except Exception:
+            return []
+
+    @db_connection
+    def get_group_quota_for_device(
+        self,
+        *,
+        uid: int,
+        device_id: int,
+        reserved_device_ids: list[int],
+    ) -> tuple[bool, int, int, int]:
+        """
+        For a reservation attempt on `device_id`, choose ONE eligible group and return:
+          (allowed, group_used_count, group_max_reservations, chosen_group_id)
+
+        allowed=False if user is not in any group whose whitelist contains device_id.
+        """
+        try:
+            uid = int(uid)
+            device_id = int(device_id)
+            if uid < 0 or device_id < 0:
+                return (False, 0, 0, -1)
+
+            try:
+                rdevs = [int(d) for d in (reserved_device_ids or [])]
+            except Exception:
+                rdevs = []
+
+            self.cursor.execute("SELECT group_id FROM UsersLookup WHERE user_id = ?", (uid,))
+            group_rows = self.cursor.fetchall() or []
+            group_ids = [int(r[0]) for r in group_rows if r and r[0] is not None]
+            if not group_ids:
+                return (False, 0, 0, -1)
+
+            placeholders = ",".join(["?"] * len(group_ids))
+            self.cursor.execute(
+                f"""
+                SELECT group_id, devices_whitelist, max_reservations
+                FROM UserGroups
+                WHERE group_id IN ({placeholders})
+                """,
+                tuple(group_ids),
+            )
+            rows = self.cursor.fetchall() or []
+            if not rows:
+                return (False, 0, 0, -1)
+
+            candidates = []
+            for gid, wl_str, max_res in rows:
+                try:
+                    gid = int(gid)
+                    max_res = int(max_res)
+                except Exception:
+                    continue
+                wl = self._parse_whitelist(wl_str)
+                if device_id in wl:
+                    # used reservations within THIS group's device set
+                    used = 0
+                    for d in rdevs:
+                        if d in wl:
+                            used += 1
+                    candidates.append((max_res, -used, gid, used))  # prefer higher max_res, then fewer used, then low gid
+
+            if not candidates:
+                return (False, 0, 0, -1)
+
+            # pick best candidate
+            candidates.sort(reverse=True)
+            max_res, _neg_used, gid, used = candidates[0]
+            return (True, used, max_res, gid)
+        except Exception:
+            return (False, 0, 0, -1)
+
 
 user_group_handler = UserGroupHandler()
+
+# Todo: clean out old enrollments and groups periodically ()

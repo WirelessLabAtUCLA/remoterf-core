@@ -13,14 +13,14 @@ from .user_groups import user_group_handler
 class userperms:
     def __init__(self): # default user perms settings
         self.id = 'user'
-        self.max_reservations = 1
-        self.max_reservation_time_sec = 1800  # half a hour
-        self.devices_allowed = [0] # ex: only pluto
+        # self.max_reservations = 1
+        # self.max_reservation_time_sec = 1800  # half a hour
+        # self.devices_allowed = [0] # ex: only pluto
         
         # can only cancel personal reservations, and can only view reservations on the devices they have access to
         
-    def __str__(self):
-        return f"Max Reservations: {self.max_reservations}\nMax Reservation Time: {int(self.max_reservation_time_sec/60)} minutes\nDevice IDs Accessible: {self.devices_allowed}"
+    # def __str__(self):
+    #     return f"Max Reservations: {self.max_reservations}\nMax Reservation Time: {int(self.max_reservation_time_sec/60)} minutes\nDevice IDs Accessible: {self.devices_allowed}"
 
 class perms_db:
     def __init__(self):
@@ -96,7 +96,7 @@ class perms_db:
         return result[0] if result else -1
         
 
-    def validate_reservation_request(self, username, device_id, start_time, end_time, current_reservation_count:int, is_server=False) -> Tuple[bool, str]:
+    def validate_reservation_request(self, accid, username, device_id, start_time, end_time, current_reservation_count:int, is_server=False, reserved_device_ids=[]) -> Tuple[bool, str]:
         # check basic reservation requirements
         if start_time > end_time:
             return False, 'Start time must be before end time'
@@ -121,7 +121,7 @@ class perms_db:
         
         if perms[0] == 'Normal User':
             
-            uid = self.get_normal_user_uid(username)
+            uid = accid
             
             allowed_res, max_res = user_group_handler.get_users_max_reservations(uid=uid, device_id=device_id)
             allowed_time, max_time = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=device_id)
@@ -130,7 +130,19 @@ class perms_db:
                 return False, 'Invalid device ID. Device either does not exist or is disconnected.'
 
             # check if user has reached max reservations
-            if current_reservation_count >= max_res:
+            # if current_reservation_count >= max_res:
+            #     return False, 'User has reached max reservations.'
+            
+            allowed_res, group_used, group_max, _gid = user_group_handler.get_group_quota_for_device(
+                uid=uid,
+                device_id=device_id,
+                reserved_device_ids=reserved_device_ids,
+            )
+
+            if not allowed_res:
+                return False, 'Invalid device ID. Device either does not exist or is disconnected.'
+
+            if group_used >= group_max:
                 return False, 'User has reached max reservations.'
 
             # check if user has reached max reservation time

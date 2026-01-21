@@ -5,6 +5,7 @@ import sys
 import threading
 from pathlib import Path
 from functools import wraps
+import json
 
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
@@ -95,13 +96,39 @@ class ReservationHandler:
                         return {"ace": map_arg("Invalid reservation ID or user does not own reservation.")}
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
+            # elif function_name == 'get_perms':
+            #     username = unmap_arg(args['un'])
+            #     password = unmap_arg(args['pw'])
+            #     if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+            #         data = perms.get_perms(username)
+            #         if data[0][0] == 'Normal User':
+            #             return {'UC': map_arg(str(data)), 'details': map_arg(str(perms.userperms))}
+            #         return {'UC': map_arg(str(data))}
+            #     else:
+            #         return {"ace": map_arg("Invalid login credentials.")}
             elif function_name == 'get_perms':
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     data = perms.get_perms(username)
+
                     if data[0][0] == 'Normal User':
-                        return {'UC': map_arg(str(data)), 'details': map_arg(str(perms.userperms))}
+                        self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
+                        row = self.cursor.fetchone()
+                        uid = int(row[0]) if row else -1
+
+                        devs = user_group_handler.get_users_devices(uid=uid)
+                        caps = {}
+                        for d in devs:
+                            _, max_t = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=d)
+                            _, max_r = user_group_handler.get_users_max_reservations(uid=uid, device_id=d)
+                            caps[int(d)] = {"max_reservation_time_sec": int(max_t), "max_reservations": int(max_r)}
+
+                        return {
+                            "UC": map_arg(str(data)),
+                            "details": map_arg(json.dumps({"devices": devs, "caps": caps}))
+                        }
+
                     return {'UC': map_arg(str(data))}
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
@@ -210,13 +237,58 @@ class ReservationHandler:
         current_time = datetime.now()
         self.db.cursor().execute('DELETE FROM Reservations WHERE device_id = ? AND end_time < ?', (device_id, current_time))
     
+    @db_connection
+    def get_reserved_device_ids_for_user(self, username: str) -> list[int]:
+        try:
+            if not isinstance(username, str) or not username.strip():
+                return []
+
+            now = datetime.now()
+            self.cursor.execute(
+                """
+                SELECT device_id
+                FROM Reservations
+                WHERE username = ?
+                AND end_time > ?
+                """,
+                (username, now),
+            )
+            rows = self.cursor.fetchall() or []
+            out: set[int] = set()
+            for (d,) in rows:
+                try:
+                    out.add(int(d))
+                except Exception:
+                    pass
+            return sorted(out)
+        except Exception:
+            return []
+
+    
     @db_connection 
     def reserve_device(self, username, device_id: int, start_time, end_time, is_server=False):
         
         self._clean_expired_reservations(device_id)
         
+        self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
+        row = self.cursor.fetchone()
+        accid = int(row[0]) if row else -1
+        
         # Check if reservation is valid with perms.
-        validation = perms.validate_reservation_request(username, device_id, start_time, end_time, self.get_reservation_count(username), is_server=is_server)
+        reserved_device_ids = self.get_reserved_device_ids_for_user(username)
+        reserved_device_ids = reserved_device_ids + [int(device_id)]
+
+        validation = perms.validate_reservation_request(
+            accid,
+            username,
+            device_id,
+            start_time,
+            end_time,
+            self.get_reservation_count(username),
+            is_server=is_server,
+            reserved_device_ids=reserved_device_ids,
+        )
+
         if validation[0] == False:
             return {"ace": map_arg(validation[1])}
         
@@ -283,11 +355,22 @@ class ReservationHandler:
             for i, res in enumerate(reservations, start=1):
                 result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
         
+        # elif perm[0] == 'Normal User':
+        #     normalperms = perms.userperms.devices_allowed
+        #     for i, res in enumerate(reservations, start=1):
+        #         if res[2] in normalperms:
+        #             result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
+        
         elif perm[0] == 'Normal User':
-            normalperms = perms.userperms.devices_allowed
+            self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
+            row = self.cursor.fetchone()
+            uid = int(row[0]) if row else -1
+            allowed = set(user_group_handler.get_users_devices(uid=uid))
+
             for i, res in enumerate(reservations, start=1):
-                if res[2] in normalperms:
+                if int(res[2]) in allowed:
                     result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
+
                     
         elif perm[0] == 'Power User':
             for i, res in enumerate(reservations, start=1):
@@ -302,9 +385,16 @@ class ReservationHandler:
         if perm[0] == 'Admin':
             return {str(k): map_arg(str(v)) for k, v in devices.items()}
         
+        # if perm[0] == 'Normal User':
+        #     normalperms = perms.userperms.devices_allowed
+        #     return {str(k): map_arg(str(v)) for k, v in devices.items() if k in normalperms}
+        
         if perm[0] == 'Normal User':
-            normalperms = perms.userperms.devices_allowed
-            return {str(k): map_arg(str(v)) for k, v in devices.items() if k in normalperms}
+            self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
+            row = self.cursor.fetchone()
+            uid = int(row[0]) if row else -1
+            allowed = set(user_group_handler.get_users_devices(uid=uid))
+            return {str(k): map_arg(str(v)) for k, v in devices.items() if k in allowed}
         
         if perm[0] == 'Power User':
             return {str(k): map_arg(str(v)) for k, v in devices.items() if k in str_to_list(perm[5])}
