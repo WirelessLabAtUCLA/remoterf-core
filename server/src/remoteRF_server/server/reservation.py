@@ -49,7 +49,6 @@ class ReservationHandler:
         self.db.commit()
         self.db.close()
         self.lock = threading.Lock()
-        pass
     
     def handle_call(self, *, function_name, args):
         if not allow_connections:
