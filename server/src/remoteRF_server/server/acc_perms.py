@@ -133,6 +133,7 @@ class perms_db:
             # if current_reservation_count >= max_res:
             #     return False, 'User has reached max reservations.'
             
+            # double dipping, and calculated PER GROUP (for max reservations)
             allowed_res, group_used, group_max, _gid = user_group_handler.get_group_quota_for_device(
                 uid=uid,
                 device_id=device_id,
@@ -142,7 +143,7 @@ class perms_db:
             if not allowed_res:
                 return False, 'Invalid device ID. Device either does not exist or is disconnected.'
 
-            if group_used >= group_max:
+            if group_used > group_max:
                 return False, 'User has reached max reservations.'
 
             # check if user has reached max reservation time

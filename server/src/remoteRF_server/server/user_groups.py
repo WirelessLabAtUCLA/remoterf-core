@@ -861,9 +861,10 @@ class UserGroupHandler:
     ) -> tuple[bool, int, int, int]:
         """
         For a reservation attempt on `device_id`, choose ONE eligible group and return:
-          (allowed, group_used_count, group_max_reservations, chosen_group_id)
+        (allowed, used_reservations_in_that_group, max_reservations_for_that_group, chosen_group_id)
 
-        allowed=False if user is not in any group whose whitelist contains device_id.
+        - "used" counts reservation rows (duplicates in reserved_device_ids count).
+        - Selection prefers a group with remaining capacity (max_res - used).
         """
         try:
             uid = int(uid)
@@ -902,24 +903,31 @@ class UserGroupHandler:
                     max_res = int(max_res)
                 except Exception:
                     continue
+
                 wl = self._parse_whitelist(wl_str)
-                if device_id in wl:
-                    # used reservations within THIS group's device set
-                    used = 0
-                    for d in rdevs:
-                        if d in wl:
-                            used += 1
-                    candidates.append((max_res, -used, gid, used))  # prefer higher max_res, then fewer used, then low gid
+                if device_id not in wl:
+                    continue
+
+                used = 0
+                for d in rdevs:
+                    if d in wl:
+                        used += 1
+
+                remaining = max_res - used  # can be <= 0 (meaning full/exceeded)
+
+                # Sort key: prefer more remaining, then higher max, then fewer used, then lower gid
+                candidates.append((remaining, max_res, -used, -gid, used, gid))
 
             if not candidates:
                 return (False, 0, 0, -1)
 
-            # pick best candidate
             candidates.sort(reverse=True)
-            max_res, _neg_used, gid, used = candidates[0]
+            _remaining, max_res, _neg_used, _neg_gid, used, gid = candidates[0]
             return (True, used, max_res, gid)
+
         except Exception:
             return (False, 0, 0, -1)
+
 
 
 user_group_handler = UserGroupHandler()

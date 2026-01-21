@@ -239,8 +239,13 @@ class ReservationHandler:
     
     @db_connection
     def get_reserved_device_ids_for_user(self, username: str) -> list[int]:
+        """
+        Returns one device_id per reservation row that is still active/upcoming.
+        Duplicates are intentional (counts reservations, not unique devices).
+        """
         try:
-            if not isinstance(username, str) or not username.strip():
+            username = str(username).strip()
+            if not username:
                 return []
 
             now = datetime.now()
@@ -254,16 +259,16 @@ class ReservationHandler:
                 (username, now),
             )
             rows = self.cursor.fetchall() or []
-            out: set[int] = set()
+
+            out: list[int] = []
             for (d,) in rows:
                 try:
-                    out.add(int(d))
+                    out.append(int(d))
                 except Exception:
                     pass
-            return sorted(out)
+            return out
         except Exception:
             return []
-
     
     @db_connection 
     def reserve_device(self, username, device_id: int, start_time, end_time, is_server=False):
