@@ -128,6 +128,12 @@ class ReservationHandler:
                             }
 
                         groups = user_group_handler.get_groups_user_in(uid)  # List[str]
+                        
+                        groups_json = []
+                        for g in (groups or []):
+                            if g is None:
+                                continue
+                            groups_json.append(str(g))
 
                         return {
                             "UC": map_arg(str(data)),

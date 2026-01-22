@@ -501,6 +501,8 @@ class UserGroupHandler:
                     continue
                 seen.add(code)
                 created.append(code)
+                
+            # todo: check/parse out duplicates.
 
             return created
         except Exception:
