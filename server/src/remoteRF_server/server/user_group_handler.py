@@ -130,6 +130,23 @@ class UserGroupHandler:
             return False
 
     @db_connection
+    def get_groups_user_in(self, *, uid: int) -> list[str]:
+        try:
+            uid = int(uid)
+            if uid < 0:
+                return []
+
+            self.cursor.execute(
+                "SELECT group_name FROM UsersLookup WHERE user_id = ?",
+                (uid,),
+            )
+            rows = self.cursor.fetchall() or []
+            group_names = [str(r[0]) for r in rows if r and r[0] is not None]
+            return group_names
+        except Exception:
+            return []
+
+    @db_connection
     def delete_user_group(
         self, 
         *, 

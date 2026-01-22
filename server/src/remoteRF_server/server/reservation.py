@@ -106,9 +106,11 @@ class ReservationHandler:
             #         return {'UC': map_arg(str(data))}
             #     else:
             #         return {"ace": map_arg("Invalid login credentials.")}
+
             elif function_name == 'get_perms':
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
+
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     data = perms.get_perms(username)
 
@@ -120,16 +122,27 @@ class ReservationHandler:
                         for d in devs:
                             _, max_t = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=d)
                             _, max_r = user_group_handler.get_users_max_reservations(uid=uid, device_id=d)
-                            caps[int(d)] = {"max_reservation_time_sec": int(max_t), "max_reservations": int(max_r)}
+                            caps[int(d)] = {
+                                "max_reservation_time_sec": int(max_t),
+                                "max_reservations": int(max_r),
+                            }
+
+                        groups = user_group_handler.get_groups_user_in(uid)  # List[str]
 
                         return {
                             "UC": map_arg(str(data)),
-                            "details": map_arg(json.dumps({"devices": devs, "caps": caps}))
+                            "details": map_arg(json.dumps({
+                                "devices": devs,
+                                "caps": caps,
+                                "groups": groups,
+                            })),
                         }
 
                     return {'UC': map_arg(str(data))}
-                else:
-                    return {"ace": map_arg("Invalid login credentials.")}
+
+                return {"ace": map_arg("Invalid login credentials.")}
+
+                
             elif function_name == 'set_enroll':
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
