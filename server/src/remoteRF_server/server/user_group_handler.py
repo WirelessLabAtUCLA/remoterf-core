@@ -137,14 +137,31 @@ class UserGroupHandler:
                 return []
 
             self.cursor.execute(
-                "SELECT group_name FROM UsersLookup WHERE user_id = ?",
+                """
+                SELECT ug.group_name
+                FROM UsersLookup ul
+                JOIN UserGroups ug ON ug.group_id = ul.group_id
+                WHERE ul.user_id = ?
+                ORDER BY ug.group_name ASC
+                """,
                 (uid,),
             )
             rows = self.cursor.fetchall() or []
-            group_names = [str(r[0]) for r in rows if r and r[0] is not None]
-            return group_names
+            # de-dupe defensively, preserve order
+            out: list[str] = []
+            seen: set[str] = set()
+            for (name,) in rows:
+                if name is None:
+                    continue
+                s = str(name).strip()
+                if not s or s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
+            return out
         except Exception:
             return []
+
 
     @db_connection
     def delete_user_group(
