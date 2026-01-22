@@ -313,13 +313,13 @@ def server_input(inpu:str) -> bool:
         remove_user_group_local(session)
     elif inpu in ('edit group', 'edit g'):
         edit_user_group_local(session)
-    elif inpu == 'show g':
+    elif inpu in ('show g', 'show groups'):
         list_user_groups_local(session)
-    elif inpu in ('mk codes', 'mk c'):
+    elif inpu in ('mk codes', 'mk code', 'mk c'):
         make_enrollment_codes_local(session)
     elif inpu == 'show c':
         list_enrollment_codes_local(session)
-    elif inpu in ('rm code', 'rm c'):
+    elif inpu in ('rm code', 'rm c', 'rm codes'):
         remove_enrollment_code_local(session)
     elif inpu in ('exit', 'quit'):
         return False

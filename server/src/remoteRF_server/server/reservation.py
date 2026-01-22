@@ -113,9 +113,7 @@ class ReservationHandler:
                     data = perms.get_perms(username)
 
                     if data[0][0] == 'Normal User':
-                        self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
-                        row = self.cursor.fetchone()
-                        uid = int(row[0]) if row else -1
+                        uid = self.get_uid(username)
 
                         devs = user_group_handler.get_users_devices(uid=uid)
                         caps = {}
@@ -137,9 +135,7 @@ class ReservationHandler:
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     code_name = unmap_arg(args['ec'])
-                    self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
-                    row = self.cursor.fetchone()
-                    acc_id = int(row[0]) if row else -1
+                    acc_id = self.get_uid(username)
                     if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
                         return {'UC': map_arg(f'Enrolled {username} with code {code_name}')}
                     else:
@@ -149,6 +145,13 @@ class ReservationHandler:
             return {"ace": map_arg(f"No matching server function to call: {function_name}")}
         except Exception as e:
             return {"RPC Acc Error", map_arg(f'{e}')}
+        
+    @db_connection
+    def get_uid(self, username:str) -> int:
+        self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
+        row = self.cursor.fetchone()
+        uid = int(row[0]) if row else -1
+        return uid
     
     @db_connection
     def create_user(self,*, un, pw, em, ec, ad:bool=False):
