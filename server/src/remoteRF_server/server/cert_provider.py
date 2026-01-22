@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
-CERT_NAME = "ca.crt"
+CERT_NAME = "server.crt"
 
 # ---------------------------------------------------------------------
 # Path resolution / loading
