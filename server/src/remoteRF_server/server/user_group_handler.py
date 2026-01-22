@@ -136,31 +136,64 @@ class UserGroupHandler:
             if uid < 0:
                 return []
 
+            # 1) Fetch group_ids the user is in
             self.cursor.execute(
-                """
-                SELECT ug.group_name
-                FROM UsersLookup ul
-                JOIN UserGroups ug ON ug.group_id = ul.group_id
-                WHERE ul.user_id = ?
-                ORDER BY ug.group_name ASC
-                """,
+                "SELECT group_id FROM UsersLookup WHERE user_id = ?",
                 (uid,),
             )
+            gid_rows = self.cursor.fetchall() or []
+            group_ids = []
+            for r in gid_rows:
+                if not r or r[0] is None:
+                    continue
+                try:
+                    gid = int(r[0])
+                except Exception:
+                    continue
+                if gid > 0:
+                    group_ids.append(gid)
+
+            if not group_ids:
+                return []
+
+            # de-dupe, stable order
+            seen_gid = set()
+            group_ids_unique = []
+            for gid in group_ids:
+                if gid in seen_gid:
+                    continue
+                seen_gid.add(gid)
+                group_ids_unique.append(gid)
+
+            # 2) Fetch group names from UserGroups using those ids
+            placeholders = ",".join(["?"] * len(group_ids_unique))
+            self.cursor.execute(
+                f"""
+                SELECT group_name
+                FROM UserGroups
+                WHERE group_id IN ({placeholders})
+                ORDER BY group_name ASC
+                """,
+                tuple(group_ids_unique),
+            )
             rows = self.cursor.fetchall() or []
+
             # de-dupe defensively, preserve order
             out: list[str] = []
-            seen: set[str] = set()
-            for (name,) in rows:
-                if name is None:
+            seen_name: set[str] = set()
+            for r in rows:
+                if not r or r[0] is None:
                     continue
-                s = str(name).strip()
-                if not s or s in seen:
+                name = str(r[0]).strip()
+                if not name or name in seen_name:
                     continue
-                seen.add(s)
-                out.append(s)
+                seen_name.add(name)
+                out.append(name)
+
             return out
         except Exception:
             return []
+
 
 
     @db_connection
