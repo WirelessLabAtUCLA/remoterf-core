@@ -322,7 +322,7 @@ class UserGroupHandler:
             uses = int(uses)
             duration_sec = int(duration_sec)
 
-            if not code_name or uses <= 0 or duration_sec <= 0 or group_id < 0:
+            if not code_name or uses <= 0 or duration_sec < 0 or group_id < 0:
                 return ""
 
             self.cursor.execute("SELECT 1 FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
@@ -358,7 +358,7 @@ class UserGroupHandler:
             uses = int(uses)
             duration_sec = int(duration_sec)
 
-            if group_id < 0 or uses <= 0 or duration_sec <= 0:
+            if group_id < 0 or uses <= 0 or duration_sec < 0:
                 return ""
 
             # Ensure group exists
