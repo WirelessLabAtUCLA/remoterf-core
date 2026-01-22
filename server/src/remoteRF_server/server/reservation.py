@@ -398,9 +398,7 @@ class ReservationHandler:
         #     return {str(k): map_arg(str(v)) for k, v in devices.items() if k in normalperms}
         
         if perm[0] == 'Normal User':
-            self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
-            row = self.cursor.fetchone()
-            uid = int(row[0]) if row else -1
+            uid = self.get_uid(username)
             allowed = set(user_group_handler.get_users_devices(uid=uid))
             return {str(k): map_arg(str(v)) for k, v in devices.items() if k in allowed}
         
