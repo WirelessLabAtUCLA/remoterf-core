@@ -23,7 +23,7 @@ from .rpc_manager import rpc_manager
 from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
-from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local
+from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -279,10 +279,12 @@ def help():
     
     printf("'mk group'      ", Sty.MAGENTA, " - Make a user group", Sty.DEFAULT)
     printf("'rm group'      ", Sty.MAGENTA, " - Remove a user group", Sty.DEFAULT)
+    printf("'edit group'    ", Sty.MAGENTA, " - Edit a user group", Sty.DEFAULT)
     printf("'show g'        ", Sty.MAGENTA, " - View all user groups", Sty.DEFAULT)
     
     printf("'mk codes'      ", Sty.MAGENTA, " - Make enrollment codes", Sty.DEFAULT)
     printf("'show c'        ", Sty.MAGENTA, " - View all enrollment codes", Sty.DEFAULT)
+    printf("'rm codes'      ", Sty.MAGENTA, " - Remove enrollment code", Sty.DEFAULT)
     
 def server_input(inpu:str) -> bool:
     if inpu == "h" or inpu == "help":
@@ -309,8 +311,16 @@ def server_input(inpu:str) -> bool:
         make_user_group_local(session)
     elif inpu in ('rm group', 'rm g'):
         remove_user_group_local(session)
+    elif inpu in ('edit group', 'edit g'):
+        edit_user_group_local(session)
     elif inpu == 'show g':
         list_user_groups_local(session)
+    elif inpu in ('mk codes', 'mk c'):
+        make_enrollment_codes_local(session)
+    elif inpu == 'show c':
+        list_enrollment_codes_local(session)
+    elif inpu in ('rm code', 'rm c'):
+        remove_enrollment_code_local(session)
     elif inpu in ('exit', 'quit'):
         return False
     else:

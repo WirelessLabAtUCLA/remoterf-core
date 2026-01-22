@@ -389,3 +389,193 @@ def edit_user_group_local(session) -> None:
         print("User group updated.")
     else:
         print("Failed to update user group.")
+
+def make_enrollment_codes_local(session) -> None:
+
+    def _prompt_raw(msg: str) -> Optional[str]:
+        s = (session.prompt(msg) or "").strip()
+        if s.lower() in CANCEL:
+            return None
+        return s
+
+    def _prompt_yes_no(msg: str, default_no: bool = True) -> bool:
+        s = (session.prompt(msg) or "").strip().lower()
+        if not s:
+            return not default_no
+        return s in {"y", "yes"}
+
+    def _prompt_int(msg: str, *, default: Optional[int] = None, min_v: Optional[int] = 0) -> Optional[int]:
+        while True:
+            s = _prompt_raw(msg)
+            if s is None:
+                return None
+            if s == "":
+                if default is None:
+                    print("Please enter a value (or 'c' to cancel).")
+                    continue
+                v = default
+            else:
+                try:
+                    v = int(s)
+                except ValueError:
+                    print("Please enter an integer (or 'c' to cancel).")
+                    continue
+            if min_v is not None and v < min_v:
+                print(f"Value must be >= {min_v}.")
+                continue
+            return v
+
+    count = _prompt_int("How many enrollment codes? (c to cancel): ", min_v=1)
+    if count is None:
+        return
+
+    group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
+    if group_id is None:
+        return
+
+    char_count = _prompt_int("Characters per code name? [10] (c to cancel): ", default=10, min_v=4)
+    if char_count is None:
+        return
+
+    try:
+        code_names: List[str] = user_group_handler.generate_random_enrollment_code_names(
+            count=count,
+            char_count=char_count,
+        ) or []
+    except Exception as e:
+        print(f"Failed to generate code names: {e}")
+        return
+
+    if not code_names:
+        print("No codes generated.")
+        return
+
+    print("\nGenerated code names:")
+    for i, name in enumerate(code_names, 1):
+        print(f"  {i:>2}) {name}")
+
+    if not _prompt_yes_no("\nUse these codes? (y/n): ", default_no=True):
+        return
+
+    uses = _prompt_int("Uses per code? [1] (c to cancel): ", default=1, min_v=1)
+    if uses is None:
+        return
+
+    duration_sec = _prompt_int(
+        "Duration in seconds? [3600] (0=never expires) (c to cancel): ",
+        default=3600,
+        min_v=0,
+    )
+    if duration_sec is None:
+        return
+
+    print("\nAbout to create enrollment codes with:")
+    print(f"  group_id     : {group_id}")
+    print(f"  count        : {len(code_names)}")
+    print(f"  uses         : {uses}")
+    print(f"  duration_sec : {duration_sec}")
+    
+    if not _prompt_yes_no("Proceed? (y/n): ", default_no=True):
+        return
+
+    result = user_group_handler.create_enrollment_codes(
+        code_names=code_names,
+        group_id=group_id,
+        uses=uses,
+        duration_sec=duration_sec,
+    )
+    print("\nCreated enrollment codes:")
+    print(result)
+
+def remove_enrollment_code_local(session) -> None:
+
+    def _prompt(msg: str):
+        s = (session.prompt(msg) or "").strip()
+        return None if s.lower() in CANCEL else s
+
+    def _yes(msg: str) -> bool:
+        return (session.prompt(msg) or "").strip().lower() in {"y", "yes"}
+
+    mode = _prompt("Delete by (n)ame or (g)roup_id? [n] (c to cancel): ")
+    if mode is None:
+        return
+    mode = (mode or "n").lower()
+
+    if mode.startswith("n"):
+        code_name = _prompt("Enter code_name (c to cancel): ")
+        if not code_name:
+            return
+        if not _yes(f"Delete enrollment code '{code_name}'? (y/n): "):
+            return
+        ok = user_group_handler.delete_enrollment_code_name(code_name=code_name)
+        print("Deleted." if ok else "Not found / failed.")
+        return
+
+    if mode.startswith("g"):
+        gid_s = _prompt("Enter group_id to delete ALL codes for that group (c to cancel): ")
+        if not gid_s:
+            return
+        try:
+            group_id = int(gid_s)
+        except ValueError:
+            print("group_id must be an integer.")
+            return
+        if group_id < 0:
+            print("group_id must be >= 0.")
+            return
+        if not _yes(f"Delete ALL enrollment codes for group_id={group_id}? (y/n): "):
+            return
+        ok = user_group_handler.delete_enrollment_code_id(group_id=group_id)
+        print("Deleted." if ok else "None deleted / failed.")
+        return
+
+    print("Unknown option. Use 'n' or 'g'.")
+
+def list_enrollment_codes_local(session) -> None:
+    rows: List[Dict[str, Any]] = user_group_handler.get_all_enrollment_codes() or []
+
+    if not rows:
+        print("No enrollment codes found.")
+        return
+
+    preferred = [
+        "code_name",
+        "group_id",
+        "uses",
+        "uses_left",
+        "remaining_uses",
+        "duration_sec",
+        "expires_at",
+        "created_at",
+    ]
+    present = set().union(*(r.keys() for r in rows))
+    cols = [c for c in preferred if c in present] + [c for c in sorted(present) if c not in preferred]
+
+    def _fmt(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(x) for x in v)
+        return str(v)
+
+    def _cap(s: str, n: int = 48) -> str:
+        return s if len(s) <= n else s[: n - 3] + "..."
+
+    # Compute widths
+    widths = {c: len(c) for c in cols}
+    table: List[List[str]] = []
+    for r in rows:
+        row = []
+        for c in cols:
+            cell = _cap(_fmt(r.get(c, "")))
+            widths[c] = max(widths[c], len(cell))
+            row.append(cell)
+        table.append(row)
+
+    # Print
+    header = "  ".join(c.ljust(widths[c]) for c in cols)
+    sep = "  ".join("-" * widths[c] for c in cols)
+    print(header)
+    print(sep)
+    for row in table:
+        print("  ".join(row[i].ljust(widths[cols[i]]) for i in range(len(cols))))

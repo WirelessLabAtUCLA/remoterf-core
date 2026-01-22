@@ -406,21 +406,15 @@ class UserGroupHandler:
 
     @db_connection
     def generate_random_enrollment_code_names(
-        self, *, group_id: int, uses: int, duration_sec: int, count: int, char_count: int
+        self, *, count: int, char_count: int
     ) -> list[str]:
         try:
-            group_id = int(group_id)
-            uses = int(uses)
-            duration_sec = int(duration_sec)
+            count = int(count)
+            char_count = int(char_count)
             count = int(count)
             char_count = int(char_count)
 
-            if group_id < 0 or uses <= 0 or duration_sec <= 0 or count <= 0 or char_count <= 0:
-                return []
-
-            # Optional: keep this validation if you only want codes for existing groups.
-            self.cursor.execute("SELECT 1 FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
-            if self.cursor.fetchone() is None:
+            if count <= 0 or char_count <= 0:
                 return []
 
             import secrets
@@ -446,7 +440,7 @@ class UserGroupHandler:
             return []
     
     @db_connection
-    def delete_enrollment_code(self, *, code_name: str) -> bool:
+    def delete_enrollment_code_name(self, *, code_name: str) -> bool:
         try:
             if not isinstance(code_name, str):
                 return False
@@ -471,7 +465,7 @@ class UserGroupHandler:
             return False
 
     @db_connection
-    def delete_enrollment_code(self, *, group_id: int) -> bool:
+    def delete_enrollment_code_id(self, *, group_id: int) -> bool:
         try:
             group_id = int(group_id)
             if group_id < 0:
