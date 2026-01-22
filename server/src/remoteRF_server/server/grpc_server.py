@@ -23,6 +23,7 @@ from .rpc_manager import rpc_manager
 from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
+from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -263,29 +264,36 @@ def get_devices():
 
 def help():
     printf("/------- HELP -------/", Sty.BOLD)
-    printf("'exit'", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
-    printf("'help'", Sty.MAGENTA, " - Help.", Sty.DEFAULT)
-    printf("'clear'", Sty.MAGENTA, " - Clear terminal screen.", Sty.DEFAULT)
-    printf("'printa'", Sty.MAGENTA, " - Print all accounts", Sty.DEFAULT)
-    printf("'printd'", Sty.MAGENTA, " - Print all devices", Sty.DEFAULT)
-    printf("'printp'", Sty.MAGENTA, " - Print all perms", Sty.DEFAULT)
-    printf("'printr'", Sty.MAGENTA, " - Print all reservations", Sty.DEFAULT)
-    printf("'rm aa'", Sty.MAGENTA, " - Remove all accounts", Sty.DEFAULT)
-    printf("'rm a'", Sty.MAGENTA, " - Remove one account", Sty.DEFAULT)
-    printf("'rm ar'", Sty.MAGENTA, " - Remove all reservations", Sty.DEFAULT)
-    printf("'rm db'", Sty.MAGENTA, " - Remove all database entries", Sty.DEFAULT)
-    printf("'setacc'", Sty.MAGENTA, " - Set account details", Sty.DEFAULT)
-
+    printf("'exit'          ", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
+    printf("'help'          ", Sty.MAGENTA, " - Help.", Sty.DEFAULT)
+    printf("'clear'         ", Sty.MAGENTA, " - Clear terminal screen.", Sty.DEFAULT)
+    printf("'show a'         ", Sty.MAGENTA, " - Print all accounts", Sty.DEFAULT)
+    printf("'show d'         ", Sty.MAGENTA, " - Print all devices", Sty.DEFAULT)
+    # printf("'view p'        ", Sty.MAGENTA, " - Print all perms", Sty.DEFAULT) # Deprecated
+    printf("'show r'         ", Sty.MAGENTA, " - Print all reservations", Sty.DEFAULT)
+    printf("'rm aa'         ", Sty.MAGENTA, " - Remove all accounts", Sty.DEFAULT)
+    printf("'rm a'          ", Sty.MAGENTA, " - Remove one account", Sty.DEFAULT)
+    printf("'rm ar'         ", Sty.MAGENTA, " - Remove all reservations", Sty.DEFAULT)
+    printf("'rm db'         ", Sty.MAGENTA, " - Remove all database entries", Sty.DEFAULT)
+    printf("'setacc'        ", Sty.MAGENTA, " - Set account details", Sty.DEFAULT)
+    
+    printf("'mk group'      ", Sty.MAGENTA, " - Make a user group", Sty.DEFAULT)
+    printf("'rm group'      ", Sty.MAGENTA, " - Remove a user group", Sty.DEFAULT)
+    printf("'show g'        ", Sty.MAGENTA, " - View all user groups", Sty.DEFAULT)
+    
+    printf("'mk codes'      ", Sty.MAGENTA, " - Make enrollment codes", Sty.DEFAULT)
+    printf("'show c'        ", Sty.MAGENTA, " - View all enrollment codes", Sty.DEFAULT)
+    
 def server_input(inpu:str) -> bool:
     if inpu == "h" or inpu == "help":
         help()
-    elif inpu == 'printr':
+    elif inpu == 'show r':
         reservation_handler.print_all_reservations()
-    elif inpu == 'printa':
+    elif inpu == 'show a':
         reservation_handler.print_all_accounts()
-    elif inpu == 'printp':
+    elif inpu == 'show p':
         perms.print_perms()
-    elif inpu == 'printd':
+    elif inpu == 'show d':
         get_devices()
     elif inpu == 'clear':
         clear()
@@ -297,7 +305,13 @@ def server_input(inpu:str) -> bool:
         reservation_handler.rm_db()
     elif inpu == 'setacc':
         set_acc()
-    elif inpu == 'exit' or inpu == 'quit':
+    elif inpu in ('mk group', 'mk g'):
+        make_user_group_local(session)
+    elif inpu in ('rm group', 'rm g'):
+        remove_user_group_local(session)
+    elif inpu == 'show g':
+        list_user_groups_local(session)
+    elif inpu in ('exit', 'quit'):
         return False
     else:
         print(f"Invalid command: {inpu}")

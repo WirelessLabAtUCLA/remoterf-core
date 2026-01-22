@@ -8,7 +8,7 @@ from functools import wraps
 
 from ..common.utils import *
 from .device_manager import get_all_devices
-from .user_groups import user_group_handler
+from .user_group_handler import user_group_handler
 
 class userperms:
     def __init__(self): # default user perms settings

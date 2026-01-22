@@ -10,7 +10,7 @@ import json
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
 from .acc_perms import perms, userperms
-from .user_groups import user_group_handler
+from .user_group_handler import user_group_handler
 
 allow_connections = True
 
@@ -158,8 +158,8 @@ class ReservationHandler:
         ec = unmap_arg(ec)
         
         # check if username and password fit the bill
-        if len(un) < 5:
-            return {"UE": map_arg("Username must be at least 5 characters long.")}
+        if len(un) < 3:
+            return {"UE": map_arg("Username must be at least 3 characters long.")}
         if len(pw) < 5:
             return {"UE": map_arg("Password must be at least 5 characters long.")}
         if '@' not in em:
