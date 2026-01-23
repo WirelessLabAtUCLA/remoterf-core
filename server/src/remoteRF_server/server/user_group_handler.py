@@ -1016,6 +1016,8 @@ class UserGroupHandler:
 
         try:
             now = datetime.now()
+            
+            print("Flushing User Groups")
 
             expired_group_ids: list[int] = []
             expired_code_names: list[str] = []

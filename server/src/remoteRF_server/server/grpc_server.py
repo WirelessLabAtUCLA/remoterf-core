@@ -274,10 +274,10 @@ def help():
     # printf("'view p'        ", Sty.MAGENTA, " - Print all perms", Sty.DEFAULT) # Deprecated
     printf("'show r'         ", Sty.MAGENTA, " - Print all reservations", Sty.DEFAULT)
     printf("'rm aa'         ", Sty.MAGENTA, " - Remove all accounts", Sty.DEFAULT)
-    printf("'rm a'          ", Sty.MAGENTA, " - Remove one account", Sty.DEFAULT)
+    # printf("'rm a'          ", Sty.MAGENTA, " - Remove one account", Sty.DEFAULT)
     printf("'rm ar'         ", Sty.MAGENTA, " - Remove all reservations", Sty.DEFAULT)
     printf("'rm db'         ", Sty.MAGENTA, " - Remove all database entries", Sty.DEFAULT)
-    printf("'setacc'        ", Sty.MAGENTA, " - Set account details", Sty.DEFAULT)
+    printf("'setacc'        ", Sty.MAGENTA, " - Set account details (and deletion)", Sty.DEFAULT)
     
     printf("'mk group'      ", Sty.MAGENTA, " - Make a user group", Sty.DEFAULT)
     printf("'rm group'      ", Sty.MAGENTA, " - Remove a user group", Sty.DEFAULT)
