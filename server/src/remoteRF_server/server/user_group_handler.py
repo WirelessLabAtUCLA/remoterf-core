@@ -17,7 +17,6 @@ class UserGroupHandler:
         delete_user_group -> bool
         edit_user_group -> bool
         get_all_user_groups -> list[dict]
-        create_enrollment_code -> str
         create_enrollment_codes -> str
         generate_random_enrollment_code_names -> list[str]
         delete_enrollment_code (by code_name) -> bool
@@ -384,38 +383,12 @@ class UserGroupHandler:
             return []
 
     @db_connection
-    def create_enrollment_code(self, *, code_name: str, group_id: int, uses: int, duration_sec: int) -> str:
-        try:
-            code_name = str(code_name).strip()
-            group_id = int(group_id)
-            uses = int(uses)
-            duration_sec = int(duration_sec)
-
-            if not code_name or uses <= 0 or duration_sec < 0 or group_id < 0:
-                return ""
-
-            self.cursor.execute("SELECT 1 FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
-            if self.cursor.fetchone() is None:
-                return ""
-
-            self.cursor.execute(
-                """
-                INSERT INTO EnrollmentCodes (code_name, group_id, uses, duration_sec)
-                VALUES (?, ?, ?, ?)
-                """,
-                (code_name, group_id, uses, duration_sec),
-            )
-            return code_name
-        except Exception:
-            return ""
-        
-    @db_connection
     def create_enrollment_codes(
-        self, 
-        *, 
-        code_names: list[str], 
-        group_id: int, 
-        uses: int, 
+        self,
+        *,
+        code_names: list[str],
+        group_id: int,
+        uses: int,
         duration_sec: int
     ) -> str:
         try:
@@ -458,12 +431,13 @@ class UserGroupHandler:
                 try:
                     self.cursor.execute(
                         """
-                        INSERT OR IGNORE INTO EnrollmentCodes (code_name, group_id, uses, duration_sec)
-                        VALUES (?, ?, ?, ?)
+                        INSERT OR IGNORE INTO EnrollmentCodes
+                            (code_name, group_id, uses, duration_sec, created_at)
+                        VALUES
+                            (?, ?, ?, ?, ?)
                         """,
-                        (code, group_id, uses, duration_sec),
+                        (code, group_id, uses, duration_sec, datetime.now()),
                     )
-                    # sqlite3 rowcount is 1 if inserted, 0 if ignored
                     if getattr(self.cursor, "rowcount", 0) == 1:
                         created += 1
                 except Exception:
@@ -472,6 +446,7 @@ class UserGroupHandler:
             return f"Created {created}/{len(cleaned)} enrollment codes."
         except Exception:
             return ""
+
 
     @db_connection
     def generate_random_enrollment_code_names(
