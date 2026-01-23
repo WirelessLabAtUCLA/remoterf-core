@@ -45,15 +45,17 @@ def make_user_group_local(session) -> None:
             s = (session.prompt(msg) or "").strip()
             if s.lower() in CANCEL:
                 return None
-            if not s or s.lower() in {"all", "*"}:
-                return []
+
+            if not s:
+                print("Please enter at least one device id (e.g. '0,1,2') or 'c' to cancel.")
+                continue
 
             # Allow both commas and whitespace
             parts = [p for p in s.replace(",", " ").split() if p]
             try:
                 vals = [int(p) for p in parts]
             except ValueError:
-                print("Invalid list. Use e.g. '0,1,2' or '0 1 2' or 'all'.")
+                print("Invalid list. Use e.g. '0,1,2' or '0 1 2'.")
                 continue
 
             if any(v < 0 for v in vals):
@@ -67,6 +69,11 @@ def make_user_group_local(session) -> None:
                 if v not in seen:
                     seen.add(v)
                     out.append(v)
+
+            if len(out) == 0:
+                print("Please enter at least one device id (or 'c' to cancel).")
+                continue
+
             return out
 
     # ---- Group name ----
@@ -78,7 +85,7 @@ def make_user_group_local(session) -> None:
         return
 
     # ---- Parameters ----
-    devices_whitelist = _prompt_int_list("Devices whitelist (e.g. 0,1,2 | 'all' for no whitelist) (c to cancel): ")
+    devices_whitelist = _prompt_int_list("Devices whitelist (e.g. 0,1,2) (c to cancel): ")
     if devices_whitelist is None:
         return
 
@@ -95,7 +102,7 @@ def make_user_group_local(session) -> None:
         return
 
     # ---- Final confirmation ----
-    wl_str = "ALL" if len(devices_whitelist) == 0 else ",".join(map(str, devices_whitelist))
+    wl_str = ",".join(map(str, devices_whitelist))
     print("\nAbout to create user group with:")
     print(f"  group_name               : {group_name}")
     print(f"  devices_whitelist        : {wl_str}")
