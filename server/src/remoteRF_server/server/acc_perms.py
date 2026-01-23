@@ -94,7 +94,6 @@ class perms_db:
 
         # Return the UserID or -1 if not found
         return result[0] if result else -1
-        
 
     def validate_reservation_request(self, accid, username, device_id, start_time, end_time, current_reservation_count:int, is_server=False, reserved_device_ids=[]) -> Tuple[bool, str]:
         # check basic reservation requirements
@@ -123,8 +122,12 @@ class perms_db:
             
             uid = accid
             
+            print(f"Validating reservation for normal user: {username} (UID: {uid}) on device {device_id}")
+            
             allowed_res, max_res = user_group_handler.get_users_max_reservations(uid=uid, device_id=device_id)
             allowed_time, max_time = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=device_id)
+            
+            print(f"Allowed Res: {allowed_res}, Max Res: {max_res}, Allowed Time: {allowed_time}, Max Time: {max_time}")
 
             if not allowed_res or not allowed_time:
                 return False, 'Invalid device ID. Device either does not exist or is disconnected.'
