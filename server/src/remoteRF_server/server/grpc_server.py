@@ -126,7 +126,7 @@ def update_devices():
 
 threading.Thread(target=serve, daemon=True).start()
 threading.Thread(target=update_devices, daemon=True).start()
-_ug_stop, _ug_thread = start_usergroup_cleanup_loop(interval_sec=60)
+start_usergroup_cleanup_loop(interval_sec=60)
 
 start_time = datetime.now()
 
@@ -332,12 +332,8 @@ def server_input(inpu:str) -> bool:
 welcome()
 
 def main():
-    try:
-        while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
-            pass
-    finally:
-        _ug_stop.set()
-        _ug_thread.join(timeout=2)
+    while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
+        pass
 
 if __name__ == '__main__':
     main()

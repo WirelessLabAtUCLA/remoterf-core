@@ -170,7 +170,8 @@ def list_user_groups_local(session) -> None:
             return not default_no
         return s in {"y", "yes"}
 
-    include_users = _prompt_yes_no("Include users in output? (y/n) [n]: ", default_no=True)
+    # include_users = _prompt_yes_no("Include users in output? (y/n) [n]: ", default_no=True)
+    include_users = False
 
     groups: List[Dict[str, Any]] = user_group_handler.get_all_user_groups(include_users=include_users) or []
 

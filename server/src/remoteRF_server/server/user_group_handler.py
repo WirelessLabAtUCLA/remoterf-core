@@ -992,7 +992,7 @@ class UserGroupHandler:
         try:
             now = datetime.now()
             
-            # print("Flushing User Groups")
+            print("Flushing User Groups")
 
             expired_group_ids: list[int] = []
             expired_code_names: list[str] = []
@@ -1109,7 +1109,5 @@ def start_usergroup_cleanup_loop(
             # interruptible sleep (wakes immediately when stop_event.set() is called)
             stop_event.wait(interval_sec)
 
-    t = threading.Thread(target=_worker, name="usergroup_cleanup_loop", daemon=True)
-    t.start()
-    return stop_event, t
+    threading.Thread(target=_worker, daemon=True)
 
