@@ -480,8 +480,6 @@ class UserGroupHandler:
         try:
             count = int(count)
             char_count = int(char_count)
-            count = int(count)
-            char_count = int(char_count)
 
             if count <= 0 or char_count <= 0:
                 return []
@@ -489,22 +487,31 @@ class UserGroupHandler:
             import secrets
             import string
 
-            alphabet = string.ascii_uppercase + string.digits  # alphanumeric
-            created: list[str] = []
-            seen: set[str] = set()
+            alphabet = string.ascii_uppercase + string.digits
 
-            max_attempts = max(100, count * 50)
+            # Pull existing codes once so we can reroll locally without hammering the DB.
+            try:
+                self.cursor.execute("SELECT code_name FROM EnrollmentCodes")
+                existing_rows = self.cursor.fetchall() or []
+                existing: set[str] = {
+                    str(r[0]).strip() for r in existing_rows if r and r[0] is not None and str(r[0]).strip()
+                }
+            except Exception:
+                existing = set()
+
+            created: list[str] = []
+            used: set[str] = set(existing)  # prevents collisions with DB + within this batch
+
+            max_attempts = max(1000, count * 200)
             attempts = 0
 
             while len(created) < count and attempts < max_attempts:
                 attempts += 1
                 code = "".join(secrets.choice(alphabet) for _ in range(char_count))
-                if code in seen:
+                if code in used:
                     continue
-                seen.add(code)
+                used.add(code)
                 created.append(code)
-                
-            # todo: check/parse out duplicates.
 
             return created
         except Exception:
