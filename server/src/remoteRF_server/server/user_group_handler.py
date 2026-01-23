@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from functools import wraps
+from typing import Optional, Tuple, List
 
 from ..common.utils import *
 
@@ -59,7 +60,8 @@ class UserGroupHandler:
             code_name TEXT NOT NULL UNIQUE,
             group_id INTEGER NOT NULL,
             uses INTEGER NOT NULL,
-            duration_sec INTEGER NOT NULL
+            duration_sec INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         ''')
         
@@ -922,13 +924,6 @@ class UserGroupHandler:
         device_id: int,
         reserved_device_ids: list[int],
     ) -> tuple[bool, int, int, int]:
-        """
-        For a reservation attempt on `device_id`, choose ONE eligible group and return:
-        (allowed, used_reservations_in_that_group, max_reservations_for_that_group, chosen_group_id)
-
-        - "used" counts reservation rows (duplicates in reserved_device_ids count).
-        - Selection prefers a group with remaining capacity (max_res - used).
-        """
         try:
             uid = int(uid)
             device_id = int(device_id)
@@ -990,9 +985,147 @@ class UserGroupHandler:
 
         except Exception:
             return (False, 0, 0, -1)
+        
+    @db_connection
+    def check_expiration_and_cleanup(self) -> dict:
+        def _parse_dt(v):
+            if v is None:
+                return None
+            if isinstance(v, datetime):
+                return v
+            s = str(v).strip()
+            if not s:
+                return None
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                pass
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except Exception:
+                    continue
+            return None
 
+        try:
+            now = datetime.now()
 
+            expired_group_ids: list[int] = []
+            expired_code_names: list[str] = []
+
+            # ---- find expired groups ----
+            self.cursor.execute("""
+                SELECT group_id, lifetime_sec, created_at
+                FROM UserGroups
+                WHERE lifetime_sec > 0
+            """)
+            for group_id, lifetime_sec, created_at in (self.cursor.fetchall() or []):
+                try:
+                    gid = int(group_id)
+                    life = int(lifetime_sec)
+                except Exception:
+                    continue
+                if gid <= 0 or life <= 0:
+                    continue
+
+                dt = _parse_dt(created_at)
+                if dt is None:
+                    continue
+
+                if (now - dt).total_seconds() >= life:
+                    expired_group_ids.append(gid)
+
+            # ---- find expired codes ----
+            self.cursor.execute("""
+                SELECT code_name, duration_sec, created_at
+                FROM EnrollmentCodes
+                WHERE duration_sec > 0
+            """)
+            for code_name, duration_sec, created_at in (self.cursor.fetchall() or []):
+                code = str(code_name).strip() if code_name is not None else ""
+                try:
+                    dur = int(duration_sec)
+                except Exception:
+                    continue
+                if not code or dur <= 0:
+                    continue
+
+                dt = _parse_dt(created_at)
+                if dt is None:
+                    continue
+
+                if (now - dt).total_seconds() >= dur:
+                    expired_code_names.append(code)
+
+            # De-dupe
+            expired_group_ids = sorted(set(expired_group_ids))
+            expired_code_names = sorted(set(expired_code_names))
+
+            codes_deleted = 0
+            groups_deleted = 0
+
+            # ---- delete expired codes by name ----
+            for code in expired_code_names:
+                try:
+                    # reuse your existing deletion logic, but inline is cheaper
+                    self.cursor.execute("DELETE FROM EnrollmentCodes WHERE code_name = ?", (code,))
+                    if self.cursor.rowcount > 0:
+                        codes_deleted += 1
+                except Exception:
+                    continue
+
+            # ---- delete expired groups using your existing logic (cleanup cascade) ----
+            for gid in expired_group_ids:
+                try:
+                    # Call the existing method; it will be serialized anyway, but avoid re-entering wrapper.
+                    # So do the same SQL your delete_user_group() does:
+                    self.cursor.execute("DELETE FROM EnrollmentCodes WHERE group_id = ?", (gid,))
+                    self.cursor.execute("DELETE FROM UsersLookup WHERE group_id = ?", (gid,))
+                    self.cursor.execute("DELETE FROM UserGroups WHERE group_id = ?", (gid,))
+                    if self.cursor.rowcount > 0:
+                        groups_deleted += 1
+                except Exception:
+                    continue
+
+            return {
+                "expired_groups_deleted": groups_deleted,
+                "expired_codes_deleted": codes_deleted,
+                "expired_group_ids": expired_group_ids,
+                "expired_code_names": expired_code_names,
+            }
+
+        except Exception:
+            return {
+                "expired_groups_deleted": 0,
+                "expired_codes_deleted": 0,
+                "expired_group_ids": [],
+                "expired_code_names": [],
+            }
 
 user_group_handler = UserGroupHandler()
 
-# Todo: clean out old enrollments and groups periodically ()
+def start_usergroup_cleanup_loop(
+    *,
+    interval_sec: int,
+) -> Tuple[threading.Event, threading.Thread]:
+    interval_sec = int(interval_sec)
+    if interval_sec <= 0:
+        interval_sec = 60
+
+    stop_event = threading.Event()
+
+    def _worker():
+        while not stop_event.is_set():
+            try:
+                user_group_handler.check_expiration_and_cleanup()
+            except Exception:
+                # optional: log/printf traceback here if you want
+                pass
+
+            # interruptible sleep (wakes immediately when stop_event.set() is called)
+            stop_event.wait(interval_sec)
+
+    t = threading.Thread(target=_worker, name="usergroup_cleanup_loop", daemon=True)
+    t.start()
+    return stop_event, t
+
