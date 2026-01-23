@@ -67,7 +67,7 @@ class UserGroupHandler:
         self.cursor.close()
         self.db.commit()
         self.db.close()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     @db_connection
     def create_user_group(

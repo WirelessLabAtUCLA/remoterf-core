@@ -50,7 +50,7 @@ class ReservationHandler:
         self.cursor.close()
         self.db.commit()
         self.db.close()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
     
     def handle_call(self, *, function_name, args):
         if not allow_connections:
