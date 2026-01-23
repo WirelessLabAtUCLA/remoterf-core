@@ -237,23 +237,23 @@ def list_user_groups_local(session) -> None:
         print("  ".join(row[i].ljust(widths[columns[i]]) for i in range(len(columns))))
 
     # If include_users, print expanded user lists (if present) for readability
-    if include_users:
-        # Find a reasonable key name for users if exists
-        user_key = "users" if any("users" in g for g in groups) else None
-        if user_key:
-            print("\nUsers per group:")
-            for g in groups:
-                gid = g.get("group_id", g.get("id", "?"))
-                name = g.get("group_name", g.get("name", ""))
-                users = g.get(user_key, [])
-                if not users:
-                    continue
-                print(f"  {gid} {name}:")
-                if isinstance(users, list):
-                    for u in users:
-                        print(f"    - {u}")
-                else:
-                    print(f"    - {users}")
+    # if include_users:
+    #     # Find a reasonable key name for users if exists
+    #     user_key = "users" if any("users" in g for g in groups) else None
+    #     if user_key:
+    #         print("\nUsers per group:")
+    #         for g in groups:
+    #             gid = g.get("group_id", g.get("id", "?"))
+    #             name = g.get("group_name", g.get("name", ""))
+    #             users = g.get(user_key, [])
+    #             if not users:
+    #                 continue
+    #             print(f"  {gid} {name}:")
+    #             if isinstance(users, list):
+    #                 for u in users:
+    #                     print(f"    - {u}")
+    #             else:
+    #                 print(f"    - {users}")
 
 def edit_user_group_local(session) -> None:
 
