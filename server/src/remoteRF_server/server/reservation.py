@@ -107,33 +107,44 @@ class ReservationHandler:
             #     else:
             #         return {"ace": map_arg("Invalid login credentials.")}
 
-            elif function_name == 'get_perms':
-                username = unmap_arg(args['un'])
-                password = unmap_arg(args['pw'])
+            elif function_name == "get_perms":
+                username = unmap_arg(args["un"])
+                password = unmap_arg(args["pw"])
 
-                if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+                if self.login_user(username, password) == {"UC": map_arg(f"{username}")}:
                     data = perms.get_perms(username)
 
-                    if data[0][0] == 'Normal User':
-                        uid = self.get_uid(username)
+                    if data and data[0] and data[0][0] == "Normal User":
+                        uid = int(self.get_uid(username))
 
-                        devs = user_group_handler.get_users_devices(uid=uid)
-                        caps = {}
+                        # Force pure ints (defensive)
+                        devs_raw = user_group_handler.get_users_devices(uid=uid) or []
+                        devs: list[int] = []
+                        for d in devs_raw:
+                            try:
+                                devs.append(int(d))
+                            except Exception:
+                                continue
+                        devs = sorted(set(devs))
+
+                        # caps: force string keys for JSON + client lookups
+                        caps: dict[str, dict] = {}
                         for d in devs:
-                            _, max_t = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=d)
-                            _, max_r = user_group_handler.get_users_max_reservations(uid=uid, device_id=d)
-                            caps[int(d)] = {
+                            _allowed_t, max_t = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=d)
+                            _allowed_r, max_r = user_group_handler.get_users_max_reservations(uid=uid, device_id=d)
+                            caps[str(d)] = {
                                 "max_reservation_time_sec": int(max_t),
                                 "max_reservations": int(max_r),
                             }
 
-                        groups = user_group_handler.get_groups_user_in(uid)  # List[str]
-                        
-                        groups_json = []
-                        for g in (groups or []):
+                        groups_raw = user_group_handler.get_groups_user_in(uid=uid) or []
+                        groups: list[str] = []
+                        for g in groups_raw:
                             if g is None:
                                 continue
-                            groups_json.append(str(g))
+                            s = str(g).strip()
+                            if s:
+                                groups.append(s)
 
                         return {
                             "UC": map_arg(str(data)),
@@ -144,9 +155,10 @@ class ReservationHandler:
                             })),
                         }
 
-                    return {'UC': map_arg(str(data))}
+                    return {"UC": map_arg(str(data))}
 
                 return {"ace": map_arg("Invalid login credentials.")}
+
 
                 
             elif function_name == 'set_enroll':
