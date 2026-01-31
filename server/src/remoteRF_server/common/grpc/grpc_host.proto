@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package remoterf;
+
+// -------------------------
+// Host tunnel control-plane
+// -------------------------
+
+message HostHello {
+  // Stable ID for this host (from config, cert CN/SAN, etc.)
+  string host_id = 1;
+  // Optional semantic version / build identifier
+  string version = 2;
+}
+
+message DeviceInfo {
+  // Host-local device index (e.g. 0..N on that host)
+  uint32 local_id = 1;
+  // Human-readable label/description
+  string label = 2;
+}
+
+message DeviceAnnounce {
+  repeated DeviceInfo devices = 1;
+}
+
+message RpcRequest {
+  // Request correlation ID (unique per in-flight RPC)
+  string req_id = 1;
+
+  // Server-global device id (what clients see)
+  uint32 global_device_id = 2;
+
+  // Host-local device id (filled by server from routing table)
+  uint32 local_device_id = 3;
+
+  // Your GenericRPC function name (same as request.function_name)
+  string function_name = 4;
+
+  // Args are serialized bytes of your existing grpc_pb2.Arg messages.
+  // Key matches your existing map key semantics.
+  map<string, bytes> args = 5;
+
+  // Absolute deadline in unix epoch ms; 0 means "no deadline"
+  uint64 deadline_unix_ms = 6;
+}
+
+message RpcResponse {
+  // Must match the request req_id
+  string req_id = 1;
+
+  // ok=false implies "error" is populated
+  bool ok = 2;
+
+  // Results are serialized bytes of your existing grpc_pb2.Arg messages.
+  map<string, bytes> results = 3;
+
+  // Human-readable error (and/or error code string if you want)
+  string error = 4;
+}
+
+message Heartbeat {
+  // unix epoch ms on sender
+  uint64 unix_ms = 1;
+}
+
+message Cancel {
+  // Cancel an in-flight request (best-effort)
+  string req_id = 1;
+}
+
+message HostFrame {
+  oneof msg {
+    HostHello hello = 1;
+    DeviceAnnounce device_announce = 2;
+
+    // Server -> Host (and optionally Host -> Server if you ever want)
+    RpcRequest rpc_request = 3;
+
+    // Host -> Server
+    RpcResponse rpc_response = 4;
+
+    Heartbeat heartbeat = 5;
+    Cancel cancel = 6;
+  }
+}
+
+service HostTunnel {
+  // A single long-lived bidirectional stream per host.
+  // Hosts connect outbound, send hello + device announce,
+  // then handle forwarded RPC requests over this stream.
+  rpc Connect(stream HostFrame) returns (stream HostFrame);
+}
