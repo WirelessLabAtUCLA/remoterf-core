@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package remoterf;
+
+import "grpc.proto"; // must contain: package remote_rf; and messages below
+
+message HostHello {
+  string host_id = 1;
+  string version = 2;
+}
+
+message DeviceInfo {
+  uint32 local_id = 1;
+  string label = 2;
+
+  // Stable globally-unique device ID (required for routing + persistence)
+  string device_id = 3;
+
+  string serial = 4;
+  string kind = 5;
+}
+
+message DeviceAnnounce {
+  repeated DeviceInfo devices = 1;
+  uint64 unix_ms = 2;
+  bool full_snapshot = 3;
+}
+
+message RpcRequest {
+  string req_id = 1;
+
+  // Optional legacy field (keep if you still use it anywhere)
+  uint32 global_device_id = 2;
+
+  uint32 local_device_id = 3;
+
+  // Prefer this stable ID for routing/debug
+  string device_id = 4;
+
+  // *** Sealed relay payload ***
+  remote_rf.GenericRPCRequest request = 5;
+
+  uint64 deadline_unix_ms = 6;
+}
+
+message RpcResponse {
+  string req_id = 1;
+  bool ok = 2;
+
+  // *** Sealed relay payload ***
+  remote_rf.GenericRPCResponse response = 3;
+
+  string error = 4;
+}
+
+message Heartbeat {
+  uint64 unix_ms = 1;
+}
+
+message Cancel {
+  string req_id = 1;
+}
+
+message HostFrame {
+  oneof msg {
+    HostHello hello = 1;
+    DeviceAnnounce device_announce = 2;
+
+    RpcRequest rpc_request = 3;
+    RpcResponse rpc_response = 4;
+
+    Heartbeat heartbeat = 5;
+    Cancel cancel = 6;
+  }
+}
+
+service HostTunnel {
+  rpc Connect(stream HostFrame) returns (stream HostFrame);
+}
