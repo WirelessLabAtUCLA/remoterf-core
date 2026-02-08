@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import shutil
+import re
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
@@ -15,11 +16,13 @@ from .config.cert_fetcher import fetch_and_save_ca_cert
 # -----------------------------
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]  # <repo>
+    # <repo>/src/remoteRF_host/hostrf_cli.py -> parents[2] == <repo>
+    return Path(__file__).resolve().parents[2]
 
 def _cfg_dir() -> Path:
     # <repo>/config/remoteRF_host/
-    return _repo_root() / "config" / "remoteRF_host"
+    # return _repo_root() / "src" / "remoteRF_host" / "config"
+    return _repo_root() / ".config"
 
 def _ca_path() -> Path:
     return _cfg_dir() / "ca.crt"
@@ -50,30 +53,37 @@ def print_help() -> None:
         "Network option:\n"
         "  -a, --addr <host:port>               Set target server\n"
         "  -a --show                            Show current target\n"
+        "  -a -w [-y]                           Wipe ONLY address stuff (net.env + ca.crt)\n"
         "\n"
         "Host option:\n"
-        "  -h, --host <str>                     Set host name\n"
+        "  -h, --host <str>                     Set host name (HOST_ID)\n"
         "  -h --show                            Show host name\n"
+        "  -h --wipe [-y]                       Wipe ONLY host-id (host.env)\n"
         "\n"
         "Device option:\n"
-        "  --device --add <global_id:name>      Add local device\n"
-        "  --device --remove <global_id>        Remove device\n"
-        "  --device --show                      Show all devices\n"
+        "  --device --add --pluto <gid:name:serial>  Add device (fails if gid OR serial already used)\n"
+        "  --device --remove <gid>                   Remove device\n"
+        "  --device --show                           Show all devices\n"
+        "  --device --wipe [-y]                      Wipe ONLY device stuff (devices.env)\n"
         "\n"
-        "Wipe option:\n"
-        "  -w, --wipe                           Wipe all config\n"
+        "Wipe all:\n"
+        "  -w, --wipe [-y]                       Wipe ALL config\n"
         "\n"
         "Examples:\n"
         "  hostrf -c -a 1.2.3.4:61007\n"
-        "  hostrf -c -a -w -y\n"
-        "  hostrf -c --device --add 0:pluto_aaa\n"
-        "  hostrf -c --device --remove 0\n"
-        "  hostrf -c --device --wipe\n"
         "  hostrf -c -a --show\n"
+        "  hostrf -c -a -w -y\n"
+        "\n"
+        "  hostrf -c -h lab-host-01\n"
         "  hostrf -c -h --show\n"
+        "  hostrf -c -h --wipe -y\n"
+        "\n"
+        "  hostrf -c --device --add --pluto 0:pluto_aaa:123123\n"
+        "  hostrf -c --device --remove 0\n"
         "  hostrf -c --device --show\n"
-        "  hostrf -c --host lab-host-01\n"
-        "  hostrf -c --host --wipe\n"
+        "  hostrf -c --device --wipe -y\n"
+        "\n"
+        "  hostrf -c -w -y\n"
         "\n"
     )
 
@@ -121,44 +131,64 @@ def _read_env_kv(path: Path) -> Dict[str, str]:
         out[k.strip()] = v.strip().strip('"').strip("'")
     return out
 
-def _parse_device_pair(tok: str) -> Tuple[int, str]:
-    # "<int:str>" => "0:pluto_aaa"
-    if ":" not in tok:
-        raise ValueError("Expected <int:str> like 0:pluto_aaa")
-    a, b = tok.split(":", 1)
-    local_id = int(a.strip())
-    device_id = b.strip()
-    if local_id < 0:
-        raise ValueError("local_id must be >= 0")
-    if not device_id:
-        raise ValueError("device_id is empty")
-    return local_id, device_id
 
-def _read_devices() -> Dict[int, str]:
+# -----------------------------
+# Device storage (future-friendly)
+#   devices.env keys:
+#     DEVICE_<gid>_TYPE=pluto
+#     DEVICE_<gid>_NAME=pluto_aaa
+#     DEVICE_<gid>_IDENT_KIND=iio_serial
+#     DEVICE_<gid>_IDENT=<serial>
+# -----------------------------
+
+_DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
+
+def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
+    # <gid:name:iio_serial>
+    parts = [p.strip() for p in (tok or "").split(":")]
+    if len(parts) != 3:
+        raise ValueError("Expected <gid:name:iio_serial>")
+    gid_s, name, iio_serial = parts
+    gid = int(gid_s)
+    if gid < 0:
+        raise ValueError("gid must be >= 0")
+    if not name:
+        raise ValueError("name is empty")
+    if not iio_serial:
+        raise ValueError("iio_serial is empty")
+    return gid, name, iio_serial
+
+def _read_device_records() -> Dict[int, Dict[str, str]]:
     kv = _read_env_kv(_devices_env_path())
-    out: Dict[int, str] = {}
+    recs: Dict[int, Dict[str, str]] = {}
     for k, v in kv.items():
-        if not k.upper().startswith("DEVICE_") or not k.upper().endswith("_ID"):
+        m = _DEVICE_KEY_RE.match(k.strip())
+        if not m:
             continue
-        mid = k.strip()[7:-3]  # between DEVICE_ and _ID
-        try:
-            lid = int(mid)
-        except Exception:
-            continue
-        out[lid] = str(v).strip()
-    return out
+        gid = int(m.group(1))
+        field = m.group(2).upper().strip()
+        recs.setdefault(gid, {})[field] = str(v).strip()
+    return recs
 
-def _write_devices(mapping: Dict[int, str]) -> None:
-    kv: Dict[str, str] = {}
-    for lid in sorted(mapping.keys()):
-        kv[f"DEVICE_{lid}_ID"] = mapping[lid]
-    _write_env_kv(_devices_env_path(), kv)
+def _write_device_records(recs: Dict[int, Dict[str, str]]) -> None:
+    out: Dict[str, str] = {}
+    for gid in sorted(recs.keys()):
+        fields = recs[gid]
+        order = ["TYPE", "NAME", "IDENT_KIND", "IDENT"]
+        for f in order:
+            if f in fields and fields[f] != "":
+                out[f"DEVICE_{gid}_{f}"] = fields[f]
+        for f in sorted(fields.keys()):
+            if f in order:
+                continue
+            if fields[f] != "":
+                out[f"DEVICE_{gid}_{f}"] = fields[f]
+    _write_env_kv(_devices_env_path(), out)
 
 
 # -----------------------------
 # Actions (ONLY the ones listed)
 # -----------------------------
-
 def _configure_addr(addr: str) -> int:
     try:
         host, grpc_port = _parse_hostport(addr)
@@ -168,28 +198,30 @@ def _configure_addr(addr: str) -> int:
 
     cert_port = int(grpc_port) + 1
 
-    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    # Ensure <repo>/config/remoteRF_host exists
+    cfg_dir = _cfg_dir()
+    cfg_dir.mkdir(parents=True, exist_ok=True)
 
-    ca_out = _ca_path()
+    # With your new cert_fetcher.py, the cert + .env live in cfg_dir
     ok = fetch_and_save_ca_cert(
         host,
         cert_port,
-        out_path=ca_out,
+        env_dir=cfg_dir,                 # writes ca.crt + updates cfg_dir/.env
+        env_filename="net.env",
+        cert_filename="ca.crt",
+        grpc_addr=f"{host}:{grpc_port}", # also upserts REMOTERF_ADDR
         timeout_sec=3.0,
         overwrite=True,
     )
     if not ok:
         print(f"Failed to fetch CA cert from {host}:{cert_port}.", file=sys.stderr)
         return 1
-
-    _write_env_kv(_net_env_path(), {
-        "REMOTERF_ADDR": f"{host}:{grpc_port}",
-        "REMOTERF_CA_CERT": str(ca_out.resolve()),
-    })
-
+    
     print("Configured network:")
     print(f"  {_net_env_path()}")
+    print(f"  {cfg_dir / '.env'}")
     return 0
+
 
 def _show_addr() -> int:
     p = _net_env_path()
@@ -237,43 +269,50 @@ def _show_host() -> int:
     print(f"  HOST_ID={kv.get('HOST_ID','')}")
     return 0
 
-def _device_add(pair: str) -> int:
-    lid, did = _parse_device_pair(pair)
+def _device_add_pluto(spec: str) -> int:
+    gid, name, iio_serial = _parse_pluto_add_spec(spec)
 
     _cfg_dir().mkdir(parents=True, exist_ok=True)
 
-    mapping = _read_devices()
+    recs = _read_device_records()
 
     # "appends IF id is available"
-    if lid in mapping:
-        print(f"ERROR: local_id {lid} already exists (DEVICE_{lid}_ID={mapping[lid]!r})", file=sys.stderr)
-        return 2
-    if did in mapping.values():
-        used_by = [k for k, v in mapping.items() if v == did]
-        print(f"ERROR: device_id {did!r} already used (local_id={used_by[0]})", file=sys.stderr)
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
         return 2
 
-    mapping[lid] = did
-    _write_devices(mapping)
+    # Prevent duplicate iio_serial across existing devices that use iio_serial
+    for other_gid, r in recs.items():
+        if r.get("IDENT_KIND", "") == "iio_serial" and r.get("IDENT", "") == iio_serial:
+            print(f"ERROR: iio_serial already used by global_id={other_gid}", file=sys.stderr)
+            return 2
 
-    print(f"Added device: {lid}:{did}")
+    recs[gid] = {
+        "TYPE": "pluto",
+        "NAME": name,
+        "IDENT_KIND": "iio_serial",
+        "IDENT": iio_serial,
+    }
+    _write_device_records(recs)
+
+    print(f"Added device: {gid} type=pluto name={name} iio_serial={iio_serial}")
     return 0
 
-def _device_remove(local_id_str: str) -> int:
+def _device_remove(global_id_str: str) -> int:
     try:
-        lid = int(local_id_str.strip())
+        gid = int((global_id_str or "").strip())
     except Exception:
-        print("ERROR: --remove expects <int>", file=sys.stderr)
+        print("ERROR: --remove expects <gid:int>", file=sys.stderr)
         return 2
 
-    mapping = _read_devices()
-    if lid not in mapping:
-        print(f"WARNING: local_id {lid} not present; nothing to remove.")
+    recs = _read_device_records()
+    if gid not in recs:
+        print(f"WARNING: global_id {gid} not present; nothing to remove.")
         return 0
 
-    old = mapping.pop(lid)
-    _write_devices(mapping)
-    print(f"Removed device: {lid} (was {old})")
+    recs.pop(gid, None)
+    _write_device_records(recs)
+    print(f"Removed device: {gid}")
     return 0
 
 def _device_show() -> int:
@@ -282,14 +321,19 @@ def _device_show() -> int:
         print(f"No devices configured (missing {p}).")
         return 0
 
-    mapping = _read_devices()
+    recs = _read_device_records()
     print(f"Devices: {p}")
-    if not mapping:
+    if not recs:
         print("  (none)")
         return 0
 
-    for lid in sorted(mapping.keys()):
-        print(f"  {lid}: {mapping[lid]}")
+    for gid in sorted(recs.keys()):
+        r = recs[gid]
+        dtype = r.get("TYPE", "")
+        name = r.get("NAME", "")
+        ik = r.get("IDENT_KIND", "")
+        ident = r.get("IDENT", "")
+        print(f"  {gid}: type={dtype} name={name} {ik}={ident}")
     return 0
 
 def _wipe_all(*, yes: bool) -> int:
@@ -377,22 +421,28 @@ def main() -> int:
 
     yes = False
 
-    # scopes + values / actions
+    # addr scope/actions
     addr_selected = False
     addr_value: Optional[str] = None
     addr_show = False
+    addr_wipe = False
 
+    # host scope/actions
     host_selected = False
     host_value: Optional[str] = None
     host_show = False
+    host_wipe = False
 
+    # device scope/actions
     device_selected = False
-    device_add_value: Optional[str] = None
-    device_remove_value: Optional[str] = None
     device_show = False
     device_wipe = False
+    device_add_type: Optional[str] = None
+    device_add_spec: Optional[str] = None
+    device_remove_gid: Optional[str] = None
 
-    wipe_flag = False
+    # wipe-all (only when no scope is selected at wipe time)
+    wipe_all = False
 
     i = 1
     while i < len(argv):
@@ -403,15 +453,10 @@ def main() -> int:
             i += 1
             continue
 
-        if tok in ("-w", "--wipe", "-wipe"):
-            wipe_flag = True
-            i += 1
-            continue
-
-        # network option
+        # addr scope
         if tok in ("-a", "--addr", "-addr"):
             addr_selected = True
-            # optional value (only required when setting addr)
+            # optional value
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 addr_value = argv[i + 1].strip()
                 i += 2
@@ -419,9 +464,10 @@ def main() -> int:
                 i += 1
             continue
 
-        # host option (NOTE: -h means host ONLY inside -c mode)
+        # host scope (NOTE: -h means host ONLY inside -c mode)
         if tok in ("--host", "-host", "-h"):
             host_selected = True
+            # optional value
             if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 host_value = argv[i + 1].strip()
                 i += 2
@@ -429,13 +475,13 @@ def main() -> int:
                 i += 1
             continue
 
-        # device option
+        # device scope
         if tok in ("--device", "-device", "-d"):
             device_selected = True
             i += 1
             continue
 
-        # shared "--show" for the currently selected scope
+        # show (scope-dependent)
         if tok in ("--show", "-show", "-s"):
             if device_selected:
                 device_show = True
@@ -452,70 +498,79 @@ def main() -> int:
             print("ERROR: --show must be used with -a/--addr, -h/--host, or --device", file=sys.stderr)
             return 2
 
+        # wipe (scope-dependent OR wipe-all)
+        if tok in ("-w", "--wipe", "-wipe"):
+            if device_selected:
+                device_wipe = True
+            elif host_selected:
+                host_wipe = True
+            elif addr_selected:
+                addr_wipe = True
+            else:
+                wipe_all = True
+            i += 1
+            continue
+
+        # device add/remove
         if device_selected and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
-                print("ERROR: missing value after --device --add", file=sys.stderr)
+                print("ERROR: missing device type after --device --add (expected --pluto)", file=sys.stderr)
                 return 2
-            device_add_value = argv[i + 1].strip()
-            i += 2
+            dt = argv[i + 1].strip()
+            if dt != "--pluto":
+                print("ERROR: only '--device --add --pluto <gid:name:iio_serial>' is supported", file=sys.stderr)
+                return 2
+            if i + 2 >= len(argv):
+                print("ERROR: missing spec after --device --add --pluto", file=sys.stderr)
+                return 2
+            device_add_type = "pluto"
+            device_add_spec = argv[i + 2].strip()
+            i += 3
             continue
 
         if device_selected and tok in ("--remove", "-remove", "-r"):
             if i + 1 >= len(argv):
-                print("ERROR: missing value after --device --remove", file=sys.stderr)
+                print("ERROR: missing value after --device --remove <gid>", file=sys.stderr)
                 return 2
-            device_remove_value = argv[i + 1].strip()
+            device_remove_gid = argv[i + 1].strip()
             i += 2
-            continue
-
-        if device_selected and tok in ("--wipe", "-wipe", "-w"):
-            device_wipe = True
-            i += 1
             continue
 
         print(f"ERROR: unknown option: {tok!r}", file=sys.stderr)
         return 2
 
-    # ---- Wipe behavior ----
-    # - hostrf -c -a -w -y          => wipe ONLY address stuff
-    # - hostrf -c --device --wipe   => wipe ONLY devices
-    # - hostrf -c --host --wipe     => wipe ONLY host
-    # - hostrf -c -w                => wipe ALL config
-    if wipe_flag:
-        if addr_show or host_show or device_show:
-            print("ERROR: cannot combine --show with --wipe", file=sys.stderr)
-            return 2
-
-        # scoped wipes have priority
-        if device_wipe:
-            return int(_wipe_devices_only(yes=yes))
-        if host_selected and host_value is None:
-            return int(_wipe_host_only(yes=yes))
-        if addr_selected and addr_value is None:
-            return int(_wipe_addr_only(yes=yes))
-
-        # if they didn't select a scope, wipe everything
-        if not addr_selected and not host_selected and not device_selected:
-            return int(_wipe_all(yes=yes))
-
-        # if they selected a scope but provided a value, that's ambiguous -> reject
-        if addr_selected and addr_value is not None:
-            print("ERROR: cannot use --addr <host:port> together with --wipe. Use '-a -w' to wipe address config.", file=sys.stderr)
-            return 2
-        if host_selected and host_value is not None:
-            print("ERROR: cannot use --host <name> together with --wipe. Use '--host --wipe' to wipe host config.", file=sys.stderr)
-            return 2
-        if device_selected and (device_add_value or device_remove_value):
-            print("ERROR: cannot combine device add/remove with --wipe. Use '--device --wipe' instead.", file=sys.stderr)
-            return 2
-
-        print("ERROR: wipe requested but no valid wipe target selected.", file=sys.stderr)
+    # ---- conflict checks (keep it strict) ----
+    if (addr_wipe or host_wipe or device_wipe or wipe_all) and (addr_show or host_show or device_show):
+        print("ERROR: cannot combine --show with --wipe", file=sys.stderr)
         return 2
 
-    # ---- Non-wipe actions ----
+    if addr_wipe and addr_value is not None:
+        print("ERROR: cannot use '--addr <host:port>' with wipe. Use '-a -w' to wipe address config.", file=sys.stderr)
+        return 2
+
+    if host_wipe and host_value is not None:
+        print("ERROR: cannot use '--host <name>' with wipe. Use '-h --wipe' to wipe host config.", file=sys.stderr)
+        return 2
+
+    if device_wipe and (device_add_spec is not None or device_remove_gid is not None):
+        print("ERROR: cannot combine device add/remove with device wipe. Use '--device --wipe' only.", file=sys.stderr)
+        return 2
+
+    # ---- wipe execution ----
+    if wipe_all or addr_wipe or host_wipe or device_wipe:
+        if wipe_all:
+            return int(_wipe_all(yes=yes))
+        if addr_wipe:
+            return int(_wipe_addr_only(yes=yes))
+        if host_wipe:
+            return int(_wipe_host_only(yes=yes))
+        if device_wipe:
+            return int(_wipe_devices_only(yes=yes))
+        return 2
+
+    # ---- non-wipe actions ----
     did_any = False
 
-    # show first (can be combined with other non-wipe actions if you want)
     if addr_show:
         rc = _show_addr()
         if rc != 0:
@@ -546,14 +601,14 @@ def main() -> int:
             return rc
         did_any = True
 
-    if device_add_value is not None:
-        rc = _device_add(device_add_value)
+    if device_add_type == "pluto" and device_add_spec is not None:
+        rc = _device_add_pluto(device_add_spec)
         if rc != 0:
             return rc
         did_any = True
 
-    if device_remove_value is not None:
-        rc = _device_remove(device_remove_value)
+    if device_remove_gid is not None:
+        rc = _device_remove(device_remove_gid)
         if rc != 0:
             return rc
         did_any = True
@@ -563,3 +618,7 @@ def main() -> int:
         return 2
 
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

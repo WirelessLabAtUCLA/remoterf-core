@@ -13,6 +13,8 @@ venv.bak/
 
 # Exclude .env files
 .env
+*.env
+*.crt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
