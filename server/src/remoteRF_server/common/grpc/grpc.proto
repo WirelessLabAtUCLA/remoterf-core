@@ -3,7 +3,7 @@ syntax = "proto3";
 option java_package = "com.example.demo";
 option java_outer_classname = "DemoProtos";
 
-package remote_rf;
+package remoterf;
 
 service GenericRPC {
     rpc Call (GenericRPCRequest) returns (GenericRPCResponse);

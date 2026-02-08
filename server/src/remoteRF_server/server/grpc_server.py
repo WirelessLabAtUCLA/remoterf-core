@@ -7,7 +7,7 @@ import time
 
 from typing import Tuple 
 
-os.system('clear')
+# os.system('clear')
 
 from concurrent import futures
 from datetime import datetime
@@ -25,6 +25,9 @@ from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
+
+from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
+from ..host import host_tunnel_pb2_grpc
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -111,6 +114,19 @@ def serve():
     server_credentials = grpc.ssl_server_credentials(
         ((private_key, certificate_chain,),))
     
+    # --- attach HostTunnel to the SAME grpc server/port/creds ---
+    directory_env = Path(__file__).resolve().parent.parent / "config" / ".env.host_directory"
+    registry = HostTunnelRegistry(env_path=str(directory_env))
+
+    host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
+        HostTunnelServicer(registry),
+        server
+    )
+
+    # Inject registry into rpc_manager so it can forward
+    rpc_manager.set_tunnel_registry(registry)
+    
+    # Cert fetcher
     from .cert_provider import start_cert_provider
     cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(os.getenv("CERT_PORT", "61006")))
 

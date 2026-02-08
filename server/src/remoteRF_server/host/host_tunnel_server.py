@@ -1,17 +1,7 @@
-# host_tunnel_server.py
-#
-# Updated to relay your *existing* GenericRPC payloads end-to-end:
-#   - Tunnel RpcRequest carries remote_rf.GenericRPCRequest (function_name + map<string, Argument>)
-#   - Tunnel RpcResponse carries remote_rf.GenericRPCResponse (map<string, Argument>)
-#
-# REQUIRED host_tunnel.proto changes (summary):
-#   - DeviceInfo must include: string device_id
-#   - RpcRequest must include: string device_id, uint32 local_device_id, remote_rf.GenericRPCRequest request
-#   - RpcResponse must include: remote_rf.GenericRPCResponse response
-#   - (Optional) keep legacy fields like global_device_id if you want, but this code does not require them.
+# src/remoteRF_host/host/host_tunnel_server.py
 
-import os
-import re
+from __future__ import annotations
+
 import threading
 import queue
 import time
@@ -20,38 +10,29 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any, List, Set, Iterator
 from concurrent.futures import Future
 from concurrent import futures
+from pathlib import Path
 
 import grpc
 
 # Your existing GenericRPC schema compiled to python.
-# NOTE: adjust this import if your generated module name differs.
-# This must contain: GenericRPCRequest, GenericRPCResponse, Argument
 from ..common.grpc import grpc_pb2 as generic_pb2  # type: ignore
 
 # Your existing map_arg helper that produces generic_pb2.Argument
-# (same helper you use in PlutoServer)
 from ..common.utils.process_arg import map_arg  # type: ignore
 
 from . import host_tunnel_pb2, host_tunnel_pb2_grpc  # type: ignore
 
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def _sanitize_env_key(s: str) -> str:
-    # env keys: A-Z0-9_
-    s = s.strip().upper()
-    s = re.sub(r"[^A-Z0-9_]", "_", s)
-    s = re.sub(r"_+", "_", s)
-    return s[:120]  # avoid insane keys
+from .host_directory_store import (
+    EnvStore,
+    DeviceIdConflictError,
+    now_ms,
+    sanitize_env_key,
+    csv_split,
+    cfg_dir_from_file,
+)
 
 
 def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
-    """
-    Copy map<string, Argument> into another map<string, Argument>.
-    Works for protobuf map containers or plain dicts.
-    """
     if src_map is None:
         return
     try:
@@ -60,73 +41,6 @@ def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
     except Exception:
         for k, v in dict(src_map).items():
             dst_map[str(k)].CopyFrom(v)
-
-
-class _EnvAppendOnly:
-    """
-    "Append-only" in the sense that keys/lists only ever GROW.
-    We rewrite the file to update list values (since .env has no true append operator),
-    but we never remove values once present.
-    """
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self._lock = threading.Lock()
-
-    def _read_lines(self) -> List[str]:
-        if not os.path.exists(self.path):
-            return []
-        with open(self.path, "r", encoding="utf-8") as f:
-            return f.read().splitlines()
-
-    def _write_lines(self, lines: List[str]) -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + ("\n" if lines else ""))
-
-    def append_to_csv_list(self, key: str, value: str) -> None:
-        key = _sanitize_env_key(key)
-        value = value.strip()
-        if not value:
-            return
-
-        with self._lock:
-            lines = self._read_lines()
-            idx = None
-            cur = ""
-
-            for i, ln in enumerate(lines):
-                if ln.startswith(key + "="):
-                    idx = i
-                    cur = ln[len(key) + 1:].strip()
-                    break
-
-            existing = [x.strip() for x in cur.split(",") if x.strip()] if cur else []
-            if value in existing:
-                return
-
-            existing.append(value)
-            new_line = f"{key}=" + ",".join(existing)
-
-            if idx is None:
-                lines.append(new_line)
-            else:
-                lines[idx] = new_line
-
-            self._write_lines(lines)
-
-    def set_kv_if_absent(self, key: str, value: str) -> None:
-        key = _sanitize_env_key(key)
-        value = value.strip()
-        if not value:
-            return
-
-        with self._lock:
-            lines = self._read_lines()
-            for ln in lines:
-                if ln.startswith(key + "="):
-                    return
-            lines.append(f"{key}={value}")
-            self._write_lines(lines)
 
 
 @dataclass(frozen=True)
@@ -163,7 +77,7 @@ class HostSession:
         self.out_q: "queue.Queue[Optional[host_tunnel_pb2.HostFrame]]" = queue.Queue(maxsize=outbound_max)
         self.inflight: Dict[str, Future] = {}
         self.inflight_lock = threading.Lock()
-        self.last_heartbeat_ms = _now_ms()
+        self.last_heartbeat_ms = now_ms()
         self.alive = True
 
     def send(self, frame: host_tunnel_pb2.HostFrame, *, timeout: float = 2.0) -> bool:
@@ -182,47 +96,208 @@ class HostSession:
         except Exception:
             pass
 
-        # fail all inflight
         with self.inflight_lock:
             for _, fut in list(self.inflight.items()):
                 if not fut.done():
                     fut.set_exception(RuntimeError(f"Host '{self.host_id}' disconnected"))
             self.inflight.clear()
 
-
 class HostTunnelRegistry:
     """
-    Owns:
-      - sessions: host_id -> HostSession
-      - routes: device_id -> DeviceRoute(host_id, local_id)
-      - directory/status: known hosts/devices and online/last_seen
-      - persistence into a local .env file (append-only growth)
+    Persistent host/device directory + live sessions.
+
+    Persists under <repo_root>/.config/:
+      - host_directory.env        (append-only CSV lists)
+      - host_directory_meta.env   (upsert metadata; never deletes keys)
+
+    Fast per-RPC routing helpers:
+      - is_host_device(device_id) -> bool
+      - is_host_device_active(device_id) -> bool (cached TTL)
+      - get_host_for_device(device_id) -> Optional[str]
+
+    UI/diagnostics:
+      - device_directory_cached() -> {device_id: (host_id, device_info, is_active)} (cached TTL)
+
+    Enforces:
+      - device_id is globally unique across hosts (rejects conflicting host announce)
     """
-    def __init__(self, *, env_path: str = ".env.host_directory") -> None:
+
+    def __init__(self, *, active_cache_ttl_ms: int = 250, dir_cache_ttl_ms: int = 1000) -> None:
         self._lock = threading.RLock()
 
-        self._hosts: Dict[str, HostSession] = {}
-        self._routes: Dict[str, DeviceRoute] = {}  # device_id -> route
+        # live sessions
+        self._hosts: Dict[str, HostSession] = {}  # host_id -> session
 
+        # persistent-ish directory state
+        self._routes: Dict[str, DeviceRoute] = {}              # device_id -> route(host_id, local_id)
+        self._host_devices: Dict[str, Set[str]] = {}           # host_id -> set(device_id)
+        self._device_infos: Dict[str, host_tunnel_pb2.DeviceInfo] = {}  # device_id -> DeviceInfo
+
+        # status (rebuilt + updated live)
         self._host_status: Dict[str, HostStatus] = {}
         self._device_status: Dict[str, DeviceStatus] = {}
 
-        self._host_devices: Dict[str, Set[str]] = {}  # host_id -> set(device_id)
+        # persistence
+        cfg = cfg_dir_from_file(__file__)
+        cfg.mkdir(parents=True, exist_ok=True)
+        self._env_lists = EnvStore(cfg / "host_directory.env")
+        self._env_meta = EnvStore(cfg / "host_directory_meta.env")
 
-        self._env = _EnvAppendOnly(env_path)
+        # caches
+        self._active_hosts_cache: Set[str] = set()
+        self._active_hosts_cache_ts_ms: int = 0
+        self._active_hosts_cache_ttl_ms: int = int(active_cache_ttl_ms)
 
-    # ---------- persistence ----------
+        self._dir_cache: Dict[str, Tuple[str, Any, bool]] = {}
+        self._dir_cache_ts_ms: int = 0
+        self._dir_cache_ttl_ms: int = int(dir_cache_ttl_ms)
+
+        self._load_persisted()
+
+    # ---------------------------
+    # caching helpers
+    # ---------------------------
+
+    def _invalidate_caches_locked(self) -> None:
+        # must be called under self._lock
+        self._active_hosts_cache_ts_ms = 0
+        self._dir_cache_ts_ms = 0
+
+    def _refresh_active_hosts_cache_locked(self, now: int) -> None:
+        # must be called under self._lock
+        if self._active_hosts_cache_ts_ms and (now - self._active_hosts_cache_ts_ms) < self._active_hosts_cache_ttl_ms:
+            return
+        self._active_hosts_cache = {hid for hid, sess in self._hosts.items() if sess is not None and sess.alive}
+        self._active_hosts_cache_ts_ms = now
+
+    # ---------------------------
+    # persistence load
+    # ---------------------------
+
+    def _load_persisted(self) -> None:
+        """
+        Rebuild directory state from repo_root/.config/*.env
+
+        On boot, everything starts offline until hosts reconnect.
+        This restores *directory + metadata* only (routes/devices/labels).
+        """
+        kv_lists = self._env_lists.read_kv()
+        kv_meta = self._env_meta.read_kv()
+
+        known_hosts = csv_split(kv_lists.get("KNOWN_HOSTS", ""))
+        known_devices = csv_split(kv_lists.get("KNOWN_DEVICES", ""))
+
+        # also accept hosts referenced by HOST_*_DEVICES keys even if KNOWN_HOSTS drifted
+        hosts_from_keys: Set[str] = set()
+        for k, v in kv_lists.items():
+            if k.startswith("HOST_") and k.endswith("_DEVICES"):
+                # We don't know the original host_id from the sanitized key reliably.
+                # That's fine; we still load routes primarily from DEVICE_*_HOST in meta.
+                # But we DO want to retain the device list; we’ll stitch it via meta host ids.
+                # So: just collect devices from these keys.
+                pass
+
+        # Reset directory + status (do not touch live sessions)
+        with self._lock:
+            self._routes.clear()
+            self._host_devices.clear()
+            self._device_infos.clear()
+            self._host_status.clear()
+            self._device_status.clear()
+
+            # seed known hosts as offline
+            for hid in known_hosts:
+                if hid:
+                    self._host_status[hid] = HostStatus(host_id=hid, online=False, last_seen_ms=0)
+                    self._host_devices.setdefault(hid, set())
+
+            # collect devices that appear anywhere
+            devices_from_host_lists: Set[str] = set()
+            for k, v in kv_lists.items():
+                if k.startswith("HOST_") and k.endswith("_DEVICES"):
+                    devices_from_host_lists.update(csv_split(v))
+
+            devices_from_meta: Set[str] = set()
+            # any DEVICE_<X>_HOST implies a known device id (but we can’t reverse sanitize_env_key)
+            # so we rely on KNOWN_DEVICES + HOST_*_DEVICES as primary device-id sources.
+            # meta augments those devices; it can’t introduce new raw device ids safely.
+            all_devices: List[str] = sorted(set(known_devices) | devices_from_host_lists)
+
+            # build device entries offline
+            for device_id in all_devices:
+                if not device_id:
+                    continue
+                dk = sanitize_env_key(device_id)
+
+                host_id = (kv_meta.get(f"DEVICE_{dk}_HOST", "") or "").strip()
+                local_id_s = (kv_meta.get(f"DEVICE_{dk}_LOCAL_ID", "") or "0").strip()
+                try:
+                    local_id = int(local_id_s)
+                except Exception:
+                    local_id = 0
+
+                label = (kv_meta.get(f"DEVICE_{dk}_LABEL", "") or "").strip()
+                serial = (kv_meta.get(f"DEVICE_{dk}_SERIAL", "") or "").strip()
+                kind = (kv_meta.get(f"DEVICE_{dk}_KIND", "") or "").strip()
+
+                if host_id:
+                    # ensure host exists
+                    if host_id not in self._host_status:
+                        self._host_status[host_id] = HostStatus(host_id=host_id, online=False, last_seen_ms=0)
+                    self._host_devices.setdefault(host_id, set()).add(device_id)
+
+                    # route exists even while offline
+                    self._routes[device_id] = DeviceRoute(host_id=host_id, host_local_id=int(local_id))
+
+                # keep info visible even when offline
+                self._device_infos[device_id] = host_tunnel_pb2.DeviceInfo(
+                    device_id=str(device_id),
+                    local_id=int(local_id),
+                    label=str(label),
+                    serial=str(serial),
+                    kind=str(kind),
+                )
+
+                self._device_status[device_id] = DeviceStatus(
+                    device_id=str(device_id),
+                    host_id=str(host_id),
+                    host_local_id=int(local_id),
+                    online=False,
+                    last_seen_ms=0,
+                )
+
+            self._invalidate_caches_locked()
+
+    # ---------------------------
+    # persistence write helpers
+    # ---------------------------
+
     def _persist_host(self, host_id: str) -> None:
-        self._env.append_to_csv_list("KNOWN_HOSTS", host_id)
+        self._env_lists.append_to_csv_list("KNOWN_HOSTS", host_id)
 
-    def _persist_device(self, host_id: str, device_id: str, local_id: int) -> None:
-        self._env.append_to_csv_list("KNOWN_DEVICES", device_id)
-        self._env.append_to_csv_list(f"HOST_{_sanitize_env_key(host_id)}_DEVICES", device_id)
-        # set once (append-only semantics)
-        self._env.set_kv_if_absent(f"DEVICE_{_sanitize_env_key(device_id)}_HOST", host_id)
-        self._env.set_kv_if_absent(f"DEVICE_{_sanitize_env_key(device_id)}_LOCAL_ID", str(int(local_id)))
+    def _persist_device(self, host_id: str, device_id: str, local_id: int, device_info: Any) -> None:
+        self._env_lists.append_to_csv_list("KNOWN_DEVICES", device_id)
+        self._env_lists.append_to_csv_list(f"HOST_{sanitize_env_key(host_id)}_DEVICES", device_id)
 
-    # ---------- directory/status ----------
+        dk = sanitize_env_key(device_id)
+        self._env_meta.upsert_kv(f"DEVICE_{dk}_HOST", host_id)
+        self._env_meta.upsert_kv(f"DEVICE_{dk}_LOCAL_ID", str(int(local_id)))
+
+        label = str(getattr(device_info, "label", "") or "").strip()
+        serial = str(getattr(device_info, "serial", "") or "").strip()
+        kind = str(getattr(device_info, "kind", "") or "").strip()
+
+        if label:
+            self._env_meta.upsert_kv(f"DEVICE_{dk}_LABEL", label)
+        if serial:
+            self._env_meta.upsert_kv(f"DEVICE_{dk}_SERIAL", serial)
+        if kind:
+            self._env_meta.upsert_kv(f"DEVICE_{dk}_KIND", kind)
+
+    # ---------------------------
+    # directory/status mutators
+    # ---------------------------
+
     def register_host(self, host_id: str, session: HostSession) -> None:
         with self._lock:
             old = self._hosts.get(host_id)
@@ -233,10 +308,12 @@ class HostTunnelRegistry:
 
             hs = self._host_status.get(host_id) or HostStatus(host_id=host_id)
             hs.online = True
-            hs.last_seen_ms = _now_ms()
+            hs.last_seen_ms = now_ms()
             self._host_status[host_id] = hs
 
+            self._host_devices.setdefault(host_id, set())
             self._persist_host(host_id)
+            self._invalidate_caches_locked()
 
     def drop_host(self, host_id: str) -> None:
         with self._lock:
@@ -246,42 +323,75 @@ class HostTunnelRegistry:
 
             hs = self._host_status.get(host_id) or HostStatus(host_id=host_id)
             hs.online = False
-            hs.last_seen_ms = _now_ms()
+            hs.last_seen_ms = now_ms()
             self._host_status[host_id] = hs
 
-            # Mark that host's devices offline but KEEP routes (so directory stays visible)
+            # mark that host's devices offline (keep routes)
             for did in self._host_devices.get(host_id, set()):
                 ds = self._device_status.get(did)
                 if ds is not None:
                     ds.online = False
-                    ds.last_seen_ms = _now_ms()
+                    ds.last_seen_ms = now_ms()
+
+            self._invalidate_caches_locked()
+
+    def heartbeat(self, host_id: str, unix_ms: int = 0) -> None:
+        now = int(unix_ms) or now_ms()
+        with self._lock:
+            hs = self._host_status.get(host_id) or HostStatus(host_id=host_id)
+            hs.online = True
+            hs.last_seen_ms = now
+            self._host_status[host_id] = hs
+
+            for did in self._host_devices.get(host_id, set()):
+                ds = self._device_status.get(did)
+                if ds is not None:
+                    ds.online = True
+                    ds.last_seen_ms = now
+
+            # no need to invalidate full cache; active-cache TTL handles this
+            # but host status flips can matter; be conservative:
+            self._invalidate_caches_locked()
 
     def announce_devices(self, host_id: str, devices: list) -> None:
         """
-        devices[*] must include:
-          - d.device_id (string) globally unique & stable
-          - d.local_id (int)
+        Enforce global uniqueness of device_id:
+          - If any device_id is already owned by a different host -> raise DeviceIdConflictError.
         """
-        now = _now_ms()
+        # conflict check first (no partial apply)
+        with self._lock:
+            for d in devices:
+                device_id = str(getattr(d, "device_id", "")).strip()
+                if not device_id:
+                    continue
+                existing = self._routes.get(device_id)
+                if existing is not None and existing.host_id != host_id:
+                    raise DeviceIdConflictError(
+                        device_id=device_id,
+                        existing_host=existing.host_id,
+                        new_host=host_id,
+                    )
+
+        now = now_ms()
         with self._lock:
             self._host_devices.setdefault(host_id, set())
 
             for d in devices:
                 device_id = str(getattr(d, "device_id", "")).strip()
-                local_id = int(getattr(d, "local_id", -1))
-
-                if not device_id or local_id < 0:
+                if not device_id:
                     continue
 
-                # collision policy: if device_id already owned by another host, reject
-                existing = self._routes.get(device_id)
-                if existing is not None and existing.host_id != host_id:
-                    # keep existing route; ignore conflicting claim
-                    continue
+                # local_id is basically not used; keep for completeness
+                try:
+                    local_id = int(getattr(d, "local_id", 0))
+                except Exception:
+                    local_id = 0
 
+                # route
                 self._routes[device_id] = DeviceRoute(host_id=host_id, host_local_id=local_id)
                 self._host_devices[host_id].add(device_id)
 
+                # status
                 ds = self._device_status.get(device_id) or DeviceStatus(
                     device_id=device_id,
                     host_id=host_id,
@@ -293,22 +403,111 @@ class HostTunnelRegistry:
                 ds.last_seen_ms = now
                 self._device_status[device_id] = ds
 
-                self._persist_device(host_id, device_id, local_id)
+                # info (copy protobuf if possible)
+                try:
+                    tmp = host_tunnel_pb2.DeviceInfo()
+                    tmp.CopyFrom(d)
+                    self._device_infos[device_id] = tmp
+                except Exception:
+                    # fallback minimal
+                    self._device_infos[device_id] = host_tunnel_pb2.DeviceInfo(
+                        device_id=device_id,
+                        local_id=int(local_id),
+                        label=str(getattr(d, "label", "") or ""),
+                        serial=str(getattr(d, "serial", "") or ""),
+                        kind=str(getattr(d, "kind", "") or ""),
+                    )
 
-    def heartbeat(self, host_id: str, unix_ms: int = 0) -> None:
-        now = int(unix_ms) or _now_ms()
+                self._persist_device(host_id, device_id, local_id, d)
+
+            self._invalidate_caches_locked()
+
+    # ---------------------------
+    # FAST PATHS (use per-RPC)
+    # ---------------------------
+
+    def is_host_device(self, device_id: str) -> bool:
+        """
+        O(1): does the directory route this device_id to a host?
+        (Host may be offline.)
+        """
+        did = (device_id or "").strip()
+        if not did:
+            return False
         with self._lock:
-            hs = self._host_status.get(host_id) or HostStatus(host_id=host_id)
-            hs.online = True
-            hs.last_seen_ms = now
-            self._host_status[host_id] = hs
+            return did in self._routes
 
-            # optional: also refresh device last_seen for devices on that host
-            for did in self._host_devices.get(host_id, set()):
-                ds = self._device_status.get(did)
-                if ds is not None:
-                    ds.online = True
-                    ds.last_seen_ms = now
+    def is_host_device_active(self, device_id: str) -> bool:
+        """
+        O(1) route lookup + cached host-alive check (TTL).
+        True iff device routes to a host AND that host's tunnel session is alive.
+        """
+        did = (device_id or "").strip()
+        if not did:
+            return False
+
+        now = now_ms()
+        with self._lock:
+            route = self._routes.get(did)
+            if route is None:
+                return False
+            self._refresh_active_hosts_cache_locked(now)
+            return route.host_id in self._active_hosts_cache
+
+    def get_host_for_device(self, device_id: str) -> Optional[str]:
+        did = (device_id or "").strip()
+        if not did:
+            return None
+        with self._lock:
+            r = self._routes.get(did)
+            return r.host_id if r else None
+
+    # ---------------------------
+    # UI/diagnostics snapshots
+    # ---------------------------
+
+    def device_directory_cached(self, *, ttl_ms: Optional[int] = None) -> Dict[str, Tuple[str, Any, bool]]:
+        """
+        Returns:
+          { device_id: (host_id, device_info, is_active) }
+
+        Cached rebuild at most once per ttl_ms.
+        """
+        now = now_ms()
+        ttl = int(self._dir_cache_ttl_ms if ttl_ms is None else ttl_ms)
+
+        with self._lock:
+            if self._dir_cache_ts_ms and (now - self._dir_cache_ts_ms) < ttl:
+                return dict(self._dir_cache)
+
+            self._refresh_active_hosts_cache_locked(now)
+
+            out: Dict[str, Tuple[str, Any, bool]] = {}
+            for device_id, route in self._routes.items():
+                info0 = self._device_infos.get(device_id)
+                info = info0
+                if info0 is not None:
+                    tmp = host_tunnel_pb2.DeviceInfo()
+                    try:
+                        tmp.CopyFrom(info0)
+                        info = tmp
+                    except Exception:
+                        info = info0
+
+                is_active = route.host_id in self._active_hosts_cache
+                out[device_id] = (route.host_id, info, is_active)
+
+            self._dir_cache = out
+            self._dir_cache_ts_ms = now
+            return dict(out)
+
+    # ---------------------------
+    # misc accessors
+    # ---------------------------
+
+    def list_routes(self) -> Dict[str, Tuple[str, int]]:
+        with self._lock:
+            return {did: (r.host_id, r.host_local_id) for did, r in self._routes.items()}
 
     def list_hosts(self) -> Dict[str, HostStatus]:
         with self._lock:
@@ -318,11 +517,10 @@ class HostTunnelRegistry:
         with self._lock:
             return dict(self._device_status)
 
-    def list_routes(self) -> Dict[str, Tuple[str, int]]:
-        with self._lock:
-            return {did: (r.host_id, r.host_local_id) for did, r in self._routes.items()}
+    # ---------------------------
+    # forwarding (unchanged)
+    # ---------------------------
 
-    # ---------- forwarding ----------
     def _get_session_and_route(self, device_id: str) -> Tuple[HostSession, DeviceRoute]:
         with self._lock:
             route = self._routes.get(str(device_id))
@@ -344,10 +542,6 @@ class HostTunnelRegistry:
         deadline_unix_ms: int = 0,
         cancel_on_timeout: bool = False,
     ) -> "generic_pb2.GenericRPCResponse":
-        """
-        Forward a GenericRPCRequest to the host that owns device_id.
-        Returns GenericRPCResponse (map<string, Argument> results).
-        """
         sess, route = self._get_session_and_route(str(device_id))
 
         req_id = secrets.token_hex(12)
@@ -383,6 +577,7 @@ class HostTunnelRegistry:
                     sess.send(host_tunnel_pb2.HostFrame(cancel=host_tunnel_pb2.Cancel(req_id=req_id)))
                 except Exception:
                     pass
+
             with sess.inflight_lock:
                 sess.inflight.pop(req_id, None)
 
@@ -434,20 +629,15 @@ class HostTunnelRegistry:
             cancel_on_timeout=cancel_on_timeout,
         )
 
-
 def handle_host_device(
     registry: HostTunnelRegistry,
     *,
     host_id: str,
     device_id: str,
     function_name: str,
-    args: Any,  # map<string, Argument>
+    args: Any,
     timeout_sec: float = 10.0,
 ) -> Dict[str, Any]:
-    """
-    Convenience wrapper that mirrors your existing local call style:
-      (function_name, args_map) -> dict(map results)
-    """
     req = generic_pb2.GenericRPCRequest(function_name=str(function_name))
     _copy_argument_map(req.args, args)
 
@@ -458,8 +648,6 @@ def handle_host_device(
         timeout_sec=timeout_sec,
         cancel_on_timeout=True,
     )
-
-    # Keep your old return style: dict[str, Argument]
     return dict(resp.results)
 
 
@@ -471,9 +659,6 @@ def handle_host_device_request(
     request: "generic_pb2.GenericRPCRequest",
     timeout_sec: float = 10.0,
 ) -> "generic_pb2.GenericRPCResponse":
-    """
-    Fully seamless relay: pass in the client GenericRPCRequest and get back GenericRPCResponse.
-    """
     return registry.forward_request_by_host_device(
         host_id=host_id,
         device_id=device_id,
@@ -484,11 +669,6 @@ def handle_host_device_request(
 
 
 class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
-    """
-    Bidi stream:
-      host -> server: hello, device_announce, rpc_response, heartbeat, cancel(optional)
-      server -> host: rpc_request, cancel(optional)
-    """
     def __init__(self, registry: HostTunnelRegistry) -> None:
         self.registry = registry
 
@@ -496,6 +676,7 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
         host_id: Optional[str] = None
         session: Optional[HostSession] = None
         stop = threading.Event()
+        fatal: Dict[str, str] = {}  # {"code": "...", "details": "..."}
 
         def inbound_loop():
             nonlocal host_id, session
@@ -511,9 +692,12 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         session = HostSession(host_id)
                         self.registry.register_host(host_id, session)
 
-                        # optional: immediate ack/heartbeat back to host
                         try:
-                            session.send(host_tunnel_pb2.HostFrame(heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=_now_ms())))
+                            session.send(
+                                host_tunnel_pb2.HostFrame(
+                                    heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())
+                                )
+                            )
                         except Exception:
                             pass
 
@@ -521,11 +705,20 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         if session is None or host_id is None:
                             continue
                         ann = frame.device_announce
-                        self.registry.announce_devices(host_id, list(ann.devices))
-
-                        # optional ack
                         try:
-                            session.send(host_tunnel_pb2.HostFrame(heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=_now_ms())))
+                            self.registry.announce_devices(host_id, list(ann.devices))
+                        except DeviceIdConflictError as e:
+                            fatal["code"] = "ALREADY_EXISTS"
+                            fatal["details"] = str(e)
+                            stop.set()
+                            return
+
+                        try:
+                            session.send(
+                                host_tunnel_pb2.HostFrame(
+                                    heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())
+                                )
+                            )
                         except Exception:
                             pass
 
@@ -543,11 +736,10 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
 
                     elif which == "heartbeat":
                         if session is not None and host_id is not None:
-                            session.last_heartbeat_ms = int(frame.heartbeat.unix_ms) or _now_ms()
+                            session.last_heartbeat_ms = int(frame.heartbeat.unix_ms) or now_ms()
                             self.registry.heartbeat(host_id, int(frame.heartbeat.unix_ms) or 0)
 
                     elif which == "cancel":
-                        # Host-initiated cancel (rare). If you support host cancelling, handle it here.
                         pass
 
             except Exception:
@@ -562,8 +754,14 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
         t = threading.Thread(target=inbound_loop, daemon=True)
         t.start()
 
-        # outbound loop: yield frames from session queue
         while not stop.is_set():
+            if fatal:
+                code = fatal.get("code", "")
+                details = fatal.get("details", "fatal")
+                if code == "ALREADY_EXISTS":
+                    context.abort(grpc.StatusCode.ALREADY_EXISTS, details)
+                context.abort(grpc.StatusCode.UNKNOWN, details)
+
             if session is None:
                 time.sleep(0.05)
                 continue
@@ -585,10 +783,6 @@ def build_server_credentials(
     client_ca_pem: Optional[bytes] = None,
     require_client_auth: bool = True,
 ) -> grpc.ServerCredentials:
-    """
-    If you pass client_ca_pem, this enforces mTLS for hosts.
-    If you do not pass client_ca_pem, it will still be TLS server-auth only.
-    """
     if client_ca_pem:
         return grpc.ssl_server_credentials(
             ((private_key_pem, certificate_chain_pem,),),
@@ -606,24 +800,15 @@ def start_host_tunnel_server(
     registry: Optional[HostTunnelRegistry] = None,
     max_workers: int = 32,
 ) -> Tuple[grpc.Server, threading.Thread, HostTunnelRegistry]:
-    """
-    Start the host tunnel gRPC server on (host, port) in a daemon thread.
-
-    Returns: (grpc_server, thread, registry)
-
-    Store the registry globally and use:
-      - registry.list_hosts(), registry.list_devices()
-      - handle_host_device_request(...) for seamless relay
-    """
     reg = registry or HostTunnelRegistry()
 
     options = [
-        ('grpc.max_send_message_length', 100 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
-        ('grpc.keepalive_time_ms', 30_000),
-        ('grpc.keepalive_timeout_ms', 10_000),
-        ('grpc.http2.max_pings_without_data', 0),
-        ('grpc.keepalive_permit_without_calls', 1),
+        ("grpc.max_send_message_length", 100 * 1024 * 1024),
+        ("grpc.max_receive_message_length", 100 * 1024 * 1024),
+        ("grpc.keepalive_time_ms", 30_000),
+        ("grpc.keepalive_timeout_ms", 10_000),
+        ("grpc.http2.max_pings_without_data", 0),
+        ("grpc.keepalive_permit_without_calls", 1),
     ]
 
     server = grpc.server(
