@@ -17,6 +17,10 @@ class RpcManager:
         # try:
         if function_name_args[0] == "Pluto":
             if 'a' in args:
+                
+                # todo: host -> split pipeline
+                # Check device directory to determine whether its local or host
+                # Route accordingly
                 return PlutoServer.handle_call(function_name=function_name, args=args)
             else:
                 return {'a': map_arg('No token provided')}
