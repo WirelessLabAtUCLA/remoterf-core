@@ -1,30 +1,14 @@
 # host_tunnel_agent.py
 #
-# Host-side agent (UPDATED):
-#   - Reads HOST_ID + per-device unique IDs from a local .env file
-#   - Connects to main server via HostTunnel bidi stream
-#   - Sends HostHello(host_id=...) and DeviceAnnounce(devices=[... device_id ...])
-#   - Receives RpcRequest(request=remote_rf.GenericRPCRequest) and executes locally
-#   - Replies with RpcResponse(response=remote_rf.GenericRPCResponse)
+# Host-side agent (repo-local config):
+#   Reads config from:
+#     <repo>/config/remoteRF_host/net.env     (REMOTERF_ADDR, REMOTERF_CA_CERT, optional mTLS)
+#     <repo>/config/remoteRF_host/host.env    (HOST_ID, optional HOST_MASTER_TOKEN)
+#     <repo>/config/remoteRF_host/devices.env (DEVICE_<n>_ID or DEVICE_MAP)
 #
-# Expected .env format (example):
-#   HOST_ID=host-ucla-lab-01
-#   HOST_MASTER_TOKEN=***REMOVED***
-#   DEVICE_0_ID=pluto-10447392da11001009001500f02af8a678
-#   DEVICE_1_ID=pluto-10447392da110010f9ff1500612ff8ecb0
-#   # optional alternative mapping:
-#   # DEVICE_MAP=0:pluto-aaa,1:pluto-bbb
-#
-# Notes:
-#   - This agent will OVERRIDE args['a'] (token) to a host-local master token with _force and local_id,
-#     so your existing PlutoServer/device_manager token gating on the host can remain unchanged.
-#     (Main server still enforces reservations/tokens; host just executes.)
-#
-# Proto assumptions:
-#   - grpc_host.proto (package remoterf) imports grpc.proto (package remote_rf)
-#   - DeviceInfo includes: string device_id
-#   - RpcRequest includes: remote_rf.GenericRPCRequest request
-#   - RpcResponse includes: remote_rf.GenericRPCResponse response
+#   Connects to main server via HostTunnel bidi stream, announces devices, executes RPC locally.
+
+from __future__ import annotations
 
 import os
 import re
@@ -33,24 +17,22 @@ import threading
 import queue
 import traceback
 import secrets
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Iterable, List, Tuple
 
 import grpc
 
-from ..common.grpc import *
+from ..common.grpc import grpc_host_pb2 as host_pb2
+from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
 
-# IMPORTANT: use the *same* grpc_pb2 module that the generated host_pb2 imported,
-# so protobuf message classes match exactly.
 try:
-    generic_pb2 = host_pb2.grpc__pb2  # type: ignore  # generated alias inside pb2
+    generic_pb2 = host_pb2.grpc__pb2  # generated alias inside grpc_host_pb2.py
 except Exception:
-    import grpc_pb2 as generic_pb2  # type: ignore
+    from ..common.grpc import grpc_pb2 as generic_pb2  # fallback
 
-# Host-local RPC execution
 from .rpc_manager import rpc_manager  # type: ignore
 
-# Optional: host-local discovery labels (safe if absent)
 try:
     from .device_manager import get_all_devices_str  # type: ignore
 except Exception:
@@ -62,18 +44,57 @@ def _now_ms() -> int:
 
 
 # -------------------------
+# repo-local config paths
+# -------------------------
+
+def _repo_root() -> Path:
+    """
+    Try to find the repo root by locating the 'src' directory in parents and returning its parent.
+    Fallback: go up 3 levels (works for src/remoteRF_host/server/host_tunnel_agent.py).
+    """
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if parent.name == "src":
+            return parent.parent
+    return p.parents[3]
+
+def _cfg_dir() -> Path:
+    # <repo>/config/remoteRF_host/
+    return _repo_root() / "config" / "remoteRF_host"
+
+def _net_env_path() -> Path:
+    return _cfg_dir() / "net.env"
+
+def _host_env_path() -> Path:
+    return _cfg_dir() / "host.env"
+
+def _devices_env_path() -> Path:
+    return _cfg_dir() / "devices.env"
+
+
+def _resolve_path(base_env_path: Path, p: str) -> str:
+    """
+    If p is relative, resolve it relative to the directory containing base_env_path.
+    """
+    if not p:
+        return ""
+    pp = Path(p).expanduser()
+    if pp.is_absolute():
+        return str(pp)
+    return str((base_env_path.parent / pp).resolve())
+
+
+# -------------------------
 # .env parsing (no deps)
 # -------------------------
 
 _ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
-
 
 def _strip_quotes(v: str) -> str:
     v = v.strip()
     if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
         return v[1:-1]
     return v
-
 
 def load_env_file(path: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -92,7 +113,6 @@ def load_env_file(path: str) -> Dict[str, str]:
             out[k] = v
     return out
 
-
 def _parse_device_ids_from_env(env: Dict[str, str]) -> Dict[int, str]:
     """
     Supports:
@@ -102,7 +122,6 @@ def _parse_device_ids_from_env(env: Dict[str, str]) -> Dict[int, str]:
     """
     mapping: Dict[int, str] = {}
 
-    # DEVICE_MAP first (explicit)
     dm = env.get("DEVICE_MAP", "").strip()
     if dm:
         parts = [p.strip() for p in dm.split(",") if p.strip()]
@@ -118,7 +137,6 @@ def _parse_device_ids_from_env(env: Dict[str, str]) -> Dict[int, str]:
             if did:
                 mapping[lid] = did
 
-    # DEVICE_<n>_ID overrides/adds
     for k, v in env.items():
         m = re.match(r"^DEVICE_(\d+)_ID$", k.strip().upper())
         if not m:
@@ -135,7 +153,7 @@ def _parse_device_ids_from_env(env: Dict[str, str]) -> Dict[int, str]:
 
 
 # -------------------------
-# Argument coercion helpers
+# Argument helpers
 # -------------------------
 
 def _argument_bool(x: bool) -> Any:
@@ -143,25 +161,18 @@ def _argument_bool(x: bool) -> Any:
     a.bool_value = bool(x)
     return a
 
-
 def _argument_string(s: str) -> Any:
     a = generic_pb2.Argument()
     a.string_value = str(s)
     return a
 
-
 def _coerce_argument(v: Any) -> Any:
-    """
-    Ensure v becomes a generic_pb2.Argument, even if it came from another module instance.
-    """
     if v is None:
         return _argument_string("None")
 
-    # Already correct type
     if isinstance(v, generic_pb2.Argument):
         return v
 
-    # Another protobuf message with same wire format
     if hasattr(v, "SerializeToString"):
         try:
             a = generic_pb2.Argument()
@@ -170,26 +181,20 @@ def _coerce_argument(v: Any) -> Any:
         except Exception:
             pass
 
-    # Primitive fallback (covers your Ok/Error cases)
     if isinstance(v, bool):
         return _argument_bool(v)
-    if isinstance(v, (int,)):
+    if isinstance(v, int):
         a = generic_pb2.Argument()
         a.int64_value = int(v)
         return a
-    if isinstance(v, (float,)):
+    if isinstance(v, float):
         a = generic_pb2.Argument()
         a.float_value = float(v)
         return a
 
     return _argument_string(str(v))
 
-
 def _coerce_argument_map(m: Any) -> Dict[str, Any]:
-    """
-    Convert a protobuf map or dict-like of {str: Argument} into a plain dict
-    with coerced Argument values.
-    """
     out: Dict[str, Any] = {}
     if m is None:
         return out
@@ -208,24 +213,25 @@ def _coerce_argument_map(m: Any) -> Dict[str, Any]:
 
 @dataclass
 class AgentConfig:
+    # derived from net.env (REMOTERF_ADDR)
     server_host: str
     server_port: int
 
-    # .env file path on the host
-    env_path: str = ".env"
+    # repo-local envs
+    net_env_path: str
+    host_env_path: str
+    devices_env_path: str
 
-    # TLS paths (recommended)
-    ca_pem_path: Optional[str] = None           # CA cert that signed the server cert
-    client_cert_pem_path: Optional[str] = None  # client cert (mTLS)
-    client_key_pem_path: Optional[str] = None   # client private key (mTLS)
+    # TLS paths (derived from net.env)
+    ca_pem_path: Optional[str] = None
+    client_cert_pem_path: Optional[str] = None
+    client_key_pem_path: Optional[str] = None
 
-    # behavior
     heartbeat_interval_sec: float = 10.0
     reconnect_min_delay_sec: float = 1.0
     reconnect_max_delay_sec: float = 30.0
     outbound_max: int = 2048
 
-    # optional: override version string
     version: str = "host-agent/0.2"
 
 
@@ -235,14 +241,12 @@ class HostTunnelAgent:
         self._stop = threading.Event()
         self._out_q: "queue.Queue[Optional[host_pb2.HostFrame]]" = queue.Queue(maxsize=cfg.outbound_max)
 
-        # best-effort cancel map: req_id -> threading.Event
         self._cancel_flags: Dict[str, threading.Event] = {}
         self._cancel_lock = threading.Lock()
 
-        # loaded from .env per connect
         self._host_id: str = ""
         self._master_token: str = "***REMOVED***"
-        self._device_ids: Dict[int, str] = {}  # local_id -> device_id
+        self._device_ids: Dict[int, str] = {}
 
     def stop(self) -> None:
         self._stop.set()
@@ -274,22 +278,33 @@ class HostTunnelAgent:
         if ev is not None:
             ev.set()
 
-    # -------- env wiring --------
+    # -------- host inventory (host.env + devices.env) --------
 
     def _reload_from_env(self) -> None:
-        env = load_env_file(self.cfg.env_path)
+        host_env = load_env_file(self.cfg.host_env_path)
+        dev_env = load_env_file(self.cfg.devices_env_path)
 
-        host_id = env.get("HOST_ID", "").strip()
+        # HOST_ID
+        host_id = host_env.get("HOST_ID", "").strip()
         if not host_id:
-            # deterministic fallback if missing (still works, but you said hard-coded)
             host_id = os.getenv("HOST_ID", "").strip() or f"host-{secrets.token_hex(4)}"
         self._host_id = host_id
 
-        mt = env.get("HOST_MASTER_TOKEN", "").strip() or env.get("MASTER_TOKEN", "").strip()
+        # HOST_MASTER_TOKEN (optional)
+        mt = (host_env.get("HOST_MASTER_TOKEN", "").strip()
+              or host_env.get("MASTER_TOKEN", "").strip()
+              or os.getenv("HOST_MASTER_TOKEN", "").strip()
+              or os.getenv("MASTER_TOKEN", "").strip())
         if mt:
             self._master_token = mt
 
-        self._device_ids = _parse_device_ids_from_env(env)
+        # devices
+        merged = dict(dev_env)
+        # allow device map living in host.env too (optional)
+        for k, v in host_env.items():
+            if k not in merged:
+                merged[k] = v
+        self._device_ids = _parse_device_ids_from_env(merged)
 
     # -------- frames --------
 
@@ -304,10 +319,6 @@ class HostTunnelAgent:
         )
 
     def _device_announce_frame(self) -> host_pb2.HostFrame:
-        """
-        Announces devices using device IDs from .env.
-        Label comes from device_manager.get_all_devices_str() if available; else a simple default.
-        """
         labels: Dict[int, str] = {}
         if callable(get_all_devices_str):
             try:
@@ -330,78 +341,73 @@ class HostTunnelAgent:
             )
 
         return host_pb2.HostFrame(
-            device_announce=host_pb2.DeviceAnnounce(devices=infos, unix_ms=_now_ms(), full_snapshot=True)
+            device_announce=host_pb2.DeviceAnnounce(
+                devices=infos,
+                unix_ms=_now_ms(),
+                full_snapshot=True,
+            )
         )
 
-    # -------- grpc channel --------
+    # -------- channel --------
 
     def _make_channel(self) -> grpc.Channel:
-        target = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
+        addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
 
-        # Insecure for early bring-up
+        options = [
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+            ('grpc.keepalive_time_ms', 30_000),
+            ('grpc.keepalive_timeout_ms', 10_000),
+            ('grpc.http2.max_pings_without_data', 0),
+            ('grpc.keepalive_permit_without_calls', 1),
+        ]
+
         if not self.cfg.ca_pem_path:
-            return grpc.insecure_channel(target)
+            return grpc.insecure_channel(addr, options=options)
 
-        ca_pem = open(self.cfg.ca_pem_path, "rb").read()
+        ca_path = Path(self.cfg.ca_pem_path).expanduser().resolve()
+        with ca_path.open("rb") as f:
+            trusted_certs = f.read()
 
         if self.cfg.client_cert_pem_path and self.cfg.client_key_pem_path:
-            cert_pem = open(self.cfg.client_cert_pem_path, "rb").read()
-            key_pem = open(self.cfg.client_key_pem_path, "rb").read()
-            creds = grpc.ssl_channel_credentials(
-                root_certificates=ca_pem,
-                private_key=key_pem,
-                certificate_chain=cert_pem,
+            cert_path = Path(self.cfg.client_cert_pem_path).expanduser().resolve()
+            key_path = Path(self.cfg.client_key_pem_path).expanduser().resolve()
+            with cert_path.open("rb") as f:
+                client_cert = f.read()
+            with key_path.open("rb") as f:
+                client_key = f.read()
+
+            credentials = grpc.ssl_channel_credentials(
+                root_certificates=trusted_certs,
+                private_key=client_key,
+                certificate_chain=client_cert,
             )
         else:
-            creds = grpc.ssl_channel_credentials(root_certificates=ca_pem)
+            credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
 
-        opts = [
-            ("grpc.max_send_message_length", 100 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 100 * 1024 * 1024),
-            ("grpc.keepalive_time_ms", 30_000),
-            ("grpc.keepalive_timeout_ms", 10_000),
-            ("grpc.http2.max_pings_without_data", 0),
-            ("grpc.keepalive_permit_without_calls", 1),
-        ]
-        return grpc.secure_channel(target, creds, options=opts)
+        return grpc.secure_channel(addr, credentials, options=options)
 
     # -------- rpc execution --------
 
     def _override_token_for_local_device(self, args_map: Any, local_device_id: int) -> None:
-        """
-        Replace args_map['a'] with a host-local "force" token so existing host PlutoServer/device_manager
-        can select the intended local device without relying on main-server reservation tokens.
-        """
         try:
             forced = f"{self._master_token}_{int(local_device_id)}_force"
             args_map["a"].CopyFrom(_argument_string(forced))
         except Exception:
-            # If args_map isn't writable / not a protobuf map, ignore
             pass
 
     def _handle_rpc_request(self, req: host_pb2.RpcRequest) -> None:
-        """
-        Execute host-local RPC and respond.
-        Runs in a worker thread so stream reader stays responsive.
-        """
         req_id = str(req.req_id)
         _ = self._register_cancel(req_id)
 
         try:
-            # NEW: request is already a GenericRPCRequest (function_name + args: map<string, Argument>)
             greq = req.request
-
-            # Make a mutable args dict/map
-            # Prefer using the protobuf map container directly if possible.
             args_map = greq.args
 
-            # Inject/override token for local device selection
             self._override_token_for_local_device(args_map, int(req.local_device_id))
 
-            # Execute locally (rpc_manager should accept map<string, Argument>)
             results_any = rpc_manager.run_rpc(function_name=greq.function_name, args=args_map)
 
-            # Coerce to a GenericRPCResponse
             gresp = generic_pb2.GenericRPCResponse()
             results = _coerce_argument_map(results_any)
             for k, v in results.items():
@@ -427,7 +433,7 @@ class HostTunnelAgent:
                 rpc_response=host_pb2.RpcResponse(
                     req_id=req_id,
                     ok=False,
-                    error=f"{e}",
+                    error=str(e),
                     response=gresp,
                 )
             )
@@ -455,17 +461,14 @@ class HostTunnelAgent:
 
         while not self._stop.is_set():
             try:
-                # reload ID + device IDs on each connect attempt
                 self._reload_from_env()
 
                 channel = self._make_channel()
                 stub = host_pb2_grpc.HostTunnelStub(channel)
 
-                # Prime outbound
                 self._enqueue(self._hello_frame())
                 self._enqueue(self._device_announce_frame())
 
-                # Heartbeat thread
                 hb_stop = threading.Event()
 
                 def hb_loop():
@@ -473,13 +476,9 @@ class HostTunnelAgent:
                         self._enqueue(self._heartbeat_frame())
                         time.sleep(self.cfg.heartbeat_interval_sec)
 
-                hb_thread = threading.Thread(target=hb_loop, daemon=True)
-                hb_thread.start()
+                threading.Thread(target=hb_loop, daemon=True).start()
 
-                # Start bidi stream
                 stream = stub.Connect(self._outbound_generator())
-
-                # Reset backoff after successful connect
                 delay = self.cfg.reconnect_min_delay_sec
 
                 for frame in stream:
@@ -490,15 +489,9 @@ class HostTunnelAgent:
                             args=(frame.rpc_request,),
                             daemon=True,
                         ).start()
-
                     elif which == "cancel":
                         self._set_cancel(frame.cancel.req_id)
-
                     elif which == "heartbeat":
-                        pass
-
-                    elif which == "device_announce":
-                        # server shouldn't send this; ignore
                         pass
 
                 hb_stop.set()
@@ -515,10 +508,6 @@ class HostTunnelAgent:
             delay = min(delay * 1.7, self.cfg.reconnect_max_delay_sec)
 
 
-# -------------------------
-# Convenience entrypoint
-# -------------------------
-
 def start_host_tunnel_agent_thread(cfg: AgentConfig) -> Tuple[HostTunnelAgent, threading.Thread]:
     agent = HostTunnelAgent(cfg)
     th = threading.Thread(target=agent.run_forever, daemon=True)
@@ -526,20 +515,42 @@ def start_host_tunnel_agent_thread(cfg: AgentConfig) -> Tuple[HostTunnelAgent, t
     return agent, th
 
 
-if __name__ == "__main__":
-    # Environment overrides (optional)
-    server_host = os.getenv("MAIN_SERVER_HOST", "127.0.0.1")
-    server_port = int(os.getenv("HOST_PORT", "61007"))
-    env_path = os.getenv("HOST_ENV_PATH", ".env")
+def _parse_addr(addr: str) -> Tuple[str, int]:
+    a = (addr or "").strip()
+    if not a or ":" not in a:
+        raise ValueError("REMOTERF_ADDR must be like 'host:port'")
+    host, port_s = a.rsplit(":", 1)
+    return host.strip(), int(port_s.strip())
+
+
+def main() -> None:
+    # repo-local env paths (written by hostrf CLI)
+    net_env = _net_env_path()
+    host_env = _host_env_path()
+    dev_env = _devices_env_path()
+
+    net_kv = load_env_file(str(net_env))
+    addr = net_kv.get("REMOTERF_ADDR", "").strip()
+    if not addr:
+        raise RuntimeError(f"REMOTERF_ADDR missing in {net_env}")
+
+    server_host, server_port = _parse_addr(addr)
+
+    # cert paths resolve relative to net.env directory
+    ca_path = _resolve_path(net_env, net_kv.get("REMOTERF_CA_CERT", "").strip())
+    client_cert = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_CERT", "").strip())
+    client_key = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_KEY", "").strip())
 
     cfg = AgentConfig(
         server_host=server_host,
         server_port=server_port,
-        env_path=env_path,
+        net_env_path=str(net_env),
+        host_env_path=str(host_env),
+        devices_env_path=str(dev_env),
         version=os.getenv("HOST_VERSION", "host-agent/dev"),
-        ca_pem_path=os.getenv("CA_PEM_PATH"),
-        client_cert_pem_path=os.getenv("CLIENT_CERT_PATH"),
-        client_key_pem_path=os.getenv("CLIENT_KEY_PATH"),
+        ca_pem_path=ca_path or None,
+        client_cert_pem_path=client_cert or None,
+        client_key_pem_path=client_key or None,
     )
 
     agent = HostTunnelAgent(cfg)
@@ -547,3 +558,7 @@ if __name__ == "__main__":
         agent.run_forever()
     except KeyboardInterrupt:
         agent.stop()
+
+
+if __name__ == "__main__":
+    main()
