@@ -1,0 +1,32 @@
+name: hostrf
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools
+  - wheel
+
+  # Core runtime deps
+  - grpcio
+  - protobuf
+  - python-dotenv
+
+  # Common scientific stack (pyadi-iio / SDR tooling typically expects numpy)
+  - numpy
+  - scipy
+
+  # IIO / Pluto support (best-effort via conda-forge)
+  # NOTE: on Windows, these may be unavailable and env creation can fail.
+  - libiio
+  - pylibiio
+  - libusb
+
+  pip:
+    # ADALM-Pluto Python API (provides `import adi` / `adi.Pluto(...)`)
+    - pyadi-iio
+
+    # Your repo (editable install)
+    - -e .
