@@ -48,6 +48,8 @@ def print_help() -> None:
         "Usage:\n"
         "  hostrf -h | --help                   Show this help\n"
         "\n"
+        "  hostrf -s | --server                 Run hostrf server\n"
+        "\n"
         "  hostrf -c | --config [options]\n"
         "\n"
         "Network option:\n"
@@ -219,7 +221,6 @@ def _configure_addr(addr: str) -> int:
     
     print("Configured network:")
     print(f"  {_net_env_path()}")
-    print(f"  {cfg_dir / '.env'}")
     return 0
 
 
@@ -412,6 +413,11 @@ def main() -> int:
     # help
     if len(argv) == 0 or argv[0] in ("--help", "-help", "-h"):
         print_help()
+        return 0
+    
+    if argv[0] in ("-s", "--server"):
+        from .server.tunnel_agent import main as tunnel_main
+        tunnel_main()          # blocks until Ctrl+C
         return 0
 
     # config

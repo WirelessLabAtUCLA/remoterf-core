@@ -1,2 +1,6 @@
-from . import grpc_pb2, grpc_pb2_grpc
-from . import host_pb2, host_pb2_grpc
+__all__ = [
+    "grpc_pb2",
+    "grpc_pb2_grpc",
+    "grpc_host_pb2",
+    "grpc_host_pb2_grpc",
+]

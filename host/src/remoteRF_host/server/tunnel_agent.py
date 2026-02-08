@@ -1,4 +1,4 @@
-# host_tunnel_agent.py
+# tunnel_agent.py
 #
 # Host-side agent (repo-local config):
 #   Reads config from:
@@ -59,8 +59,7 @@ def _repo_root() -> Path:
     return p.parents[3]
 
 def _cfg_dir() -> Path:
-    # <repo>/config/remoteRF_host/
-    return _repo_root() / "config" / "remoteRF_host"
+    return _repo_root() / ".config"
 
 def _net_env_path() -> Path:
     return _cfg_dir() / "net.env"
@@ -558,7 +557,3 @@ def main() -> None:
         agent.run_forever()
     except KeyboardInterrupt:
         agent.stop()
-
-
-if __name__ == "__main__":
-    main()
