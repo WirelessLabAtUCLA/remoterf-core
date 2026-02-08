@@ -6,7 +6,7 @@ setup(
     packages=find_packages(where='src'),
     package_dir={"":'src'},
     install_requires=[
-        "grpcio", "protobuf", "numpy", "prompt_toolkit", "python-dotenv",
+        "grpcio", "protobuf", "numpy", "prompt_toolkit", "python-dotenv", "grpcio-tools"
     ],
     entry_points={
         'console_scripts': [

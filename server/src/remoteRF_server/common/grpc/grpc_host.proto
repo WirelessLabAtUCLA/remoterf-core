@@ -2,8 +2,7 @@ syntax = "proto3";
 
 package remoterf;
 
-// Import your existing GenericRPC schema so tunnel can carry the same payloads.
-import "generic_rpc.proto"; // must contain: package remote_rf; and messages below
+import "grpc.proto"; // must contain: package remote_rf; and messages below
 
 message HostHello {
   string host_id = 1;
