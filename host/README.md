@@ -1,27 +1,29 @@
-# RemoteRF Host (hostrf) — Linux Setup
+# RemoteRF Host (hostrf) — Linux Setup (Mamba Default)
 
-This guide installs Miniconda, creates a conda environment named `hostrf`, installs dependencies, and verifies the install on Ubuntu Server 24.04 LTS Linux.
+This guide installs Miniconda, installs **mamba**, creates a conda env named `hostrf`, installs dependencies, and verifies the install on Ubuntu Server 24.04 LTS.
 
 > Notes
-> - These commands assume an **APT-based** distro (Ubuntu/Debian/Raspberry Pi OS 64-bit).  
-> - For non-APT distros (Fedora/Arch), you’ll need equivalent system packages.
+>
+> * These commands assume an **APT-based** distro (Ubuntu/Debian/Raspberry Pi OS 64-bit).
+> * For non-APT distros (Fedora/Arch), install equivalent system packages.
 
 ---
 
-## 0) Raspberry pi setup:
-Raspberry pi Imager -> Install Ubuntu Server 24.04 LTS -> Boot up raspberry pi on SD card.
+## 0) Raspberry Pi setup
+
+Raspberry Pi Imager → Install Ubuntu Server 24.04 LTS → Boot Raspberry Pi from SD card.
+
+---
 
 ## 1) System Prerequisites (APT)
-
-Update and install required system packages:
 
 ```bash
 sudo apt update
 sudo apt install -y curl ca-certificates bzip2 git build-essential
 sudo apt install -y libusb-1.0-0 udev
-````
+```
 
-Optional: confirm you’re on the expected architecture:
+Optional: confirm architecture:
 
 ```bash
 uname -m
@@ -78,13 +80,20 @@ conda --version
 > source ~/.bashrc
 > ```
 
+### 2.4 Install **mamba** (default solver)
+
+```bash
+conda install -n base -c conda-forge -y mamba
+mamba --version
+```
+
 ---
 
-## 3) Create the Conda Environment
+## 3) Create the Environment (with mamba)
 
 ### 3.1 Create `environment.yml`
 
-Create a file named `environment.yml` in your project directory:
+In your project directory:
 
 ```bash
 cat > environment.yml <<'EOF'
@@ -116,11 +125,17 @@ dependencies:
 EOF
 ```
 
-### 3.2 Create the environment
+### 3.2 Create the environment (default: **mamba**)
 
 ```bash
-conda env create -f environment.yml
+mamba env create -f environment.yml
 ```
+
+> Fallback if mamba isn’t available for some reason:
+>
+> ```bash
+> conda env create -f environment.yml
+> ```
 
 ### 3.3 Activate it
 
@@ -169,13 +184,25 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate hostrf
 ```
 
-### Update environment from `environment.yml`
+### Update environment from `environment.yml` (default: **mamba**)
+
+```bash
+mamba env update -n hostrf -f environment.yml --prune
+```
+
+(Fallback)
 
 ```bash
 conda env update -n hostrf -f environment.yml --prune
 ```
 
 ### Remove the environment
+
+```bash
+mamba env remove -n hostrf
+```
+
+(Fallback)
 
 ```bash
 conda env remove -n hostrf
@@ -185,18 +212,9 @@ conda env remove -n hostrf
 
 ## 6) Troubleshooting
 
-### `conda env create` is very slow (common on Raspberry Pi)
-
-Install `mamba` and use it to create the environment:
-
-```bash
-conda install -n base -c conda-forge mamba
-mamba env create -f environment.yml
-```
-
 ### Missing packages on ARM / install errors for `libiio` / `pylibiio`
 
-On some ARM setups, conda-forge availability can vary. If `conda env create` fails on those:
+On some ARM setups, conda-forge availability can vary. If `mamba env create` fails:
 
 1. Remove `libiio` / `pylibiio` from `environment.yml`
 2. Install system packages instead:
