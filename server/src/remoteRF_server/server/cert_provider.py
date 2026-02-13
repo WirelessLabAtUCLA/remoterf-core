@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import socketserver
 import threading
+import os
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -30,12 +31,41 @@ CERT_NAME = "server.crt"
 # ---------------------------------------------------------------------
 # Path resolution / loading
 # ---------------------------------------------------------------------
+# def resolve_ca_path(ca_path: Optional[str | Path] = None) -> Path:
+#     """
+#     Resolve the CA certificate path.
+
+#     If `ca_path` is provided, uses it (expanded).
+#     Otherwise, tries common repo-relative locations.
+#     """
+#     if ca_path is not None:
+#         p = Path(ca_path).expanduser().resolve()
+#         if not p.exists():
+#             raise FileNotFoundError(f"CA cert not found at: {p}")
+#         return p
+
+#     here = Path(__file__).resolve()
+#     candidates = [
+#         here.parent / "certs" / CERT_NAME,              # if cert_provider.py is in core/
+#         here.parent.parent / "core" / "certs" / CERT_NAME,
+#         here.parent.parent / "certs" / CERT_NAME,
+#     ]
+#     for p in candidates:
+#         if p.exists():
+#             return p
+#     raise FileNotFoundError(
+#         f"Could not find {CERT_NAME}. Tried:\n  " + "\n  ".join(str(c) for c in candidates)
+#     )
+
 def resolve_ca_path(ca_path: Optional[str | Path] = None) -> Path:
     """
     Resolve the CA certificate path.
 
-    If `ca_path` is provided, uses it (expanded).
-    Otherwise, tries common repo-relative locations.
+    Priority:
+      1) explicit ca_path
+      2) $REMOTERF_CERT_DIR/ca.crt
+      3) $XDG_CONFIG_HOME/remoterf/certs/ca.crt (or ~/.config/...)
+      4) fallback to repo-relative candidates (for dev)
     """
     if ca_path is not None:
         p = Path(ca_path).expanduser().resolve()
@@ -43,17 +73,27 @@ def resolve_ca_path(ca_path: Optional[str | Path] = None) -> Path:
             raise FileNotFoundError(f"CA cert not found at: {p}")
         return p
 
+    # --- preferred: user config location ---
+    xdg_config = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+    cert_dir = Path(os.getenv("REMOTERF_CERT_DIR", xdg_config / "remoterf" / "certs"))
+    p = (cert_dir / CERT_NAME).expanduser().resolve()
+    if p.exists():
+        return p
+
+    # --- fallback: repo-relative for local dev ---
     here = Path(__file__).resolve()
     candidates = [
-        here.parent / "certs" / CERT_NAME,              # if cert_provider.py is in core/
+        here.parent / "certs" / CERT_NAME,
         here.parent.parent / "core" / "certs" / CERT_NAME,
         here.parent.parent / "certs" / CERT_NAME,
     ]
-    for p in candidates:
-        if p.exists():
-            return p
+    for c in candidates:
+        if c.exists():
+            return c
+
     raise FileNotFoundError(
-        f"Could not find {CERT_NAME}. Tried:\n  " + "\n  ".join(str(c) for c in candidates)
+        f"Could not find {CERT_NAME}. Tried:\n  "
+        + "\n  ".join([str(p)] + [str(c) for c in candidates])
     )
 
 def load_ca_pem(ca_path: Optional[str | Path] = None) -> bytes:

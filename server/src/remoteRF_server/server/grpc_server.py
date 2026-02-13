@@ -102,13 +102,40 @@ def serve():
 
     # Read key and certificate
     
-    cert_key = Path(__file__).resolve().parent.parent/'certs'/'server.key'
-    cert_crt = Path(__file__).resolve().parent.parent/'certs'/'server.crt'
+    # cert_key = Path(__file__).resolve().parent.parent/'certs'/'server.key'
+    # cert_crt = Path(__file__).resolve().parent.parent/'certs'/'server.crt'
     
-    with cert_key.open('rb') as f:
-        private_key = f.read()
-    with cert_crt.open('rb') as f:
-        certificate_chain = f.read()
+    # with cert_key.open('rb') as f:
+    #     private_key = f.read()
+    # with cert_crt.open('rb') as f:
+    #     certificate_chain = f.read()
+    
+    # --- TLS certs live in user config (~/.config/remoterf/certs by default) ---
+    xdg_config = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+    cert_dir = Path(os.getenv("REMOTERF_CERT_DIR", xdg_config / "remoterf" / "certs"))
+
+    cert_key = cert_dir / "server.key"
+    cert_crt = cert_dir / "server.crt"
+
+    try:
+        if not cert_key.exists() or not cert_crt.exists():
+            missing = []
+            if not cert_key.exists(): missing.append(str(cert_key))
+            if not cert_crt.exists(): missing.append(str(cert_crt))
+            raise FileNotFoundError("Missing TLS file(s):\n  " + "\n  ".join(missing))
+
+        with cert_key.open("rb") as f:
+            private_key = f.read()
+        with cert_crt.open("rb") as f:
+            certificate_chain = f.read()
+
+    except Exception as e:
+        printf("TLS certs/keys not found or unreadable.", Sty.RED)
+        printf("Expected in: ", Sty.DEFAULT, f"{cert_dir}", Sty.MAGENTA)
+        printf("Fix: run ", Sty.DEFAULT, "RRRFcerts --ip ", Sty.GREEN, f"{local_ip}", Sty.MAGENTA, " --force", Sty.DEFAULT)
+        printf("Or set REMOTERF_CERT_DIR to your cert folder.", Sty.GRAY)
+        print(f"\nDetails: {e}\n", file=sys.stderr)
+        raise SystemExit(2)
 
     # Create server credentials
     server_credentials = grpc.ssl_server_credentials(
