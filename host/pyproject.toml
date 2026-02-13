@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoterf-host" # pip install remoterf-host
-version = "0.1.0" # bump this every upload
+version = "0.1.2" # bump this every upload
 description = "RemoteRF host-side control package"
 readme = "README.md"
 requires-python = ">=3.9"
