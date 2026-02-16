@@ -1,4 +1,117 @@
-# Remote RF Linux Server
+# Remote RF Server Guide (Linux)
+
+## Environment and setup
+
+This guide installs Miniconda, installs **mamba**, creates a conda env named `remoterf`, installs dependencies, and verifies the install on Ubuntu Server 24.04 LTS.
+
+* This guide is done **APT-based** distro (Ubuntu/Debian/Raspberry Pi OS 64-bit).
+
+### 1) System Prerequisites
+
+```bash
+sudo apt update
+sudo apt install -y curl ca-certificates bzip2 git build-essential
+sudo apt install -y libusb-1.0-0 udev
+```
+
+Optional: confirm architecture:
+
+```bash
+uname -m
+```
+
+* `x86_64` → Intel/AMD
+* `aarch64` → ARM64 (Raspberry Pi 64-bit, some servers)
+
+---
+
+### 2) Install Miniconda
+
+### 2.1 Download the installer
+
+#### x86_64
+
+```bash
+cd /tmp
+curl -fsSLO https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+```
+
+#### ARM64 (aarch64)
+
+```bash
+cd /tmp
+curl -fsSLO https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh
+```
+
+### 2.2 Install (non-interactive, recommended)
+
+#### x86_64
+
+```bash
+bash Miniconda3-latest-Linux-x86_64.sh -b -p "$HOME/miniconda3"
+```
+
+#### ARM64 (aarch64)
+
+```bash
+bash Miniconda3-latest-Linux-aarch64.sh -b -p "$HOME/miniconda3"
+```
+
+### 2.3 Enable conda in your current shell
+
+```bash
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda --version
+```
+
+> If you want conda available automatically in new terminals:
+>
+> ```bash
+> "$HOME/miniconda3/bin/conda" init bash
+> source ~/.bashrc
+> ```
+
+### 2.4 Install **mamba** (default solver)
+
+```bash
+conda install -n base -c conda-forge -y mamba
+mamba --version
+```
+
+Might have to accept anaconda TOS.
+```bash
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+```
+
+### 3) Create the Environment
+
+```bash
+mamba create -n remoterf -y -c conda-forge -c defaults  python=3.10 pip setuptools wheel grpcio protobuf python-dotenv numpy scipy libiio pylibiio libusb
+
+conda activate remoterf
+python -m pip install -U pip
+python -m pip install pyadi-iio remoterf-server
+```
+
+## Server Config
+
+Depending on your IT/ISP setup, this will vary, but regardless, you will need a static dial name, whether that be a IP address or a DNS.
+
+### Generate CA Certificates
+
+If direct IP connection:
+```bash
+serverrf --gen-certs 192.168.1.50 --days 3650 --force
+```
+
+If using DNS: (todo: DNS on client side)
+```bash
+serverrf --gen-certs 192.168.1.50 --dns remoterf.local --days 3650 --force
+```
+
+<!-- # Remote RF Linux Server
 
 A python codebase to host the remoteRF Platform. 
 
@@ -168,4 +281,4 @@ Confirm that the server certs were generated with the right IPs, and that the ex
 ### Local Firewall: 
 Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server.
 
-- **ISP Firewall**: If doing this on UCLA Campus, they block and manage much of the traffic. You will need to submit a [Firewall Access Form](https://www.seasnet.ucla.edu/firewall-access-request/).
+- **ISP Firewall**: If doing this on UCLA Campus, they block and manage much of the traffic. You will need to submit a [Firewall Access Form](https://www.seasnet.ucla.edu/firewall-access-request/). -->
