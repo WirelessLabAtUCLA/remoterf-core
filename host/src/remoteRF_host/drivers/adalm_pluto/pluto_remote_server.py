@@ -1,5 +1,5 @@
 # from ....client import * 
-from ...server.device_manager import set_pluto, get_device
+from ...server.device_manager import get_device
 from ...common.utils.process_arg import unmap_arg, map_arg
 # from ...common.grpc import grpc_pb2
         
@@ -14,7 +14,8 @@ class PlutoServer: # server
             function_name = function_name_args[1]
             function_type = function_name_args[2]
             if function_name == "ip":
-                set_pluto(ip=args[function_name].string_value.split(":")[1])
+                # set_pluto(ip=args[function_name].string_value.split(":")[1])
+                pass
             elif function_type == "GET":
                 return PlutoServer.get(function_name=function_name, token=unmap_arg(args['a']))
             elif function_type == "SET":
