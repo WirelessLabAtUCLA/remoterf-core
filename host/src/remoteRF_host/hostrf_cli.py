@@ -80,10 +80,10 @@ def print_help() -> None:
         "  hostrf -c -h --show\n"
         "  hostrf -c -h --wipe -y\n"
         "\n"
-        "  hostrf -c --device --add --pluto 0:pluto_aaa:123123\n"
-        "  hostrf -c --device --remove 0\n"
-        "  hostrf -c --device --show\n"
-        "  hostrf -c --device --wipe -y\n"
+        "  hostrf -d --add --pluto 0:pluto_aaa:123123\n"
+        "  hostrf -d --remove 0\n"
+        "  hostrf -d --show\n"
+        "  hostrf -d --wipe -y\n"
         "\n"
         "  hostrf -c -w -y\n"
         "\n"
@@ -409,6 +409,9 @@ def _wipe_devices_only(*, yes: bool) -> int:
 
 def main() -> int:
     argv = list(sys.argv[1:])
+    
+    if len(argv) > 0 and argv[0] in ("--device", "-device", "-d"):
+        argv = ["-c", "--device"] + argv[1:]
 
     # help
     if len(argv) == 0 or argv[0] in ("--help", "-help", "-h"):

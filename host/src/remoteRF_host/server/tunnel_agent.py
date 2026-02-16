@@ -26,6 +26,17 @@ import grpc
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
 
+import sys
+from typing import NoReturn
+
+def _die_config(net_env: Path, msg: str, *, code: int = 2) -> NoReturn:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    print(f"Config file: {net_env}", file=sys.stderr)
+    print("Fix:", file=sys.stderr)
+    print("  hostrf -c -a <host:port>", file=sys.stderr)
+    print("  hostrf -c -a --show", file=sys.stderr)
+    raise SystemExit(code)
+
 try:
     generic_pb2 = host_pb2.grpc__pb2  # generated alias inside grpc_host_pb2.py
 except Exception:
@@ -529,9 +540,14 @@ def main() -> None:
     dev_env = _devices_env_path()
 
     net_kv = load_env_file(str(net_env))
-    addr = net_kv.get("REMOTERF_ADDR", "").strip()
+    addr = (net_kv.get("REMOTERF_ADDR", "").strip() or os.getenv("REMOTERF_ADDR", "").strip())
     if not addr:
-        raise RuntimeError(f"REMOTERF_ADDR missing in {net_env}")
+        _die_config(net_env, "REMOTERF_ADDR is not set.")
+
+    try:
+        server_host, server_port = _parse_addr(addr)
+    except Exception as e:
+        _die_config(net_env, f"Invalid REMOTERF_ADDR={addr!r} ({e}).")
 
     server_host, server_port = _parse_addr(addr)
 

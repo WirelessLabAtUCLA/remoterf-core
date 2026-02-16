@@ -97,23 +97,82 @@ python -m pip install -U pip
 python -m pip install pyadi-iio remoterf-host
 ```
 
+```bash
+sudo reboot now
+```
+
 ## HostRF Config
 
-`hostrf` stores its config **repo-locally** under: `./.config/`
+Run the below for a comprehensive overview:
+```bash
+hostrf --help
+```
 
-### 1) Point this host at a RemoteRF server
+To get hostrf up and running:
+
+### 1) Point to a RemoteRF server
 
 HostRF requires a RemoteRF Server already setup. See RemoteRF-Server for additional details.
+
+`hostrf` stores its config **repo-locally** under: `./.config/`
 
 ```bash
 hostrf --config --addr <host:port>
 # example:
 hostrf -c -a 164.97.201.67:5000
+hostrf -c -a --show
 ```
 
-Inspect/Reset server target:
+### 2) Set host parameters
+
+Set hostname:
 
 ```bash
-hostrf -c -a --show         # Show addr 
-hostrf -c -a --wipe -y      # Wipe config params     
+hostrf --config --host <hostname>
+#example:
+hostrf -c -h host_0
 ```
+
+<!-- 164.67.195.207:61005 -->
+
+### 3) Connect devices (Adalm Pluto)
+
+```bash
+iio_info -s #if this doesn't work, try the below
+iio_info -u ip:192.168.2.1
+```
+
+Look for a 'hw_serial: 104473'. Keep note of said serial per device.
+
+Add pluto to device list. Understand that the device_id (int) needs to be GLOBALLY unique!
+
+```bash
+hostrf --device --add --pluto <id>:<device_name>:<hw_serial>
+
+#Example
+hostrf -d -a --pluto 10:hostrf_pluto_0:104473
+```
+
+Remove device:
+
+```bash
+hostrf -d -remove <id>
+```
+
+Show devices:
+```bash
+hostrf -d --show
+```
+
+Clear all device config:
+```bash
+hostrf -d --wipe
+```
+
+todo: confirm connecting to pluto devices
+
+todo: hostrf side show devices, etc.
+
+todo: Punching list of devices through the tunnel
+
+todo: ServerRF side routing & reservation pipeline. (Fetching hostname and devices on 'read/pull' information)
