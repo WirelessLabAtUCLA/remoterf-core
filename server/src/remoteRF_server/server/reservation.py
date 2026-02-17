@@ -7,16 +7,25 @@ from pathlib import Path
 from functools import wraps
 import json
 
+
+
+
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
 from .acc_perms import perms, userperms
 from .user_group_handler import user_group_handler
 
+import os
+import sys
+from pathlib import Path
+
 allow_connections = True
 
 class ReservationHandler:
     def __init__(self):
-        self.filepath = Path(__file__).resolve().parent.parent/'db'/'reservations.db'
+        self.filepath = get_db_dir() / "reservations.db"
+        # self.filepath = Path(__file__).resolve().parent.parent/'db'/'reservations.db'
+        
         self.db = sqlite3.connect(self.filepath)
         self.cursor = self.db.cursor()
 
@@ -517,9 +526,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Path to your activity logs file
-LOG_PATH = Path(__file__).resolve().parent.parent / 'db' / 'activity_logs.npy'
-
-# A global lock to ensure thread-safe access to the log file
+LOG_PATH = get_db_dir() / "activity_logs.npy"
 log_lock = threading.Lock()
 
 def _load_logs ():

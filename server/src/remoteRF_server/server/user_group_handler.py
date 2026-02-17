@@ -10,6 +10,9 @@ from typing import Optional, Tuple, List
 
 from ..common.utils import *
 
+import os
+import sys
+
 class UserGroupHandler:
     '''
     Handles user groups and enrollment codes.
@@ -29,7 +32,12 @@ class UserGroupHandler:
     '''
     
     def __init__(self):
-        self.filepath = Path(__file__).resolve().parent.parent/'db'/'usergroups.db'
+        self.filepath = get_db_dir() / 'usergroups.db'
+        
+        # print("DB path:", self.filepath)
+        # print("Parent exists:", self.filepath.parent.exists(), "is_dir:", self.filepath.parent.is_dir())
+        # print("Writable:", os.access(self.filepath.parent, os.W_OK))
+        
         self.db = sqlite3.connect(self.filepath)
         self.cursor = self.db.cursor()
         
@@ -1111,3 +1119,4 @@ def start_usergroup_cleanup_loop(
 
     threading.Thread(target=_worker, daemon=True)
 
+print("usergroup instnace")

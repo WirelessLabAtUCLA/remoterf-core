@@ -24,7 +24,9 @@ class userperms:
 
 class perms_db:
     def __init__(self):
-        self.filepath = Path(__file__).resolve().parent.parent/'db'/'perms.db'
+        # self.filepath = Path(__file__).resolve().parent.parent/'db'/'perms.db'
+        
+        self.filepath = get_db_dir() / 'perms.db'
         self.db = sqlite3.connect(self.filepath)
         self.cursor = self.db.cursor()
         

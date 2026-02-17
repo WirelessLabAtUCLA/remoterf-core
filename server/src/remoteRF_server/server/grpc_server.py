@@ -18,15 +18,24 @@ import traceback
 import contextlib
 
 from ..common.grpc import *
+print("1")
 from .reservation import reservation_handler
+print("2")
 from .rpc_manager import rpc_manager
+print("3")
 from .acc_perms import perms
+print("4")
 from ..common.utils import *
+print("5")
 from .device_manager import get_all_devices, get_all_devices_str
+print("6")
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local
+print("7")
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
+print("8")
 
 from pathlib import Path
+
 
 def _xdg_config_home() -> Path:
     return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
