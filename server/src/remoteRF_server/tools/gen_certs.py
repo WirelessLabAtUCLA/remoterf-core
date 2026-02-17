@@ -7,6 +7,43 @@ import sys
 import tempfile
 from pathlib import Path
 
+import time
+from datetime import datetime, timezone
+
+def _x509_dates(cert_path: Path) -> tuple[datetime | None, datetime | None]:
+    # openssl prints:
+    #   notBefore=Feb 16 23:12:02 2026 GMT
+    #   notAfter=Feb 16 23:12:02 2027 GMT
+    p = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-noout", "-startdate", "-enddate"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if p.returncode != 0:
+        return None, None
+
+    nb = na = None
+    for line in p.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("notBefore="):
+            s = line.split("=", 1)[1].strip()
+            s = s.removesuffix(" GMT").strip()
+            try:
+                nb = datetime.strptime(s, "%b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+            except Exception:
+                nb = None
+        elif line.startswith("notAfter="):
+            s = line.split("=", 1)[1].strip()
+            s = s.removesuffix(" GMT").strip()
+            try:
+                na = datetime.strptime(s, "%b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+            except Exception:
+                na = None
+
+    return nb, na
+
 
 def _run(cmd: list[str]) -> None:
     try:
@@ -166,3 +203,72 @@ extendedKeyUsage = serverAuth
     print("\nClient trust:")
     print("  Clients should trust ca.crt (NOT server.crt).")
     print("  Clients must dial an address that matches one of the SANs.\n")
+    
+    ca_nb, ca_na = _x509_dates(ca_crt)
+    srv_nb, srv_na = _x509_dates(srv_crt)
+
+    if srv_nb and srv_na:
+        now = datetime.now(timezone.utc)
+        remaining = srv_na - now
+        # clamp negative (if clock skew or already expired)
+        if remaining.total_seconds() < 0:
+            rem_str = "EXPIRED"
+        else:
+            days_left = remaining.days
+            hours_left = (remaining.seconds // 3600)
+            mins_left = (remaining.seconds % 3600) // 60
+            rem_str = f"{days_left}d {hours_left}h {mins_left}m"
+
+        print("  Server:")
+        print(f"    notBefore (UTC): {srv_nb.isoformat(timespec='seconds')}")
+        print(f"    notAfter  (UTC): {srv_na.isoformat(timespec='seconds')}")
+        print(f"    expires (local): {srv_na.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        print(f"    expires in:      {rem_str}")
+    else:
+        print("  Server: (failed to parse dates)")
+
+
+
+import argparse
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="gen_certs.py", description="Generate RemoteRF TLS certs")
+    ap.add_argument("--ip", dest="static_ip", default=None, help="Static IP to include in SAN (if omitted, auto-detect unless --no-detect-ip)")
+    ap.add_argument("--no-detect-ip", action="store_true", help="Require --ip; do not auto-detect")
+
+    ap.add_argument("--days", type=int, default=365)
+    ap.add_argument("--ca-days", type=int, default=3650)
+    ap.add_argument("--bits", type=int, default=2048)
+
+    ap.add_argument("--config-dir", default=None, help="Base config dir (default: ~/.config/remoterf)")
+    ap.add_argument("--out-subdir", default="certs", help="Subdir under config dir (default: certs)")
+
+    ap.add_argument("--dns", action="append", default=[], help="DNS SAN entry (repeatable)")
+    ap.add_argument("--cn", default=None, help="Common Name (default: first SAN entry)")
+    ap.add_argument("--force", action="store_true", help="Overwrite existing certs/keys")
+
+    args = ap.parse_args()
+
+    if args.no_detect_ip and not (args.static_ip and args.static_ip.strip()):
+        print("ERROR: --no-detect-ip set but no --ip provided", file=sys.stderr)
+        return 2
+
+    cfg = Path(args.config_dir).expanduser().resolve() if args.config_dir else None
+
+    generate_certs(
+        static_ip=args.static_ip,
+        days=args.days,
+        ca_days=args.ca_days,
+        bits=args.bits,
+        config_dir=cfg,
+        out_subdir=args.out_subdir,
+        dns=args.dns,
+        cn=args.cn,
+        force=args.force,
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
