@@ -18,21 +18,13 @@ import traceback
 import contextlib
 
 from ..common.grpc import *
-print("1")
 from .reservation import reservation_handler
-print("2")
 from .rpc_manager import rpc_manager
-print("3")
 from .acc_perms import perms
-print("4")
 from ..common.utils import *
-print("5")
 from .device_manager import get_all_devices, get_all_devices_str
-print("6")
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local
-print("7")
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
-print("8")
 
 from pathlib import Path
 
@@ -81,7 +73,8 @@ def _get_port(name: str, *, default: int | None = None) -> int:
     return n
 
 from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
-from ..host import host_tunnel_pb2_grpc
+from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
+from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
 
 from pathlib import Path
 from prompt_toolkit import PromptSession

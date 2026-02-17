@@ -168,11 +168,12 @@ def _serve() -> int:
     Alias for the RRRFserver entrypoint.
     Equivalent to running the RRRFserver console_script.
     """
-    try:
-        from remoteRF_server.server.grpc_server import main as grpc_main
-    except Exception as e:
-        print(f"ERROR: failed to import server entrypoint: {e}", file=sys.stderr)
-        return 2
+    # try:
+    from remoteRF_server.server.grpc_server import main as grpc_main
+    return 0
+    # except Exception as e:
+    #     print(f"ERROR: failed to import server entrypoint: {e}", file=sys.stderr)
+    #     return 2
 
     old_argv = sys.argv
     try:

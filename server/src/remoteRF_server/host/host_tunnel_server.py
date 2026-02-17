@@ -20,7 +20,8 @@ from ..common.grpc import grpc_pb2 as generic_pb2  # type: ignore
 # Your existing map_arg helper that produces generic_pb2.Argument
 from ..common.utils.process_arg import map_arg  # type: ignore
 
-from . import host_tunnel_pb2, host_tunnel_pb2_grpc  # type: ignore
+from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
+from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
 
 from .host_directory_store import (
     EnvStore,
