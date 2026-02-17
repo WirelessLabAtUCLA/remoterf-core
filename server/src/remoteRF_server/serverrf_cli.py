@@ -135,13 +135,13 @@ def print_help() -> None:
         "  --force             Overwrite existing certs/keys\n"
         "  --no-detect-ip      Do not auto-detect IP when none provided\n"
         "\n"
+        "Serve:\n"
+        "  serverrf --serve \n"
+        "  serverrf -s      \n"
+        "\n"
         "Global:\n"
         "  -y, --yes           Skip wipe confirmation prompts\n"
         "  -v, --verbose       With --show-certs, also print x509 details (requires openssl)\n"
-        "\n"
-        "Where things live:\n"
-        f"  Ports file:  {_server_env_path()}\n"
-        f"  Certs dir:   {_certs_dir()}\n"
         "\n"
         "Examples:\n"
         "  serverrf --config --main-port 61005\n"
@@ -154,12 +154,43 @@ def print_help() -> None:
         "  serverrf --show-certs -v\n"
         "  serverrf --wipe-certs -y\n"
         "\n"
+        "Examples:\n"
+        "  serverrf --serve\n"
+        "  serverrf -s\n"
     )
 
 
 # -----------------------------
 # Tiny env utils (same style as hostrf)
 # -----------------------------
+def _serve() -> int:
+    """
+    Alias for the RRRFserver entrypoint.
+    Equivalent to running the RRRFserver console_script.
+    """
+    try:
+        from remoteRF_server.server.grpc_server import main as grpc_main
+    except Exception as e:
+        print(f"ERROR: failed to import server entrypoint: {e}", file=sys.stderr)
+        return 2
+
+    old_argv = sys.argv
+    try:
+        # Make it look like RRRFserver was invoked directly
+        sys.argv = ["RRRFserver"]
+
+        try:
+            rc = grpc_main()
+            return int(rc) if rc is not None else 0
+        except SystemExit as se:
+            code = se.code
+            if code is None:
+                return 0
+            if isinstance(code, int):
+                return code
+            return 1
+    finally:
+        sys.argv = old_argv
 
 def _write_env_kv(path: Path, kv: Dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -490,10 +521,17 @@ def main() -> int:
     config_wipe = False
     main_port: Optional[int] = None
     cert_port: Optional[int] = None
+    
+    # serve commands
+    serve_mode = False
 
     i = 0
     while i < len(argv):
         tok = argv[i]
+        
+        if tok in ("--serve", "-s"):
+            serve_mode = True
+            break 
 
         if tok in ("-y", "--yes", "-yes"):
             yes = True
@@ -630,6 +668,13 @@ def main() -> int:
 
         print(f"ERROR: unknown option: {tok!r}", file=sys.stderr)
         return 2
+    
+    if serve_mode:
+        # Disallow mixing serve with other serverrf-cli modes
+        if config_mode or show_certs or wipe_certs or (gen_ip is not None):
+            print("ERROR: --serve/-s cannot be combined with config/cert commands. Run them separately.", file=sys.stderr)
+            return 2
+        return _serve()
 
     # ----------------
     # Config mode execution
@@ -637,7 +682,7 @@ def main() -> int:
     if config_mode:
         # conflict checks
         if config_wipe and (config_show or main_port is not None or cert_port is not None):
-            print("ERROR: cannot combine --wipe with --show or port सेट. Use '--config --wipe' only.", file=sys.stderr)
+            print("ERROR: cannot combine --wipe with --show or port. Use '--config --wipe' only.", file=sys.stderr)
             return 2
 
         if config_wipe:
