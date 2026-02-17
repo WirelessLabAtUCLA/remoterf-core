@@ -209,6 +209,53 @@ Some distros come with default firewall settings that block traffic on specific 
 
 ## Server Device Configuration
 
+Currently, only Adalm Plutos are supported.
+
+To connect plutos to the server:
+
+```bash
+iio_info -s
+```
+
+If the pluto doesn't show up, yet the below works:
+
+```bash
+sudo iio_info -s
+```
+
+Run the below and reboot after: 
+
+```bash
+sudo groupadd -f plugdev
+sudo usermod -aG plugdev "$USER"
+
+sudo tee /etc/udev/rules.d/53-adi-usb.rules >/dev/null <<'EOF'
+# Type the below in
+SUBSYSTEM=="usb", ATTR{idVendor}=="0456", MODE="0660", GROUP="plugdev"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+sudo reboot now
+```
+
+The below should work as intended now:
+```bash
+iio_info -s
+```
+
+Look for 'serial='. Take note of this serial.
+
+```bash
+serverrf --device --add --pluto <device_id:name:serial>
+
+# example
+serverrf --device --add --pluto 0:pluto_0:104473f6
+```
+
+
+
+
 todo:
 Adding plutos via the CLI
 Testing functionality (disregarding Host pipeline)

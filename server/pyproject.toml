@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoteRF-server"
-version = "0.1.42"
+version = "0.1.47"
 dependencies = [
   "grpcio",
   "protobuf",
@@ -17,8 +17,6 @@ dependencies = [
 [project.scripts]
 # RRRFserver = "remoteRF_server.server.grpc_server:main"
 serverrf  = "remoteRF_server.serverrf_cli:main"
-
-# RRRFcerts --ip XXX.XX.XXX.XXX --ca-days 7300 --days 3650 --force
 
 [tool.setuptools]
 package-dir = { "" = "src" }
