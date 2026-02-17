@@ -170,6 +170,7 @@ def _serve() -> int:
     """
     # try:
     from remoteRF_server.server.grpc_server import main as grpc_main
+    grpc_main()
     return 0
     # except Exception as e:
     #     print(f"ERROR: failed to import server entrypoint: {e}", file=sys.stderr)

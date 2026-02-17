@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoteRF-server"
-version = "0.1.36"
+version = "0.1.40"
 dependencies = [
   "grpcio",
   "protobuf",

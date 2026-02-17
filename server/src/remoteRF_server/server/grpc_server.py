@@ -12,6 +12,11 @@ from typing import Tuple
 from concurrent import futures
 from datetime import datetime
 
+# Remove warnings
+# import os
+# os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+# os.environ.setdefault("GRPC_TRACE", "")
+
 import grpc
 
 import traceback
@@ -219,7 +224,7 @@ def update_devices():
     while True:
         reservation_handler.update_devices()
         time.sleep(60)
-
+        
 threading.Thread(target=serve, daemon=True).start()
 threading.Thread(target=update_devices, daemon=True).start()
 start_usergroup_cleanup_loop(interval_sec=60)
@@ -431,8 +436,27 @@ def main():
     while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
         pass
 
-if __name__ == '__main__':
-    main()
+# _started = False
+# _start_lock = threading.Lock()
+
+# def main():
+#     global _started
+#     with _start_lock:
+#         if _started:
+#             return
+#         _started = True
+
+#         t1 = threading.Thread(target=serve, daemon=True)
+#         t2 = threading.Thread(target=update_devices, daemon=True)
+#         t1.start()
+#         t2.start()
+#         start_usergroup_cleanup_loop(interval_sec=60)
+        
+#     while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
+#         pass
+
+# if __name__ == '__main__':
+#     main()
 
     
     
