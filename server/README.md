@@ -122,9 +122,9 @@ By default, the users expect to adjacent ports. Thus, it is recommended to do th
 
 ```bash
 # examples
-serverrf --config --main-port 1000 --cert-port 1001
-serverrf --config --main-port 250 --cert-port 251
-serverrf --config --main-port 6000 --cert-port 6001
+serverrf --config --main-port 61000 --cert-port 61001
+serverrf --config --main-port 20000 --cert-port 20001
+serverrf --config --main-port 32000 --cert-port 32001
 ```
 
 Confirm/View:
@@ -132,11 +132,97 @@ Confirm/View:
 serverrf --config --show
 ```
 
+## Testing Connection
+
+The server now should be functional in its most basic form. In the same conda env:
+
+```bash
+serverrf --serve
+```
+
+If you see something along the lines of: self.socket.bind(self.server_address) PermissionError: [Errno 13] Permission Denied, make sure the ports you are using are not OS reserved (<1024)
+
+### Confirm it works locally
+
+<!-- In a new terminal:
+
+```bash
+mamba create -n local_testing -y python=3.10 pip
+conda activate local_testing
+pip install remoterf
+```
+
+Testing: In the remoterf env run: -->
+
+Start the server:
+```bash
+serverrf -s
+```
+Take note of the Local IP and Local Port, for example, if you see:
+
+```bash
+Local IP: 164.67.195.210
+Local Port: 61000
+```
+
+then run the below on a seperate terminal (make sure to keep serverrf -s RUNNING!)
+
+Confirm that its reachable:
+
+```bash
+nc -vz 164.67.195.210 61000
+nc -vz 164.67.195.210 61001
+```
+
+<!-- ```bash
+remoterf -c -a 164.67.195.210:61000
+```
+
+If sucessful, it should look something like this:
+
+```bash
+gRPC target : 164.67.195.210:61000
+cert port   : 164.67.195.210:61001
+CA cert     : /home/remoterf-dev/.config/remoterf/certs/default.crt
+env file    : /home/remoterf-dev/.config/remoterf/.env
+```
+
+If it fails, please troubleshoot, and make sure that the serverrf -s is actually running, and that you have no firewalls, etc.
+
+Cleanup:
+```bash
+conda env remove -n local_testing
+``` -->
+
+### Network Testing
+
+Same test, but on a different computer. Works for UNIX based machines:
+
+Confirm that the Server is reachable:
+```bash
+nc -vz 164.67.195.210 61000
+nc -vz 164.67.195.210 61001
+```
+
+Troubleshooting:
+Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server. Depending on the setup, you may also have ISP firewalls.
+
+## Server Device Configuration
+
+todo:
+Adding plutos via the CLI
+Testing functionality (disregarding Host pipeline)
+Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV.
+Choice to choose usergroup/code by either int id or string name.
+
+Ability to remotely manage groups and codes as admin.
+
+HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.) 
+
+Update Ian with installation demo (try myself first on the NUC once!) for both server and host.
+
+
 todo: Specify/Pull user side --config CLI pointing to this server + debug for connection sake (later)
-
-### Test Connection
-
-
 
 
 <!-- # Remote RF Linux Server

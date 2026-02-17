@@ -201,7 +201,7 @@ def serve():
     
     # --- attach HostTunnel to the SAME grpc server/port/creds ---
     directory_env = Path(__file__).resolve().parent.parent / "config" / ".env.host_directory"
-    registry = HostTunnelRegistry(env_path=str(directory_env))
+    registry = HostTunnelRegistry()
 
     host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
         HostTunnelServicer(registry),
@@ -209,7 +209,7 @@ def serve():
     )
 
     # Inject registry into rpc_manager so it can forward
-    rpc_manager.set_tunnel_registry(registry)
+    # rpc_manager.set_tunnel_registry(registry)
     
     # Cert fetcher
     from .cert_provider import start_cert_provider
