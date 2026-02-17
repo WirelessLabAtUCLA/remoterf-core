@@ -101,7 +101,7 @@ Depending on your IT/ISP setup, this will vary, but regardless, you will need a 
 
 ### Generate CA Certificates
 
-If direct IP connection:
+If direct IP connection: (force overrides existing)
 ```bash
 serverrf --gen-certs 192.168.1.50 --days 3650 --force
 ```
@@ -110,6 +110,34 @@ If using DNS: (todo: DNS on client side)
 ```bash
 serverrf --gen-certs 192.168.1.50 --dns remoterf.local --days 3650 --force
 ```
+
+Confirm/View:
+```bash
+serverrf --show-certs
+```
+
+### Specify Outward facing Ports
+
+By default, the users expect to adjacent ports. Thus, it is recommended to do the following:
+
+```bash
+# examples
+serverrf --config --main-port 1000 --cert-port 1001
+serverrf --config --main-port 250 --cert-port 251
+serverrf --config --main-port 6000 --cert-port 6001
+```
+
+Confirm/View:
+```bash
+serverrf --config --show
+```
+
+todo: Specify/Pull user side --config CLI pointing to this server + debug for connection sake (later)
+
+### Test Connection
+
+
+
 
 <!-- # Remote RF Linux Server
 

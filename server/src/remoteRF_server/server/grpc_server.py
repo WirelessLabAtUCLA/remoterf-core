@@ -26,6 +26,51 @@ from .device_manager import get_all_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
 
+from pathlib import Path
+
+def _xdg_config_home() -> Path:
+    return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+def _cfg_dir() -> Path:
+    # same convention as your serverrf CLI
+    return Path(os.getenv("REMOTERF_CONFIG_DIR", _xdg_config_home() / "remoterf"))
+
+def _server_env_path() -> Path:
+    return _cfg_dir() / "server.env"
+
+def _read_env_kv(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+def _get_port(name: str, *, default: int | None = None) -> int:
+    # precedence: real env var > server.env > default
+    v = os.getenv(name)
+    if v is None:
+        kv = _read_env_kv(_server_env_path())
+        v = kv.get(name)
+
+    if v is None or str(v).strip() == "":
+        if default is None:
+            raise SystemExit(f"Missing {name}. Set it via serverrf --config or environment.")
+        return int(default)
+
+    try:
+        n = int(str(v).strip())
+    except Exception:
+        raise SystemExit(f"Invalid {name} (expected int): {v!r}")
+
+    if n <= 0 or n > 65535:
+        raise SystemExit(f"{name} out of range (1..65535): {n}")
+    return n
+
 from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
 from ..host import host_tunnel_pb2_grpc
 
@@ -42,7 +87,13 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(("8.8.8.8", 80))
 
 local_ip = s.getsockname()[0] # grab the local ip
-local_port = os.getenv('GRPC_PORT')
+# local_port = os.getenv('GRPC_PORT')
+local_port = str(_get_port("GRPC_PORT"))    
+cert_port = str(_get_port("CERT_PORT"))   
+
+# keep dotenv for *other* settings if you want, but ports come from server.env
+dotenv_path = find_dotenv('.env.server')
+load_dotenv(dotenv_path)
 
 print(f"Local IP: {local_ip}")
 print(f"Local Port: {local_port}")
@@ -155,7 +206,7 @@ def serve():
     
     # Cert fetcher
     from .cert_provider import start_cert_provider
-    cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(os.getenv("CERT_PORT", "61006")))
+    cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(cert_port))
 
     # Add secure port
     server.add_secure_port(f'{local_ip}:{local_port}', server_credentials)

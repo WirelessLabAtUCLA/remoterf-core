@@ -280,8 +280,6 @@ def _show_certs(*, verbose: bool) -> int:
                 remaining = _fmt_remaining(na)
                 local = na.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
                 print(f"  {p.name}: expires {local}  ({remaining})")
-                
-            print("If these certs expire, users/hosts must reconfigure.\n")
         else:
             print("\nExpiry / Remaining:\n  (no cert files found)")
 
@@ -375,6 +373,8 @@ def _gen_certs(
     if rc == 0:
         print("Generated certs:")
         print(f"  {_certs_dir()}")
+        
+    print("\nUsers/Hosts must reconfigure each time new certs are generated.")
     return rc
 
 
