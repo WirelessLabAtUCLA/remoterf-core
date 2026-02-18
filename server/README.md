@@ -341,6 +341,8 @@ ServerRF display meta data as part of devices list / reservation + online/activi
 
 set_device token (virtual devices) + routing/relay to proper host (multiplexed)
 
+User side testing + integration
+
 edge case testing (disconnected hosts, disconnected server, many users using multiple devices, multi-host)
 
 <!-- HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.)  -->
