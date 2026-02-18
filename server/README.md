@@ -204,6 +204,8 @@ nc -vz 164.67.195.210 61000
 nc -vz 164.67.195.210 61001
 ```
 
+You most likely will need to port forward, etc.
+
 Troubleshooting:
 Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server. Depending on the setup, you may also have ISP firewalls.
 
@@ -267,8 +269,8 @@ serverrf -d --edit-name 0 "New Name"
 
 
 todo:
-Adding plutos via the CLI
-Testing functionality (disregarding Host pipeline)
+<!-- Adding plutos via the CLI -->
+<!-- Testing functionality (disregarding Host pipeline) -->
 Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV.
 Choice to choose usergroup/code by either int id or string name.
 

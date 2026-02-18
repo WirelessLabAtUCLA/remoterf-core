@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoteRF-server"
-version = "0.1.51"
+version = "0.1.52"
 dependencies = [
   "grpcio",
   "protobuf",
@@ -13,6 +13,7 @@ dependencies = [
   "python-dotenv",
   "grpcio-tools",
 ]
+readme = "README.md"
 
 [project.scripts]
 # RRRFserver = "remoteRF_server.server.grpc_server:main"
