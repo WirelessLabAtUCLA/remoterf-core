@@ -335,6 +335,9 @@ todo:
 <!-- Testing functionality (disregarding Host pipeline) -->
 <!-- Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV. -->
 
+HostRF valid connection.
+Ability for server -> to grab hostrf information ANY TIME
+
 HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.) 
 
 Cleanup code comments.

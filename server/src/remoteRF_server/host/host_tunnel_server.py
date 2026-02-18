@@ -32,6 +32,11 @@ from .host_directory_store import (
     cfg_dir_from_file,
 )
 
+import hashlib
+
+def host_key(host_id: str) -> str:
+    h = hashlib.sha256((host_id or "").encode("utf-8")).hexdigest()
+    return h[:16]  # short stable key
 
 def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
     if src_map is None:
@@ -272,13 +277,25 @@ class HostTunnelRegistry:
     # ---------------------------
     # persistence write helpers
     # ---------------------------
+    def _persist_host_meta(self, host_id: str, *, host_name: str = "", platform: str = "", version: str = "") -> None:
+        hk = host_key(host_id)
+        self._env_meta.set_kv_if_absent(f"HOST_{hk}_ID", host_id)
+        if host_name:
+            self._env_meta.upsert_kv(f"HOST_{hk}_NAME", host_name)
+        if platform:
+            self._env_meta.upsert_kv(f"HOST_{hk}_PLATFORM", platform)
+        if version:
+            self._env_meta.upsert_kv(f"HOST_{hk}_VERSION", version)
 
     def _persist_host(self, host_id: str) -> None:
         self._env_lists.append_to_csv_list("KNOWN_HOSTS", host_id)
 
     def _persist_device(self, host_id: str, device_id: str, local_id: int, device_info: Any) -> None:
         self._env_lists.append_to_csv_list("KNOWN_DEVICES", device_id)
-        self._env_lists.append_to_csv_list(f"HOST_{sanitize_env_key(host_id)}_DEVICES", device_id)
+        hk = host_key(host_id)
+        self._env_meta.set_kv_if_absent(f"HOST_{hk}_ID", host_id)  # reverse map
+        self._env_lists.append_to_csv_list(f"HOST_{hk}_DEVICES", device_id)
+
 
         dk = sanitize_env_key(device_id)
         self._env_meta.upsert_kv(f"DEVICE_{dk}_HOST", host_id)
@@ -692,6 +709,7 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         host_id = str(hello.host_id).strip() or "unknown-host"
                         session = HostSession(host_id)
                         self.registry.register_host(host_id, session)
+                        self.registry.persist_host_meta_from_hello(hello)
 
                         try:
                             session.send(
