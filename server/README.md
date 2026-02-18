@@ -335,10 +335,15 @@ todo:
 <!-- Testing functionality (disregarding Host pipeline) -->
 <!-- Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV. -->
 
-HostRF valid connection.
-Ability for server -> to grab hostrf information ANY TIME
+HostRF meta data -> push upon connection + retry connection on host side.
 
-HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.) 
+ServerRF display meta data as part of devices list / reservation + online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
+
+set_device token (virtual devices) + routing/relay to proper host (multiplexed)
+
+edge case testing (disconnected hosts, disconnected server, many users using multiple devices, multi-host)
+
+<!-- HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.)  -->
 
 Cleanup code comments.
 
