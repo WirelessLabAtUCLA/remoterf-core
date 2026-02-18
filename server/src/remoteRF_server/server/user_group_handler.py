@@ -1118,5 +1118,3 @@ def start_usergroup_cleanup_loop(
             stop_event.wait(interval_sec)
 
     threading.Thread(target=_worker, daemon=True)
-
-print("usergroup instnace")

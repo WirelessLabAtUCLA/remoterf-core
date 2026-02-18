@@ -28,7 +28,7 @@ from .rpc_manager import rpc_manager
 from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
-from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local
+from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
 
 from pathlib import Path
@@ -102,8 +102,8 @@ cert_port = str(_get_port("CERT_PORT"))
 dotenv_path = find_dotenv('.env.server')
 load_dotenv(dotenv_path)
 
-print(f"Local IP: {local_ip}")
-print(f"Local Port: {local_port}")
+# print(f"Local IP: {local_ip}")
+# print(f"Local Port: {local_port}")
 
 # Implement the GenericRPC service
 class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
@@ -233,8 +233,9 @@ start_time = datetime.now()
 
 def welcome():
     printf(f"Server running nominally.", Sty.BOLD)
-    printf(f"   -> Started at ", Sty.DEFAULT, f"{start_time}", Sty.BLUE)
-    printf("Input ", Sty.DEFAULT, "'help'", Sty.GREEN," for help menu.", Sty.DEFAULT)
+    printf(f"Local IP: ", Sty.DEFAULT, f"{local_ip}", Sty.ITALIC, f" | Port: ", Sty.DEFAULT, f"{local_port}", Sty.ITALIC)
+    # printf(f"   -> Started at ", Sty.DEFAULT, f"{start_time}", Sty.DEFAULT)
+    printf("Input ", Sty.DEFAULT, "'help'", Sty.BOLD," for help menu.", Sty.DEFAULT)
 
 def clear():
     os.system('clear')
@@ -365,462 +366,235 @@ def get_devices():
     for key, value in data.items():
         printf(f"Device ID:", Sty.DEFAULT, f' {key}', Sty.MAGENTA, f" Device Name: ", Sty.DEFAULT, f"{(value)}", Sty.GRAY)
 
-def help():
-    printf("/------- HELP -------/", Sty.BOLD)
-    printf("'exit'          ", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
-    printf("'help'          ", Sty.MAGENTA, " - Help.", Sty.DEFAULT)
-    printf("'clear'         ", Sty.MAGENTA, " - Clear terminal screen.", Sty.DEFAULT)
-    printf("'show a'         ", Sty.MAGENTA, " - Print all accounts", Sty.DEFAULT)
-    printf("'show d'         ", Sty.MAGENTA, " - Print all devices", Sty.DEFAULT)
-    # printf("'view p'        ", Sty.MAGENTA, " - Print all perms", Sty.DEFAULT) # Deprecated
-    printf("'show r'         ", Sty.MAGENTA, " - Print all reservations", Sty.DEFAULT)
-    printf("'rm aa'         ", Sty.MAGENTA, " - Remove all accounts", Sty.DEFAULT)
-    # printf("'rm a'          ", Sty.MAGENTA, " - Remove one account", Sty.DEFAULT)
-    printf("'rm ar'         ", Sty.MAGENTA, " - Remove all reservations", Sty.DEFAULT)
-    printf("'rm db'         ", Sty.MAGENTA, " - Remove all database entries", Sty.DEFAULT)
-    printf("'setacc'        ", Sty.MAGENTA, " - Set account details (and deletion)", Sty.DEFAULT)
+# def help():
+#     printf("/------- HELP -------/", Sty.BOLD)
+#     printf("'exit'          ", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
+#     printf("'help'          ", Sty.MAGENTA, " - Help.", Sty.DEFAULT)
+#     printf("'clear'         ", Sty.MAGENTA, " - Clear terminal screen.", Sty.DEFAULT)
+#     printf("'show a'         ", Sty.MAGENTA, " - Print all accounts", Sty.DEFAULT)
+#     printf("'show d'         ", Sty.MAGENTA, " - Print all devices", Sty.DEFAULT)
+#     # printf("'view p'        ", Sty.MAGENTA, " - Print all perms", Sty.DEFAULT) # Deprecated
+#     printf("'show r'         ", Sty.MAGENTA, " - Print all reservations", Sty.DEFAULT)
+#     printf("'rm aa'         ", Sty.MAGENTA, " - Remove all accounts", Sty.DEFAULT)
+#     # printf("'rm a'          ", Sty.MAGENTA, " - Remove one account", Sty.DEFAULT)
+#     printf("'rm ar'         ", Sty.MAGENTA, " - Remove all reservations", Sty.DEFAULT)
+#     printf("'rm db'         ", Sty.MAGENTA, " - Remove all database entries", Sty.DEFAULT)
+#     printf("'setacc'        ", Sty.MAGENTA, " - Set account details (and deletion)", Sty.DEFAULT)
     
-    printf("'mk group'      ", Sty.MAGENTA, " - Make a user group", Sty.DEFAULT)
-    printf("'rm group'      ", Sty.MAGENTA, " - Remove a user group", Sty.DEFAULT)
-    printf("'edit group'    ", Sty.MAGENTA, " - Edit a user group", Sty.DEFAULT)
-    printf("'show g'        ", Sty.MAGENTA, " - View all user groups", Sty.DEFAULT)
+#     printf("'mk group'      ", Sty.MAGENTA, " - Make a user group", Sty.DEFAULT)
+#     printf("'rm group'      ", Sty.MAGENTA, " - Remove a user group", Sty.DEFAULT)
+#     printf("'edit group'    ", Sty.MAGENTA, " - Edit a user group", Sty.DEFAULT)
+#     printf("'show g'        ", Sty.MAGENTA, " - View all user groups", Sty.DEFAULT)
     
-    printf("'mk codes'      ", Sty.MAGENTA, " - Make enrollment codes", Sty.DEFAULT)
-    printf("'show c'        ", Sty.MAGENTA, " - View all enrollment codes", Sty.DEFAULT)
-    printf("'rm codes'      ", Sty.MAGENTA, " - Remove enrollment code", Sty.DEFAULT)
+#     printf("'mk codes'      ", Sty.MAGENTA, " - Make enrollment codes", Sty.DEFAULT)
+#     printf("'show c'        ", Sty.MAGENTA, " - View all enrollment codes", Sty.DEFAULT)
+#     printf("'rm codes'      ", Sty.MAGENTA, " - Remove enrollment code", Sty.DEFAULT)
     
-def server_input(inpu:str) -> bool:
-    if inpu == "h" or inpu == "help":
-        help()
-    elif inpu == 'show r':
-        reservation_handler.print_all_reservations()
-    elif inpu == 'show a':
-        reservation_handler.print_all_accounts()
-    elif inpu == 'show p':
-        perms.print_perms()
-    elif inpu == 'show d':
-        get_devices()
-    elif inpu == 'clear':
-        clear()
-    elif inpu == 'rm aa':
-        reservation_handler.remove_all_users()
-    elif inpu == 'rm ar':
-        reservation_handler.remove_all_reservations()
-    elif inpu == 'rm db':
-        reservation_handler.rm_db()
-    elif inpu == 'setacc':
-        set_acc()
-    elif inpu in ('mk group', 'mk g'):
-        make_user_group_local(session)
-    elif inpu in ('rm group', 'rm g'):
-        remove_user_group_local(session)
-    elif inpu in ('edit group', 'edit g'):
-        edit_user_group_local(session)
-    elif inpu in ('show g', 'show groups'):
-        list_user_groups_local(session)
-    elif inpu in ('mk codes', 'mk code', 'mk c'):
-        make_enrollment_codes_local(session)
-    elif inpu == 'show c':
-        list_enrollment_codes_local(session)
-    elif inpu in ('rm code', 'rm c', 'rm codes'):
-        remove_enrollment_code_local(session)
-    elif inpu in ('exit', 'quit'):
-        return False
-    else:
-        print(f"Invalid command: {inpu}")
-    return True
+# def server_input(inpu:str) -> bool:
+#     if inpu == "h" or inpu == "help":
+#         help()
+#     elif inpu == 'show r':
+#         reservation_handler.print_all_reservations()
+#     elif inpu == 'show a':
+#         reservation_handler.print_all_accounts()
+#     elif inpu == 'show p':
+#         perms.print_perms()
+#     elif inpu == 'show d':
+#         get_devices()
+#     elif inpu == 'clear':
+#         clear()
+#     elif inpu == 'rm aa':
+#         reservation_handler.remove_all_users()
+#     elif inpu == 'rm ar':
+#         reservation_handler.remove_all_reservations()
+#     elif inpu == 'rm db':
+#         reservation_handler.rm_db()
+#     elif inpu == 'setacc':
+#         set_acc()
+#     elif inpu in ('mk group', 'mk g'):
+#         make_user_group_local(session)
+#     elif inpu in ('rm group', 'rm g'):
+#         remove_user_group_local(session)
+#     elif inpu in ('edit group', 'edit g'):
+#         edit_user_group_local(session)
+#     elif inpu in ('show g', 'show groups'):
+#         list_user_groups_local(session)
+#     elif inpu in ('mk codes', 'mk code', 'mk c'):
+#         make_enrollment_codes_local(session)
+#     elif inpu == 'show c':
+#         list_enrollment_codes_local(session)
+#     elif inpu in ('rm code', 'rm c', 'rm codes'):
+#         remove_enrollment_code_local(session)
+#     elif inpu in ('exit', 'quit'):
+#         return False
+#     else:
+#         print(f"Invalid command: {inpu}")
+#     return True
+
+from typing import Callable
+
+def _norm_cmd(s: str) -> str:
+    return " ".join((s or "").strip().split()).lower()
+
+def _cmd_status() -> None:
+    try:
+        uptime = datetime.now() - start_time
+        printf("Status:", Sty.BOLD)
+        printf("  Started: ", Sty.DEFAULT, f"{start_time}", Sty.BLUE)
+        printf("  Uptime : ", Sty.DEFAULT, f"{str(uptime).split('.')[0]}", Sty.BLUE)
+        printf("  Bind   : ", Sty.DEFAULT, f"{local_ip}:{local_port}", Sty.MAGENTA)
+        printf("  Cert   : ", Sty.DEFAULT, f"{local_ip}:{cert_port}", Sty.MAGENTA)
+    except Exception:
+        printf("Status unavailable.", Sty.RED)
+
+def help() -> None:
+    printf("RemoteRF Server Shell", Sty.BOLD)
+    printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands. Type ", Sty.DEFAULT, "quit", Sty.MAGENTA, " to exit.", Sty.DEFAULT)
+    print()
+
+    printf("Server:", Sty.BOLD)
+    printf("  help, h                  ", Sty.MAGENTA, "- Show this help", Sty.DEFAULT)
+    printf("  clear                    ", Sty.MAGENTA, "- Clear the screen", Sty.DEFAULT)
+    printf("  status                   ", Sty.MAGENTA, "- Show server status (uptime/bind)", Sty.DEFAULT)
+    printf("  quit / exit              ", Sty.MAGENTA, "- Exit the shell", Sty.DEFAULT)
+    print()
+
+    printf("Users:", Sty.BOLD)
+    printf("  users list               ", Sty.MAGENTA, "- List accounts", Sty.DEFAULT)
+    printf("  users manage             ", Sty.MAGENTA, "- Manage a user (perms / delete / reservations)", Sty.DEFAULT)
+    printf("  users purge              ", Sty.MAGENTA, "- Remove ALL users", Sty.DEFAULT)
+    print()
+
+    printf("Devices:", Sty.BOLD)
+    printf("  devices list             ", Sty.MAGENTA, "- List devices", Sty.DEFAULT)
+    print()
+
+    printf("Reservations:", Sty.BOLD)
+    printf("  reservations list        ", Sty.MAGENTA, "- List reservations", Sty.DEFAULT)
+    printf("  reservations purge       ", Sty.MAGENTA, "- Remove ALL reservations", Sty.DEFAULT)
+    print()
+
+    printf("Groups:", Sty.BOLD)
+    printf("  groups list              ", Sty.MAGENTA, "- List user groups", Sty.DEFAULT)
+    printf("  groups create            ", Sty.MAGENTA, "- Create a user group (interactive)", Sty.DEFAULT)
+    printf("  groups edit              ", Sty.MAGENTA, "- Edit a user group (interactive)", Sty.DEFAULT)
+    printf("  groups delete            ", Sty.MAGENTA, "- Delete a user group (interactive)", Sty.DEFAULT)
+    printf("  groups csv               ", Sty.MAGENTA, "- Export ALL user groups as CSV to Downloads", Sty.DEFAULT)
+    print()
+
+    printf("Enrollment Codes:", Sty.BOLD)
+    printf("  codes list               ", Sty.MAGENTA, "- List enrollment codes", Sty.DEFAULT)
+    printf("  codes create             ", Sty.MAGENTA, "- Create enrollment codes (interactive)", Sty.DEFAULT)
+    printf("  codes delete             ", Sty.MAGENTA, "- Delete an enrollment code (interactive)", Sty.DEFAULT)
+    printf("  codes csv                ", Sty.MAGENTA, "- Export ALL enrollment codes as CSV to Downloads", Sty.DEFAULT)
+    print()
+
+    printf("Database:", Sty.BOLD)
+    printf("  db purge                 ", Sty.MAGENTA, "- Remove all database entries", Sty.DEFAULT)
+    print()
+
+def server_input(inpu: str) -> bool:
+    cmd = _norm_cmd(inpu)
+    if not cmd:
+        return True
+
+    def _stay(fn: Callable[[], None]) -> bool:
+        fn()
+        return True
+
+    DISPATCH: dict[str, Callable[[], bool]] = {
+        # ---- server ----
+        "help": lambda: _stay(help),
+        "h": lambda: _stay(help),
+        "?": lambda: _stay(help),
+
+        "clear": lambda: _stay(clear),
+        "cls": lambda: _stay(clear),
+
+        "status": lambda: _stay(_cmd_status),
+        "server status": lambda: _stay(_cmd_status),
+
+        "quit": lambda: False,
+        "exit": lambda: False,
+        "q": lambda: False,
+
+        # ---- users ----
+        "users list": lambda: _stay(reservation_handler.print_all_accounts),
+        "u list": lambda: _stay(reservation_handler.print_all_accounts),
+        "accounts list": lambda: _stay(reservation_handler.print_all_accounts),
+
+        "users manage": lambda: _stay(set_acc),
+        "users manage": lambda: _stay(set_acc),
+        "setacc": lambda: _stay(set_acc),  # old
+
+        "users purge": lambda: _stay(reservation_handler.remove_all_users),
+        "rm aa": lambda: _stay(reservation_handler.remove_all_users),  # old
+
+        # perms (kept; optional to advertise)
+        "users perms": lambda: _stay(perms.print_perms),
+        "show p": lambda: _stay(perms.print_perms),  # old
+
+        # ---- devices ----
+        "devices list": lambda: _stay(get_devices),
+        "show d": lambda: _stay(get_devices),  # old
+
+        # ---- reservations ----
+        "reservations list": lambda: _stay(reservation_handler.print_all_reservations),
+        "show r": lambda: _stay(reservation_handler.print_all_reservations),  # old
+
+        "reservations purge": lambda: _stay(reservation_handler.remove_all_reservations),
+        "rm ar": lambda: _stay(reservation_handler.remove_all_reservations),  # old
+
+        # ---- db ----
+        "db purge": lambda: _stay(reservation_handler.rm_db),
+        "rm db": lambda: _stay(reservation_handler.rm_db),  # old
+
+        # ---- groups ----
+        "groups create": lambda: _stay(lambda: make_user_group_local(session)),
+        "mk group": lambda: _stay(lambda: make_user_group_local(session)),  # old
+        "mk g": lambda: _stay(lambda: make_user_group_local(session)),      # old
+
+        "groups delete": lambda: _stay(lambda: remove_user_group_local(session)),
+        "rm group": lambda: _stay(lambda: remove_user_group_local(session)),  # old
+        "rm g": lambda: _stay(lambda: remove_user_group_local(session)),      # old
+
+        "groups edit": lambda: _stay(lambda: edit_user_group_local(session)),
+        "edit group": lambda: _stay(lambda: edit_user_group_local(session)),  # old
+        "edit g": lambda: _stay(lambda: edit_user_group_local(session)),      # old
+
+        "groups list": lambda: _stay(lambda: list_user_groups_local(session)),
+        "show g": lambda: _stay(lambda: list_user_groups_local(session)),      # old
+        "show groups": lambda: _stay(lambda: list_user_groups_local(session)), # old
+        "groups csv": lambda: _stay(export_user_groups_csv_local),
+
+        # ---- enrollment codes ----
+        "codes create": lambda: _stay(lambda: make_enrollment_codes_local(session)),
+        "mk codes": lambda: _stay(lambda: make_enrollment_codes_local(session)),  # old
+        "mk code": lambda: _stay(lambda: make_enrollment_codes_local(session)),   # old
+        "mk c": lambda: _stay(lambda: make_enrollment_codes_local(session)),      # old
+
+        "codes list": lambda: _stay(lambda: list_enrollment_codes_local(session)),
+        "show c": lambda: _stay(lambda: list_enrollment_codes_local(session)),    # old
+
+        "codes delete": lambda: _stay(lambda: remove_enrollment_code_local(session)),
+        "rm codes": lambda: _stay(lambda: remove_enrollment_code_local(session)), # old
+        "rm code": lambda: _stay(lambda: remove_enrollment_code_local(session)),  # old
+        "rm c": lambda: _stay(lambda: remove_enrollment_code_local(session)),     # old
         
+        "codes csv": lambda: _stay(export_enrollment_codes_csv_local),
+    }
+
+    fn = DISPATCH.get(cmd)
+    if fn is None:
+        printf("Unknown command: ", Sty.RED, f"{inpu}", Sty.DEFAULT)
+        printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands.", Sty.DEFAULT)
+        return True
+
+    return fn()
+
+# os.system('clear')
 welcome()
 
 def main():
-    while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
+    while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BOLD))):
         pass
-
-# _started = False
-# _start_lock = threading.Lock()
-
-# def main():
-#     global _started
-#     with _start_lock:
-#         if _started:
-#             return
-#         _started = True
-
-#         t1 = threading.Thread(target=serve, daemon=True)
-#         t2 = threading.Thread(target=update_devices, daemon=True)
-#         t1.start()
-#         t2.start()
-#         start_usergroup_cleanup_loop(interval_sec=60)
-        
-#     while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BLUE))):
-#         pass
-
-# if __name__ == '__main__':
-#     main()
-
-    
-    
-    
-    
-    
-# # region Remote Admin
-    
-# from typing import List, Optional
-
-# def remove_all_users_remote() -> str:
-#     """
-#     Removes all user accounts from the system and returns a message about the operation.
-#     """
-#     reservation_handler.remove_all_users()
-#     return "All user accounts have been removed successfully."
-
-
-# def remove_user_remote(username: str) -> str:
-#     """
-#     Removes a single user account from the system and returns a message about the operation.
-#     """
-#     reservation_handler.remove_user(username=username)
-#     return f"User '{username}' has been removed successfully."
-
-
-# def remove_all_reservations_remote() -> str:
-#     """
-#     Removes all reservations from the system and returns a message about the operation.
-#     """
-#     reservation_handler.remove_all_reservations()
-#     return "All reservations have been removed successfully."
-
-# def set_account_remote(
-#     username: str,
-#     permission: str,
-#     device_list: Optional[List[int]] = None,
-#     max_reservations: Optional[int] = None,
-#     max_reservation_time_sec: Optional[int] = None
-# ) -> str:
-#     """
-#     Sets user permission. Valid permission strings: 
-#     'U' (User), 'P' (PowerUser), 'A' (Admin).
-#     For 'P' (PowerUser), device_list, max_reservations, and max_reservation_time_sec
-#     must be provided.
-
-#     Returns a string describing the outcome of setting the account.
-#     """
-#     messages = []
-
-#     current_perm = perms.get_perms(username)
-#     if not current_perm:
-#         messages.append(f"User '{username}' does not exist. Creating a new entry.")
-
-#     if permission == 'U':
-#         perms.set_user(username)
-#         messages.append(f"User '{username}' set to User level.")
-#     elif permission == 'P':
-#         if device_list is None or max_reservations is None or max_reservation_time_sec is None:
-#             raise ValueError("For PowerUser, device_list, max_reservations, and "
-#                              "max_reservation_time_sec must all be provided.")
-#         perms.set_poweruser(
-#             username,
-#             devices_allowed=device_list,
-#             max_reservations=max_reservations,
-#             max_reservation_time_sec=max_reservation_time_sec
-#         )
-#         messages.append(f"User '{username}' set to PowerUser level with devices: "
-#                         f"{device_list}, max_reservations: {max_reservations}, "
-#                         f"max_reservation_time_sec: {max_reservation_time_sec}")
-#     elif permission == 'A':
-#         perms.set_admin(username)
-#         messages.append(f"User '{username}' set to Admin level.")
-#     else:
-#         messages.append("Invalid permission input. Use 'U', 'P', or 'A'.")
-
-#     return "\n".join(messages)
-
-# import io
-# import contextlib
-
-# def print_all_reservations_remote() -> str:
-#     """
-#     Returns information about all reservations (instead of printing it).
-
-#     Tries (in order):
-#       1) reservation_handler.grab_all_reservations_server() if available
-#       2) capture stdout from reservation_handler.print_all_reservations()
-#     """
-#     # Preferred path: structured data
-#     if hasattr(reservation_handler, "grab_all_reservations_server"):
-#         reservations = reservation_handler.grab_all_reservations_server()
-#         if not reservations:
-#             return "No reservations found."
-
-#         lines = ["All reservations:"]
-#         # reservations: {res_id(int): (username, device_id, start_time, end_time)}
-#         for res_id in sorted(reservations.keys()):
-#             res = reservations[res_id]
-#             try:
-#                 username, device_id, start_time, end_time = res
-#             except Exception:
-#                 # fallback if structure differs
-#                 lines.append(f"ID: {res_id} -> {res}")
-#                 continue
-#             lines.append(
-#                 f"ID: {res_id}, User: {username}, Device: {device_id}, Start: {start_time}, End: {end_time}"
-#             )
-#         return "\n".join(lines)
-
-#     # Fallback: capture whatever the existing print function emits
-#     if hasattr(reservation_handler, "print_all_reservations"):
-#         buf = io.StringIO()
-#         with contextlib.redirect_stdout(buf):
-#             reservation_handler.print_all_reservations()
-#         out = buf.getvalue().strip()
-#         return out if out else "No reservations found."
-
-#     return "No reservation listing method found on reservation_handler."
-
-# def print_all_accounts_remote() -> str:
-#     """
-#     Returns information about all user accounts (instead of printing it).
-
-#     Tries (in order):
-#       1) reservation_handler.get_all_accounts() if you implemented it
-#       2) capture stdout from reservation_handler.print_all_accounts()
-#     """
-#     if hasattr(reservation_handler, "get_all_accounts"):
-#         accounts = reservation_handler.get_all_accounts()
-#         if not accounts:
-#             return "No user accounts found."
-#         return "\n".join(["All user accounts:"] + [str(a) for a in accounts])
-
-#     if hasattr(reservation_handler, "print_all_accounts"):
-#         buf = io.StringIO()
-#         with contextlib.redirect_stdout(buf):
-#             reservation_handler.print_all_accounts()
-#         out = buf.getvalue().strip()
-#         return out if out else "No user accounts found."
-
-#     return "No account listing method found on reservation_handler."
-
-# def print_all_perms_remote() -> str:
-#     """
-#     Returns permission information for all users (instead of printing it).
-
-#     Tries (in order):
-#       1) capture stdout from perms.print_perms()
-#       2) fall back to a minimal message if no print method exists
-#     """
-#     if hasattr(perms, "print_perms"):
-#         buf = io.StringIO()
-#         with contextlib.redirect_stdout(buf):
-#             perms.print_perms()
-#         out = buf.getvalue().strip()
-#         return out if out else "No permissions found."
-#     return "No permission listing method found on perms."
-
-
-# def print_all_devices_remote() -> str:
-#     """
-#     Returns device information (instead of printing it).
-
-#     Uses get_all_devices_str() (preferred structured source) and formats it.
-#     Falls back to the server's get_devices() printing path if needed.
-#     """
-#     try:
-#         data = get_all_devices_str()
-#         if not data:
-#             return "No devices found."
-
-#         lines = ["All devices:"]
-#         # data: {device_id: device_name_or_desc}
-#         for dev_id in sorted(data.keys()):
-#             lines.append(f"Device ID: {dev_id} Device Name: {data[dev_id]}")
-#         return "\n".join(lines)
-#     except Exception:
-#         # Fallback: capture whatever get_devices() prints
-#         if "get_devices" in globals() and callable(get_devices):
-#             buf = io.StringIO()
-#             with contextlib.redirect_stdout(buf):
-#                 get_devices()
-#             out = buf.getvalue().strip()
-#             return out if out else "No devices found."
-#         return "Failed to retrieve devices."
-
-# def _safe_unmap(v):
-#     try:
-#         return unmap_arg(v)
-#     except Exception:
-#         return v
-
-# def _safe_map(v):
-#     try:
-#         return map_arg(v)
-#     except Exception:
-#         return v
-    
-# def verify_remote_admin(args: map) -> Tuple[bool, str, str]:
-#     """
-#     Returns: (ok, error_message, username)
-#     """
-#     try:
-#         raw_args = dict(args) if args is not None else {}
-#     except Exception:
-#         raw_args = {}
-
-#     # Use auth_un/auth_pw to avoid colliding with "username" (target) args
-#     if "auth_un" not in raw_args or "auth_pw" not in raw_args:
-#         return False, "Missing admin credentials (auth_un/auth_pw).", ""
-
-#     username = _safe_unmap(raw_args.get("auth_un"))
-#     password = _safe_unmap(raw_args.get("auth_pw"))
-
-#     if not username or not password:
-#         return False, "Missing admin credentials (auth_un/auth_pw).", ""
-
-#     # 1) Validate username/password against Accounts DB
-#     login_res = reservation_handler.login_user(str(username), str(password))
-#     if not isinstance(login_res, dict) or ("UC" not in login_res):
-#         return False, "Invalid login credentials.", str(username)
-
-#     # 2) Validate perms DB says this user is Admin
-#     try:
-#         rows = perms.get_perms(str(username))
-#     except Exception:
-#         return False, "Failed to read permissions database.", str(username)
-
-#     if not rows:
-#         return False, "Permissions not found. Access denied.", str(username)
-
-#     # Your get_perms UNION returns one row if you enforce exclusivity; be safe anyway:
-#     is_admin = any((r and len(r) > 0 and r[0] == "Admin") for r in rows)
-#     if not is_admin:
-#         return False, f"User '{username}' is not an Admin.", str(username)
-
-#     return True, "", str(username)
-    
-# def remote_admin_call(function_name: str, args: map) -> map:
-#     # Normalize protobuf map containers to a plain dict and unmap values
-#     try:
-#         raw_args = dict(args) if args is not None else {}
-#     except Exception:
-#         raw_args = {}
-
-#     args_py = {str(k): _safe_unmap(v) for k, v in raw_args.items()}
-
-#     def get_arg(name, *, required=False, default=None, aliases=()):
-#         if name in args_py:
-#             return args_py[name]
-#         for a in aliases:
-#             if a in args_py:
-#                 return args_py[a]
-#         if required:
-#             raise KeyError(f"Missing required arg '{name}'")
-#         return default
-
-#     # Normalize function name
-#     fn = (function_name or "").strip()
-#     if fn.endswith("_remote"):
-#         fn = fn[:-7]
-#     fn_key = fn.lower()
-
-#     try:
-#         # ---- remove_all_users ----
-#         if fn_key in ("remove_all_users", "remove_all_accounts", "rm_all_users", "rm_aa"):
-#             msg = remove_all_users_remote()
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- remove_user ----
-#         if fn_key in ("remove_user", "rm_user", "rm_a"):
-#             username = get_arg("username", required=True, aliases=("user", "u"))
-#             msg = remove_user_remote(str(username))
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- remove_all_reservations ----
-#         if fn_key in ("remove_all_reservations", "rm_all_reservations", "rm_ar"):
-#             msg = remove_all_reservations_remote()
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- set_account ----
-#         if fn_key in ("set_account", "set_acc", "set_user_perm", "setperm"):
-#             username = get_arg("username", required=True, aliases=("user", "u"))
-#             permission = get_arg("permission", required=True, aliases=("perm", "p"))
-
-#             device_list = get_arg(
-#                 "device_list",
-#                 default=None,
-#                 aliases=("devices", "devices_allowed", "device_ids"),
-#             )
-#             if isinstance(device_list, str):
-#                 device_list = [int(x) for x in device_list.split(",") if x.strip() != ""]
-#             elif device_list is not None:
-#                 device_list = [int(x) for x in list(device_list)]
-
-#             max_reservations = get_arg(
-#                 "max_reservations",
-#                 default=None,
-#                 aliases=("max_res", "maxRes"),
-#             )
-#             if max_reservations is not None:
-#                 max_reservations = int(max_reservations)
-
-#             max_reservation_time_sec = get_arg(
-#                 "max_reservation_time_sec",
-#                 default=None,
-#                 aliases=("max_time", "max_res_time_sec", "maxResTimeSec"),
-#             )
-#             if max_reservation_time_sec is not None:
-#                 max_reservation_time_sec = int(max_reservation_time_sec)
-
-#             msg = set_account_remote(
-#                 username=str(username),
-#                 permission=str(permission),
-#                 device_list=device_list,
-#                 max_reservations=max_reservations,
-#                 max_reservation_time_sec=max_reservation_time_sec,
-#             )
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- print_all_accounts ----
-#         if fn_key in ("print_all_accounts", "print_accounts", "printa"):
-#             msg = print_all_accounts_remote()
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- print_all_reservations ----
-#         if fn_key in ("print_all_reservations", "print_reservations", "printr"):
-#             msg = print_all_reservations_remote()
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- print_all_perms ----
-#         if fn_key in ("print_all_perms", "print_perms", "printp"):
-#             msg = print_all_perms_remote()
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- print_all_devices ----
-#         if fn_key in ("print_all_devices", "print_devices", "printd"):
-#             msg = print_all_devices_remote()
-#             return {"Ok": _safe_map(True), "Result": _safe_map(msg)}
-
-#         # ---- unknown ----
-#         supported = [
-#             "remove_all_users",
-#             "remove_user (username)",
-#             "remove_all_reservations",
-#             "set_account (username, permission, ...)",
-#             "print_all_accounts",
-#             "print_all_reservations",
-#             "print_all_perms",
-#             "print_all_devices",
-#         ]
-#         return {
-#             "Ok": _safe_map(False),
-#             "Error": _safe_map(f"Unknown RemoteAdmin function '{fn}'. Supported: {supported}"),
-#         }
-
-#     except Exception as e:
-#         tb = traceback.format_exc(limit=5)
-#         return {
-#             "Ok": _safe_map(False),
-#             "Error": _safe_map(str(e)),
-#             "Traceback": _safe_map(tb),
-#         }
-
-
-# endregion

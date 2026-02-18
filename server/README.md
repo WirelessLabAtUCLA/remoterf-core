@@ -266,20 +266,85 @@ Run the below to edit names of existing devices:
 serverrf -d --edit-name 0 "New Name"
 ```
 
+Note that all device and server config parameters need a 'restart' to take affect (ctrl + c -> serverrf -s).
 
+## Server Runtime Configuration
 
+After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. This interactive shell is used for runtime administration: managing users, devices, reservations, user groups, and enrollment codes.
+
+---
+
+#### Server
+
+* `help` / `h` — Show help
+* `clear` — Clear the screen
+* `status` — Show server status (uptime / bind info)
+* `quit` / `exit` — Exit the server shell
+
+---
+
+#### Users
+
+* `users list` — List all accounts
+* `users manage` — Manage a specific user 
+* `users purge` — Delete **all** users
+
+---
+
+#### Devices
+
+* `devices list` — List all devices
+
+---
+
+#### Reservations
+
+* `reservations list` — List all reservations
+* `reservations purge` — Delete **all** reservations
+
+---
+
+#### Groups
+
+* `groups list` — List user groups
+* `groups create` — Create a user group *(interactive)*
+* `groups edit` — Edit a user group *(interactive)*
+* `groups delete` — Delete a user group *(interactive)*
+* `groups csv` - Export all groups as a CSV
+
+---
+
+#### Enrollment Codes
+
+* `codes list` — List enrollment codes
+* `codes create` — Create enrollment codes *(interactive)*
+* `codes delete` — Delete an enrollment code *(interactive)*
+* `codes csv` - Export all codes as a CSV
+
+---
+
+#### Database
+
+* `db purge` — Remove all database entries
+
+---
+
+## 
 todo:
 <!-- Adding plutos via the CLI -->
 <!-- Testing functionality (disregarding Host pipeline) -->
-Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV.
-Choice to choose usergroup/code by either int id or string name.
-
-Ability to remotely manage groups and codes as admin.
+<!-- Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV. -->
 
 HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.) 
 
+Cleanup code comments.
+
 Update Ian with installation demo (try myself first on the NUC once!) for both server and host.
 
+Nice to have (later):
+Activity/stats?
+Ability to remotely manage groups and codes as admin.
+Choice to choose usergroup/code by either int id or string name. (too lazy)
 
 todo: Specify/Pull user side --config CLI pointing to this server + debug for connection sake (later)
 

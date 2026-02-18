@@ -1,5 +1,13 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
+import csv
+import json
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+
+from .user_group_handler import user_group_handler
 
 from .user_group_handler import user_group_handler
 
@@ -587,3 +595,129 @@ def list_enrollment_codes_local(session) -> None:
     print(sep)
     for row in table:
         print("  ".join(row[i].ljust(widths[cols[i]]) for i in range(len(cols))))
+
+def _resolve_download_dir() -> Path:
+    """
+    Best-effort Downloads folder resolution:
+      1) XDG_DOWNLOAD_DIR env (if set)
+      2) ~/.config/user-dirs.dirs XDG_DOWNLOAD_DIR (Linux desktops)
+      3) ~/Downloads
+      4) fallback: cwd
+    """
+    # 1) Env override (rare, but cheap to support)
+    xdg_env = os.getenv("XDG_DOWNLOAD_DIR")
+    if xdg_env:
+        p = Path(os.path.expandvars(xdg_env)).expanduser()
+        return p
+
+    # 2) user-dirs.dirs (common on Linux w/ xdg-user-dirs)
+    try:
+        user_dirs = Path.home() / ".config" / "user-dirs.dirs"
+        if user_dirs.exists():
+            txt = user_dirs.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r'^XDG_DOWNLOAD_DIR\s*=\s*"(.*)"\s*$', txt, flags=re.MULTILINE)
+            if m:
+                raw = m.group(1)
+                raw = raw.replace("$HOME", str(Path.home()))
+                p = Path(os.path.expandvars(raw)).expanduser()
+                return p
+    except Exception:
+        pass
+
+    # 3) Default
+    p = Path.home() / "Downloads"
+    return p
+
+
+def _coerce_csv_cell(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, (dict, list, tuple)):
+        # stable, readable cell content
+        return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+    return str(v)
+
+
+def _write_csv(
+    rows: List[Dict[str, Any]],
+    out_path: Path,
+    *,
+    preferred_columns: Optional[List[str]] = None,
+) -> None:
+    if not rows:
+        raise ValueError("No rows to write.")
+
+    preferred_columns = preferred_columns or []
+
+    present = set().union(*(r.keys() for r in rows))
+    columns = [c for c in preferred_columns if c in present]
+    columns += [c for c in sorted(present) if c not in columns]
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: _coerce_csv_cell(r.get(c)) for c in columns})
+
+
+def export_user_groups_csv_local() -> Optional[Path]:
+    # include_users=True so CSV truly contains "everything"
+    groups: List[Dict[str, Any]] = user_group_handler.get_all_user_groups(include_users=True) or []
+    if not groups:
+        print("No user groups found.")
+        return None
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = _resolve_download_dir()
+    out_path = out_dir / f"remoterf_user_groups_{ts}.csv"
+
+    preferred = [
+        "group_id", "id",
+        "group_name", "name",
+        "devices_whitelist",
+        "max_reservation_time_sec",
+        "max_reservations",
+        "lifetime_sec",
+        "created_at",
+        "users",
+    ]
+
+    try:
+        _write_csv(groups, out_path, preferred_columns=preferred)
+        print(f"Exported user groups CSV -> {out_path}")
+        return out_path
+    except Exception as e:
+        print(f"Failed to export user groups CSV: {e}")
+        return None
+
+
+def export_enrollment_codes_csv_local() -> Optional[Path]:
+    rows: List[Dict[str, Any]] = user_group_handler.get_all_enrollment_codes() or []
+    if not rows:
+        print("No enrollment codes found.")
+        return None
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = _resolve_download_dir()
+    out_path = out_dir / f"remoterf_enrollment_codes_{ts}.csv"
+
+    preferred = [
+        "code_name",
+        "group_id",
+        "uses",
+        "uses_left",
+        "remaining_uses",
+        "duration_sec",
+        "expires_at",
+        "created_at",
+    ]
+
+    try:
+        _write_csv(rows, out_path, preferred_columns=preferred)
+        print(f"Exported enrollment codes CSV -> {out_path}")
+        return out_path
+    except Exception as e:
+        print(f"Failed to export enrollment codes CSV: {e}")
+        return None
