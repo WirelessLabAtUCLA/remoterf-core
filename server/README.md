@@ -251,8 +251,18 @@ serverrf --device --add --pluto <device_id:name:serial>
 
 # example
 serverrf --device --add --pluto 0:pluto_0:104473f6
+serverrf --device --add --pluto "1:Pluto SDR (OTA):58472j"
 ```
 
+Run the below to check if this new device exists:
+```bash
+serverrf --device --show
+```
+
+Run the below to edit names of existing devices:
+```bash
+serverrf -d --edit-name 0 "New Name"
+```
 
 
 
