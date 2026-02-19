@@ -137,10 +137,34 @@ hostrf -c -h host_0
 
 ### 3) Connect devices (Adalm Pluto)
 
+To connect plutos to the server:
+
 ```bash
-iio_info -s #if this doesn't work, try the below
-iio_info -u ip:192.168.2.1
+iio_info -s
 ```
+
+If the pluto doesn't show up, yet the below works:
+
+```bash
+sudo iio_info -s
+```
+
+Run the below and reboot after: 
+
+```bash
+sudo groupadd -f plugdev
+sudo usermod -aG plugdev "$USER"
+
+sudo tee /etc/udev/rules.d/53-adi-usb.rules >/dev/null <<'EOF'
+# Type the below in
+SUBSYSTEM=="usb", ATTR{idVendor}=="0456", MODE="0660", GROUP="plugdev"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+sudo reboot now
+```
+
 
 Look for a 'hw_serial: 104473'. Keep note of said serial per device.
 
@@ -168,11 +192,3 @@ Clear all device config:
 ```bash
 hostrf -d --wipe
 ```
-
-todo: confirm connecting to pluto devices
-
-todo: hostrf side show devices, etc.
-
-todo: Punching list of devices through the tunnel
-
-todo: ServerRF side routing & reservation pipeline. (Fetching hostname and devices on 'read/pull' information)
