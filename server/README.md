@@ -343,6 +343,8 @@ set_device token (virtual devices) + routing/relay to proper host (multiplexed)
 
 User side testing + integration
 
+hostrf side CLI/server (basically just device list)
+
 edge case testing (disconnected hosts, disconnected server, many users using multiple devices, multi-host)
 
 <!-- HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.)  -->
