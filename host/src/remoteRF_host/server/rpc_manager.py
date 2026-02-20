@@ -20,8 +20,6 @@ class RpcManager:
                 return PlutoServer.handle_call(function_name=function_name, args=args)
             else:
                 return {'a': map_arg('No token provided')}
-        elif function_name_args[0] == "HackRF":
-            pass
         
         # HOSTS don't have db !
         # elif function_name_args[0] == "ACC":

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package remoterf;
 
-import "grpc.proto"; // must contain: package remote_rf; and messages below
+import "grpc.proto"; // package remote_rf; GenericRPCRequest/Response
 
 message HostHello {
   string host_id = 1;
@@ -12,10 +12,7 @@ message HostHello {
 message DeviceInfo {
   uint32 local_id = 1;
   string label = 2;
-
-  // Stable globally-unique device ID (required for routing + persistence)
   string device_id = 3;
-
   string serial = 4;
   string kind = 5;
 }
@@ -28,28 +25,17 @@ message DeviceAnnounce {
 
 message RpcRequest {
   string req_id = 1;
-
-  // Optional legacy field (keep if you still use it anywhere)
   uint32 global_device_id = 2;
-
   uint32 local_device_id = 3;
-
-  // Prefer this stable ID for routing/debug
   string device_id = 4;
-
-  // *** Sealed relay payload ***
   remote_rf.GenericRPCRequest request = 5;
-
   uint64 deadline_unix_ms = 6;
 }
 
 message RpcResponse {
   string req_id = 1;
   bool ok = 2;
-
-  // *** Sealed relay payload ***
   remote_rf.GenericRPCResponse response = 3;
-
   string error = 4;
 }
 
@@ -59,6 +45,38 @@ message Heartbeat {
 
 message Cancel {
   string req_id = 1;
+}
+
+/* ---------------------------
+ * NEW: server-pull metadata
+ * ---------------------------
+ */
+
+message MetaRequest {
+  string req_id = 1;
+
+  bool include_platform = 2;
+  bool include_env = 3;
+  bool include_devices = 4;
+}
+
+message HostMeta {
+  string host_id = 1;
+  string version = 2;
+  uint64 unix_ms = 3;
+
+  // safe key/value metadata (allowlisted by host)
+  map<string, string> kv = 4;
+
+  // optional device snapshot
+  repeated DeviceInfo devices = 5;
+}
+
+message MetaResponse {
+  string req_id = 1;
+  bool ok = 2;
+  string error = 3;
+  HostMeta meta = 4;
 }
 
 message HostFrame {
@@ -71,6 +89,10 @@ message HostFrame {
 
     Heartbeat heartbeat = 5;
     Cancel cancel = 6;
+
+    // NEW
+    MetaRequest meta_request = 7;
+    MetaResponse meta_response = 8;
   }
 }
 

@@ -4,16 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoterf-host" 
-version = "0.1.8" 
+version = "0.1.14" 
 description = "RemoteRF host-side control package"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Ethan Ge" }]
 dependencies = [
-    # "grpcio>=1.60",
-    # "pyyaml>=6.0",
-    "prompt_toolkit>=3.0",
+  "grpcio",
+  "protobuf",
+  "numpy",
+  "prompt_toolkit",
+  "python-dotenv",
+  "grpcio-tools",
 ]
 
 classifiers = [
