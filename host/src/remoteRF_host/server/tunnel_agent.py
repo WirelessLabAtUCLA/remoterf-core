@@ -307,7 +307,6 @@ class AgentConfig:
 
     version: str = "host-agent/0.2"
 
-
 class HostTunnelAgent:
     def __init__(self, cfg: AgentConfig) -> None:
         self.cfg = cfg
@@ -327,12 +326,13 @@ class HostTunnelAgent:
         try:
             self._out_q.put_nowait(None)
         except Exception:
-            # still not silent
             exception("Failed to enqueue stop sentinel.")
 
     def _enqueue(self, frame: host_pb2.HostFrame, *, timeout: float = 2.0) -> bool:
         try:
+            which = frame.WhichOneof("msg")
             self._out_q.put(frame, timeout=timeout)
+            info(f"Enqueued outbound frame type={which}")
             return True
         except queue.Full:
             which = frame.WhichOneof("msg")
@@ -341,6 +341,26 @@ class HostTunnelAgent:
         except Exception:
             exception("Outbound enqueue failed.")
             return False
+
+    # -------------------------
+    # Reconnect hygiene
+    # -------------------------
+
+    def _drain_outbound_queue(self) -> None:
+        drained = 0
+        while True:
+            try:
+                x = self._out_q.get_nowait()
+                if x is None:
+                    continue
+                drained += 1
+            except queue.Empty:
+                break
+            except Exception:
+                exception("Failed draining outbound queue.")
+                break
+        if drained:
+            warn(f"Drained {drained} stale outbound frame(s) before starting a new stream.")
 
     def _register_cancel(self, req_id: str) -> threading.Event:
         ev = threading.Event()
@@ -430,7 +450,7 @@ class HostTunnelAgent:
                 )
             )
 
-        info(f"Announcing {len(infos)} device(s) to server.")
+        info(f"Prepared DeviceAnnounce with {len(infos)} device(s).")
         return host_pb2.HostFrame(
             device_announce=host_pb2.DeviceAnnounce(
                 devices=infos,
@@ -482,7 +502,6 @@ class HostTunnelAgent:
             meta = self._collect_meta(req)
 
             resp = host_pb2.MetaResponse(req_id=req_id, ok=True, error="")
-            # Only set meta if we actually have one and the field exists.
             if meta is not None and hasattr(resp, "meta"):
                 try:
                     resp.meta.CopyFrom(meta)
@@ -618,10 +637,18 @@ class HostTunnelAgent:
         finally:
             self._consume_cancel(req_id)
 
-    # -------- outbound stream --------
+    # -------- outbound stream (FIXED) --------
 
-    def _outbound_generator(self) -> Iterable[host_pb2.HostFrame]:
+    def _outbound_generator(self, *, initial: List[host_pb2.HostFrame]) -> Iterable[host_pb2.HostFrame]:
         info("Outbound generator started.")
+
+        # CRITICAL: ensure the stream starts with HELLO then DEVICE_ANNOUNCE
+        for f in initial:
+            which = f.WhichOneof("msg")
+            info(f"Outbound initial -> type={which}")
+            yield f
+
+        # Then drain queue normally
         while not self._stop.is_set():
             try:
                 item = self._out_q.get(timeout=0.5)
@@ -635,6 +662,8 @@ class HostTunnelAgent:
                 info("Outbound generator got stop sentinel; exiting.")
                 return
 
+            which = item.WhichOneof("msg")
+            info(f"Outbound -> type={which}")
             yield item
 
         info("Outbound generator exiting due to stop flag.")
@@ -655,6 +684,7 @@ class HostTunnelAgent:
 
             try:
                 self._reload_from_env()
+                self._drain_outbound_queue()  # IMPORTANT: prevent stale frames across reconnects
 
                 addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
                 tls = "yes" if self.cfg.ca_pem_path else "no"
@@ -663,10 +693,15 @@ class HostTunnelAgent:
                 channel = self._make_channel()
                 stub = host_pb2_grpc.HostTunnelStub(channel)
 
-                # Initial frames
-                self._enqueue(self._hello_frame())
-                self._enqueue(self._device_announce_frame())
+                # Build initial frames (guaranteed to be first on this stream)
+                initial = [self._hello_frame(), self._device_announce_frame()]
 
+                # Start bidi stream FIRST with initial frames guaranteed
+                stream = stub.Connect(self._outbound_generator(initial=initial))
+                delay = self.cfg.reconnect_min_delay_sec
+                info("HostTunnel stream established. Waiting for server frames...")
+
+                # Start heartbeat AFTER stream begins
                 hb_stop = threading.Event()
 
                 def hb_loop() -> None:
@@ -681,11 +716,6 @@ class HostTunnelAgent:
                         info("Heartbeat loop exiting.")
 
                 threading.Thread(target=hb_loop, daemon=True, name="hb_loop").start()
-
-                # Start bidi stream
-                stream = stub.Connect(self._outbound_generator())
-                delay = self.cfg.reconnect_min_delay_sec
-                info("HostTunnel stream established. Waiting for server frames...")
 
                 for frame in stream:
                     which = frame.WhichOneof("msg")
@@ -708,7 +738,7 @@ class HostTunnelAgent:
                         warn(f"Cancel req_id={rid}")
                         self._set_cancel(rid)
                     elif which == "heartbeat":
-                        # server heartbeat; don't spam
+                        # server heartbeat; ignore (avoid spam)
                         pass
                     else:
                         warn(f"Received unknown frame type={which}")
