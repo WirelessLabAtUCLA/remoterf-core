@@ -31,6 +31,13 @@ from .device_manager import get_all_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
 
+from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
+from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
+from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
+
+from pathlib import Path
+from prompt_toolkit import PromptSession
+
 from pathlib import Path
 
 
@@ -77,12 +84,7 @@ def _get_port(name: str, *, default: int | None = None) -> int:
         raise SystemExit(f"{name} out of range (1..65535): {n}")
     return n
 
-from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
-from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
-from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
-
-from pathlib import Path
-from prompt_toolkit import PromptSession
+TUNNEL_REGISTRY: HostTunnelRegistry | None = None
 
 session = PromptSession()
 
@@ -201,10 +203,13 @@ def serve():
     
     # --- attach HostTunnel to the SAME grpc server/port/creds ---
     directory_env = Path(__file__).resolve().parent.parent / "config" / ".env.host_directory"
-    registry = HostTunnelRegistry()
+    
+        # --- attach HostTunnel to the SAME grpc server/port/creds ---
+    global TUNNEL_REGISTRY
+    TUNNEL_REGISTRY = HostTunnelRegistry()
 
     host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
-        HostTunnelServicer(registry),
+        HostTunnelServicer(TUNNEL_REGISTRY),
         server
     )
 
@@ -366,6 +371,81 @@ def get_devices():
     for key, value in data.items():
         printf(f"Device ID:", Sty.DEFAULT, f' {key}', Sty.MAGENTA, f" Device Name: ", Sty.DEFAULT, f"{(value)}", Sty.GRAY)
 
+def _fmt_ms_ago(ms: int) -> str:
+    if not ms:
+        return "-"
+    now = int(time.time() * 1000)
+    dt = max(0, now - int(ms))
+    if dt < 1000:
+        return f"{dt}ms"
+    if dt < 60_000:
+        return f"{dt/1000:.1f}s"
+    return f"{dt/60_000:.1f}m"
+
+def _cmd_hosts_status() -> None:
+    global TUNNEL_REGISTRY
+    reg = TUNNEL_REGISTRY
+    if reg is None:
+        printf("Host tunnel registry not initialized yet.", Sty.RED)
+        return
+
+    hosts = reg.list_hosts()     # host_id -> HostStatus
+    devices = reg.list_devices() # device_id -> DeviceStatus
+
+    # Build host -> device list
+    by_host: dict[str, list[str]] = {}
+    for did, ds in devices.items():
+        by_host.setdefault(ds.host_id or "-", []).append(did)
+
+    printf("Hosts (live):", Sty.BOLD)
+    if not hosts:
+        printf("  (none)", Sty.GRAY)
+        return
+
+    for hid, hs in sorted(hosts.items(), key=lambda kv: kv[0]):
+        dlist = sorted(by_host.get(hid, []))
+        printf(
+            "  ", Sty.DEFAULT,
+            f"{hid}", Sty.MAGENTA,
+            "  online=", Sty.DEFAULT, f"{hs.online}", Sty.GREEN if hs.online else Sty.RED,
+            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(hs.last_seen_ms)} ago", Sty.BLUE,
+            "  devices=", Sty.DEFAULT, f"{len(dlist)}", Sty.GRAY
+        )
+        for did in dlist:
+            ds = devices.get(did)
+            if ds is None:
+                continue
+            printf(
+                "     - ", Sty.DEFAULT,
+                f"{did}", Sty.MAGENTA,
+                "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
+                "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GREEN if ds.online else Sty.RED,
+                "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
+            )
+
+def _cmd_devices_status() -> None:
+    global TUNNEL_REGISTRY
+    reg = TUNNEL_REGISTRY
+    if reg is None:
+        printf("Host tunnel registry not initialized yet.", Sty.RED)
+        return
+
+    devices = reg.list_devices()
+    printf("Devices (live):", Sty.BOLD)
+    if not devices:
+        printf("  (none)", Sty.GRAY)
+        return
+
+    for did, ds in sorted(devices.items(), key=lambda kv: kv[0]):
+        printf(
+            "  ", Sty.DEFAULT,
+            f"{did}", Sty.MAGENTA,
+            "  host=", Sty.DEFAULT, f"{ds.host_id or '-'}", Sty.GRAY,
+            "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
+            "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GREEN if ds.online else Sty.RED,
+            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
+        )
+
 # def help():
 #     printf("/------- HELP -------/", Sty.BOLD)
 #     printf("'exit'          ", Sty.MAGENTA, " - Stop server.", Sty.DEFAULT)
@@ -488,6 +568,11 @@ def help() -> None:
     printf("  codes delete             ", Sty.MAGENTA, "- Delete an enrollment code (interactive)", Sty.DEFAULT)
     printf("  codes csv                ", Sty.MAGENTA, "- Export ALL enrollment codes as CSV to Downloads", Sty.DEFAULT)
     print()
+    
+    printf("Host Tunnel (live):", Sty.BOLD)
+    printf("  hosts status            ", Sty.MAGENTA, "- Live host online/last_seen/devices", Sty.DEFAULT)
+    printf("  devices status          ", Sty.MAGENTA, "- Live device online/last_seen/route", Sty.DEFAULT)
+    print()
 
     printf("Database:", Sty.BOLD)
     printf("  db purge                 ", Sty.MAGENTA, "- Remove all database entries", Sty.DEFAULT)
@@ -580,6 +665,14 @@ def server_input(inpu: str) -> bool:
         "rm codes": lambda: _stay(lambda: remove_enrollment_code_local(session)), # old
         "rm code": lambda: _stay(lambda: remove_enrollment_code_local(session)),  # old
         "rm c": lambda: _stay(lambda: remove_enrollment_code_local(session)),     # old
+        
+        # ---- host tunnel ----
+        "hosts status": lambda: _stay(_cmd_hosts_status),
+        "host status": lambda: _stay(_cmd_hosts_status),
+        "tunnel hosts": lambda: _stay(_cmd_hosts_status),
+
+        "devices status": lambda: _stay(_cmd_devices_status),
+        "tunnel devices": lambda: _stay(_cmd_devices_status),
         
         "codes csv": lambda: _stay(export_enrollment_codes_csv_local),
     }
