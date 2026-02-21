@@ -263,6 +263,7 @@ class HostTunnelRegistry:
 
     Enforces:
       - device_id is globally unique across hosts (rejects conflicting host announce)
+      - STRICT MODE: device_id MUST be a canonical decimal gid string ("10", not "010", not "pluto:...")
     """
 
     def __init__(self, *, active_cache_ttl_ms: int = 250, dir_cache_ttl_ms: int = 1000) -> None:
@@ -346,8 +347,15 @@ class HostTunnelRegistry:
             all_devices: List[str] = sorted(set(known_devices) | devices_from_host_lists)
 
             for device_id in all_devices:
+                device_id = (device_id or "").strip()
                 if not device_id:
                     continue
+
+                # STRICT MODE: ignore any persisted non-numeric / non-canonical IDs
+                if not device_id.isdigit() or device_id != str(int(device_id)):
+                    warn(f"[registry] skipping persisted non-numeric/non-canonical device_id={device_id!r}")
+                    continue
+
                 dk = sanitize_env_key(device_id)
 
                 host_id = (kv_meta.get(f"DEVICE_{dk}_HOST", "") or "").strip()
@@ -561,12 +569,40 @@ class HostTunnelRegistry:
     def announce_devices(self, host_id: str, devices: list) -> None:
         info(f"[registry] announce_devices: host_id={host_id!r} n={len(devices)}")
 
+        # STRICT MODE:
+        #   - device_id MUST be canonical decimal string for gid (e.g. "10")
+        #   - reject "010", reject "pluto:...", reject duplicates in a single announce
+        pairs: List[Tuple[Any, str]] = []
+        seen: Set[str] = set()
+
+        for d in devices:
+            raw = str(getattr(d, "device_id", "") or "").strip()
+            if not raw:
+                continue
+
+            if not raw.isdigit():
+                raise ValueError(
+                    f"Host device_id must be a numeric gid string (e.g. '10'). "
+                    f"Got {raw!r} from host_id={host_id!r}."
+                )
+
+            canon = str(int(raw))
+            if raw != canon:
+                raise ValueError(
+                    f"Host device_id must be canonical decimal with no leading zeros. "
+                    f"Got {raw!r}; use {canon!r} (host_id={host_id!r})."
+                )
+
+            if canon in seen:
+                raise ValueError(
+                    f"Duplicate device_id {canon!r} in device announce from host_id={host_id!r}."
+                )
+            seen.add(canon)
+            pairs.append((d, canon))
+
         # conflict check first (no partial apply)
         with self._lock:
-            for d in devices:
-                device_id = str(getattr(d, "device_id", "")).strip()
-                if not device_id:
-                    continue
+            for _, device_id in pairs:
                 existing = self._routes.get(device_id)
                 if existing is not None and existing.host_id != host_id:
                     warn(
@@ -583,12 +619,13 @@ class HostTunnelRegistry:
         with self._lock:
             self._host_devices.setdefault(host_id, set())
 
+            # Preserve old behavior: skip empty ids with warn (but strict checks already handled non-empty bad ones)
             for d in devices:
-                device_id = str(getattr(d, "device_id", "")).strip()
-                if not device_id:
+                device_id0 = str(getattr(d, "device_id", "") or "").strip()
+                if not device_id0:
                     warn(f"[registry] announce_devices: skipping device with empty device_id host_id={host_id!r}")
-                    continue
 
+            for d, device_id in pairs:
                 try:
                     local_id = int(getattr(d, "local_id", 0))
                 except Exception:
@@ -620,10 +657,12 @@ class HostTunnelRegistry:
                 try:
                     tmp = host_tunnel_pb2.DeviceInfo()
                     tmp.CopyFrom(d)
+                    # ensure stored info reflects canonical device_id key
+                    tmp.device_id = str(device_id)
                     self._device_infos[device_id] = tmp
                 except Exception:
                     self._device_infos[device_id] = host_tunnel_pb2.DeviceInfo(
-                        device_id=device_id,
+                        device_id=str(device_id),
                         local_id=int(local_id),
                         label=label,
                         serial=serial,
@@ -1077,6 +1116,12 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         try:
                             self.registry.announce_devices(host_id, list(ann.devices))
                             info(f"[inbound] registry announce applied host_id={host_id!r} stream_sess={stream_uuid}")
+                        except ValueError as e:
+                            error(f"[inbound] INVALID_ARGUMENT device announce host_id={host_id!r} stream_sess={stream_uuid} err={e}")
+                            fatal["code"] = "INVALID_ARGUMENT"
+                            fatal["details"] = str(e)
+                            stop.set()
+                            return
                         except DeviceIdConflictError as e:
                             error(f"[inbound] DeviceIdConflictError host_id={host_id!r} stream_sess={stream_uuid} err={e}")
                             fatal["code"] = "ALREADY_EXISTS"
@@ -1123,7 +1168,7 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         err_s = str(getattr(mr, "error", "") or "")
                         info(f"[inbound] META_RESPONSE ok={ok} error={err_s!r} stream_sess={stream_uuid}")
 
-                        # ---- NEW: apply devices from meta_response if present ----
+                        # ---- apply devices from meta_response if present ----
                         if ok and host_id is not None:
                             devs = []
                             # try common field names defensively
@@ -1142,6 +1187,12 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     self.registry.announce_devices(host_id, devs)
                                     # optional: heartbeat bump
                                     self.registry.heartbeat(host_id, now_ms())
+                                except ValueError as e:
+                                    error(f"[inbound] META_RESPONSE INVALID_ARGUMENT host_id={host_id!r} err={e}")
+                                    fatal["code"] = "INVALID_ARGUMENT"
+                                    fatal["details"] = str(e)
+                                    stop.set()
+                                    return
                                 except Exception:
                                     exception("[inbound] META_RESPONSE announce_devices failed")
                             else:
@@ -1330,15 +1381,6 @@ _TUNNEL_REGISTRY_LOCK = threading.Lock()
 TUNNEL_REGISTRY: Optional["HostTunnelRegistry"] = None
 
 def get_tunnel_registry(*, create: bool = True) -> Optional["HostTunnelRegistry"]:
-    """
-    Returns the process-wide HostTunnelRegistry instance.
-
-    IMPORTANT: Import the MODULE (e.g. `import ... as hts`) and access
-    `hts.get_tunnel_registry()` or `hts.TUNNEL_REGISTRY`.
-
-    Avoid `from host_tunnel_server import TUNNEL_REGISTRY` if you ever plan
-    to replace it, because that snapshots the value at import time.
-    """
     global TUNNEL_REGISTRY
 
     if TUNNEL_REGISTRY is not None:
