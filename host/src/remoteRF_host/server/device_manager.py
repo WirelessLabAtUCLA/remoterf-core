@@ -1,85 +1,105 @@
-# device_manager.py
+# device_manager.py (host)
+
+from __future__ import annotations
 
 import adi
-# import uhd
-# from hackrf import *
-from ..common.utils import *
+import os
+import re
 import subprocess
+import threading
+from pathlib import Path
+from typing import Dict, Tuple, Optional, Any
 
-import time
-import gc
+# -----------------------------
+# Pluto helpers
+# -----------------------------
 
-#* Device manager *
-'''
-Responsible for starting and managing queues for devices.
-'''
-
-# TODO: Implement multiple device support
-#region PlutoSDR
-
-def connect_pluto(*, ip='', usb=''):
+def connect_pluto(*, ip: str = "", usb: str = ""):
     try:
-        if ip == '':
-            device = adi.Pluto(f'usb:{usb}')
-            print(f"Connected to Pluto usb:{usb}")
-        else:
-            device = adi.Pluto(f'ip:{ip}')
+        if ip:
+            dev = adi.Pluto(f"ip:{ip}")
             print(f"Connected to Pluto ip:{ip}")
-        return device
+        else:
+            dev = adi.Pluto(f"usb:{usb}")
+            print(f"Connected to Pluto usb:{usb}")
+        return dev
     except Exception as e:
-        print(f"Pluto {ip}: {e}")
+        print(f"Pluto {ip or usb}: {e}")
         return None
 
-import subprocess
-import re
-from pathlib import Path
 
-def get_usb_port_from_serial(serial):
+def get_usb_port_from_serial(serial: str) -> Optional[str]:
+    serial = (serial or "").strip()
+    if not serial:
+        return None
     try:
-        # Run iio_info -s and get the output
-        output = subprocess.check_output(["iio_info", "-s"]).decode("utf-8")
+        out = subprocess.check_output(["iio_info", "-s"], text=True, stderr=subprocess.STDOUT)
     except Exception as e:
         print(f"Error running iio_info: {e}")
         return None
 
-    # Regex to find the USB port associated with the given serial number
-    pattern = re.compile(rf"\d+:.*serial={re.escape(str(serial))}\s+\[usb:(\S+)\]")
-
-    for line in output.splitlines():
-        match = pattern.search(line)
-        if match:
-            return match.group(1)  # Return the USB port
+    # Be tolerant: iio_info varies; match either serial= or hw_serial=
+    for line in out.splitlines():
+        if (f"serial={serial}" in line) or (f"hw_serial={serial}" in line):
+            m = re.search(r"\[usb:([^\]]+)\]", line)
+            if m:
+                return m.group(1).strip()
 
     print(f"No device found with serial {serial}")
     return None
 
-# def connect_hackrf(device_index):
-#     try:
-#         device = HackRF(device_index=device_index)
-#         print(f"Connected to HackRF {device_index}")
-#         return device
-#     except Exception as e:
-#         print(f"HackRF {device_index}: {e}")
-#         return None
-#
-# def connect_usrp2901():
-#     usrp = uhd.usrp.MultiUSRP()
-#     print(f"Connected to USRP 2901")
-#     return usrp
+
+# -----------------------------
+# repo-local config paths
+# -----------------------------
+
+def _repo_root() -> Path:
+    """
+    Robustly find the repo root by locating the 'src' directory in parents.
+    Works for paths like:
+      <repo>/src/remoteRF_host/host/device_manager.py
+    """
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if parent.name == "src":
+            return parent.parent
+    # fallback: best-effort
+    if len(p.parents) >= 4:
+        return p.parents[3]
+    return p.parent
+
+
+def _devices_env_candidates() -> list[Path]:
+    """
+    Prefer the new canonical location used by tunnel_agent.py:
+      <repo>/.config/devices.env
+
+    But keep backwards-compat with your older layout:
+      <repo>/config/remoteRF_host/devices.env
+    """
+    root = _repo_root()
+    return [
+        root / ".config" / "devices.env",
+        root / "config" / "remoteRF_host" / "devices.env",
+    ]
+
+
+def _devices_env_path() -> Path:
+    # Allow override
+    override = (os.getenv("REMOTERF_DEVICES_ENV", "") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
+    for p in _devices_env_candidates():
+        if p.exists():
+            return p
+
+    # default to canonical path even if missing
+    return _repo_root() / ".config" / "devices.env"
 
 
 # -----------------------------
-# NEW: load devices from env
-#   <repo>/config/remoteRF_host/devices.env
-#
-# Expected keys per device (future-friendly):
-#   DEVICE_<gid>_TYPE=pluto
-#   DEVICE_<gid>_NAME=pluto_aaa
-#   DEVICE_<gid>_IDENT_KIND=iio_serial
-#   DEVICE_<gid>_IDENT=<serial>
-#
-# (Optional backwards compat):
-#   DEVICE_<gid>_ID=<serial>   # treated as IDENT_KIND=iio_serial, NAME="device-<gid>"
+# .env parsing
 # -----------------------------
 
 _ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
@@ -91,14 +111,16 @@ def _strip_quotes(v: str) -> str:
         return v[1:-1]
     return v
 
-def _read_env_file(path: Path) -> dict:
-    out = {}
+
+def _read_env_file(path: Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
     if not path.exists():
         return out
     try:
         txt = path.read_text(encoding="utf-8")
     except Exception:
         return out
+
     for raw in txt.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -111,21 +133,14 @@ def _read_env_file(path: Path) -> dict:
         out[k] = v
     return out
 
-def _repo_root() -> Path:
-    # For: <repo>/src/remoteRF_host/device_manager.py
-    # parents[0]=remoteRF_host, [1]=src, [2]=<repo>
-    return Path(__file__).resolve().parents[2]
 
-def _devices_env_path() -> Path:
-    return _repo_root() / "config" / "remoteRF_host" / "devices.env"
-
-def _load_device_records() -> dict[int, dict[str, str]]:
+def _load_device_records() -> Dict[int, Dict[str, str]]:
     """
     Returns:
-      { gid: { "TYPE":..., "NAME":..., "IDENT_KIND":..., "IDENT":... , ... } }
+      { gid: { "TYPE":..., "NAME":..., "IDENT_KIND":..., "IDENT":..., ... } }
     """
     kv = _read_env_file(_devices_env_path())
-    recs: dict[int, dict[str, str]] = {}
+    recs: Dict[int, Dict[str, str]] = {}
 
     # New format: DEVICE_<gid>_<FIELD>
     for k, v in kv.items():
@@ -139,7 +154,7 @@ def _load_device_records() -> dict[int, dict[str, str]]:
         field = m.group(2).strip().upper()
         recs.setdefault(gid, {})[field] = str(v).strip()
 
-    # Back-compat: DEVICE_<gid>_ID treated as IDENT
+    # Back-compat: DEVICE_<gid>_ID treated as IDENT (iio_serial)
     for k, v in kv.items():
         kk = k.strip().upper()
         if not kk.startswith("DEVICE_") or not kk.endswith("_ID"):
@@ -157,91 +172,120 @@ def _load_device_records() -> dict[int, dict[str, str]]:
 
     return recs
 
-def _connect_from_record(rec: dict[str, str]):
+
+def _connect_from_record(rec: Dict[str, str]) -> Tuple[object | None, str, str]:
     """
     Returns (device_obj, ident, dtype).
-    Keeps tuple structure so existing helper functions keep working.
     """
     dtype = (rec.get("TYPE") or "").strip().lower()
     ident_kind = (rec.get("IDENT_KIND") or "").strip().lower()
     ident = (rec.get("IDENT") or "").strip()
 
-    if dtype == "pluto":
-        if ident_kind in ("iio_serial", "serial", "iio"):
-            if not ident:
-                return (None, ident, dtype)
-            usb_port = get_usb_port_from_serial(ident)
-            if not usb_port:
-                return (None, ident, dtype)
-            dev = connect_pluto(usb=usb_port)
-            return (dev, ident, dtype)
-
-        if ident_kind == "usb":
-            if not ident:
-                return (None, ident, dtype)
-            dev = connect_pluto(usb=ident)
-            return (dev, ident, dtype)
-
-        if ident_kind == "ip":
-            if not ident:
-                return (None, ident, dtype)
-            dev = connect_pluto(ip=ident)
-            return (dev, ident, dtype)
-
-        # Unknown ident_kind for pluto
+    if dtype != "pluto":
         return (None, ident, dtype)
 
-    # Unknown/unsupported device type (future extension point)
+    if ident_kind in ("iio_serial", "serial", "iio"):
+        if not ident:
+            return (None, ident, dtype)
+        usb_port = get_usb_port_from_serial(ident)
+        if not usb_port:
+            return (None, ident, dtype)
+        return (connect_pluto(usb=usb_port), ident, dtype)
+
+    if ident_kind == "usb":
+        if not ident:
+            return (None, ident, dtype)
+        return (connect_pluto(usb=ident), ident, dtype)
+
+    if ident_kind == "ip":
+        if not ident:
+            return (None, ident, dtype)
+        return (connect_pluto(ip=ident), ident, dtype)
+
     return (None, ident, dtype)
 
 
 # -----------------------------
-# Build runtime maps from env
+# Runtime state + API
 # -----------------------------
 
-_records = _load_device_records()
+_state_lock = threading.RLock()
 
-# global_id -> serial (or IDENT) for convenience / debug
-device_serialization = {}
+# legacy maps
+device_serialization: Dict[int, str] = {}
+devices_info: Dict[int, str] = {}
 
-# global_id -> name/info string
-devices_info = {}
+# gid -> (dev, ident, dtype)
+devices: Dict[int, Tuple[object | None, str, str]] = {}
 
-for gid, rec in sorted(_records.items()):
-    name = (rec.get("NAME") or f"device-{gid}").strip()
-    ident = (rec.get("IDENT") or "").strip()
-    devices_info[int(gid)] = name
-    if ident:
-        device_serialization[int(gid)] = ident
+master_token = "***REMOVED***"  # (host can have one; but host RPC should NOT need it)
+
+def reload_devices() -> None:
+    """
+    Reload devices.env and reconnect devices.
+    Safe to call at startup and optionally on MetaRequest / refresh flows.
+    """
+    global devices, devices_info, device_serialization
+
+    records = _load_device_records()
+
+    tmp_devices: Dict[int, Tuple[object | None, str, str]] = {}
+    tmp_info: Dict[int, str] = {}
+    tmp_ser: Dict[int, str] = {}
+
+    for gid, rec in sorted(records.items()):
+        name = (rec.get("NAME") or f"device-{gid}").strip()
+        ident = (rec.get("IDENT") or "").strip()
+
+        dev, ident2, dtype2 = _connect_from_record(rec)
+
+        tmp_devices[int(gid)] = (dev, ident2, dtype2)
+        tmp_info[int(gid)] = name
+        if ident:
+            tmp_ser[int(gid)] = ident
+
+    with _state_lock:
+        devices = tmp_devices
+        devices_info = tmp_info
+        device_serialization = tmp_ser
 
 
-master_token = '***REMOVED***'
+# initialize on import
+reload_devices()
 
-# print("New Version")
 
-devices = {  # global_id -> (device_obj, ident, dtype)
-    gid: _connect_from_record(rec)
-    for gid, rec in sorted(_records.items())
-}
+def get_all_devices() -> Dict[int, Tuple[object | None, str, str]]:
+    with _state_lock:
+        return {k: v for k, v in devices.items() if v and v[0] is not None}
 
-# transmitter = subprocess.Popen(['python3', 'transmitter.py'])
-# transmitter.terminate()
 
-def get_all_devices() -> dict:
-    # Only return entries with a connected device object
-    return {k: v for k, v in devices.items() if v is not None and isinstance(v, tuple) and len(v) >= 1 and v[0] is not None}
+def get_all_devices_str() -> Dict[int, str]:
+    with _state_lock:
+        return dict(devices_info)
 
-def get_all_devices_str() -> dict:
-    # "name is the info"
-    return devices_info
 
-def device_exists(device_id: int) -> bool:
-    if device_id not in devices:
+def device_exists(device_id: int | str) -> bool:
+    try:
+        did = int(device_id)
+    except Exception:
         return False
-    dev, _, _ = devices[device_id]
-    return dev is not None
+    with _state_lock:
+        if did not in devices:
+            return False
+        dev, _, _ = devices[did]
+        return dev is not None
 
-def get_device(*, id):
-    if id not in devices:
+
+def get_device(*, id: int | str):
+    """
+    Accepts 10 or "10". Returns the live device object, or None if missing/offline.
+    """
+    try:
+        did = int(id)
+    except Exception:
         return None
-    return devices[id][0]
+    with _state_lock:
+        tup = devices.get(did)
+        if not tup:
+            return None
+        return tup[0]

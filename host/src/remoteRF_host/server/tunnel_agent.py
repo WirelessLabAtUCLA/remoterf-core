@@ -37,6 +37,32 @@ from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
 
 # -------------------------
+# Logging mode
+# -------------------------
+
+# =============================================================================
+# Pick ONE:
+#   LOG_MODE = "OFF"   -> show nothing
+#   LOG_MODE = "WARN"  -> show only WARN + ERROR
+#   LOG_MODE = "ALL"   -> show everything (INFO + WARN + ERROR)
+# =============================================================================
+
+LOG_MODE = "WARN"  # <-- set to ALL while debugging session UUIDs
+LOG_MODE = (LOG_MODE or "WARN").strip().upper()
+
+_LOG_PRI: Dict[str, int] = {"INFO": 10, "WARN": 20, "ERROR": 30}
+_MODE_MIN_PRI: Dict[str, int] = {"ALL": 10, "WARN": 20, "OFF": 10**9}
+
+if LOG_MODE not in _MODE_MIN_PRI:
+    # Be safe: if misconfigured, default to WARN rather than spamming.
+    LOG_MODE = "WARN"
+
+
+def _should_log(level: str) -> bool:
+    return _LOG_PRI.get(level, 30) >= _MODE_MIN_PRI[LOG_MODE]
+
+
+# -------------------------
 # Always-on printing logger
 # -------------------------
 
@@ -49,6 +75,8 @@ def _ts() -> str:
 
 
 def _log(level: str, msg: str) -> None:
+    if not _should_log(level):
+        return
     tn = threading.current_thread().name
     print(f"{_ts()} {level:<5} [{tn}] hostrf.tunnel_agent: {msg}", file=sys.stderr, flush=True)
 
@@ -67,7 +95,8 @@ def error(msg: str) -> None:
 
 def exception(msg: str) -> None:
     _log("ERROR", msg)
-    traceback.print_exc(limit=50, file=sys.stderr)
+    if _should_log("ERROR"):
+        traceback.print_exc(limit=50, file=sys.stderr)
 
 
 # -------------------------
@@ -693,7 +722,7 @@ class HostTunnelAgent:
             info(f"RpcRequest req_id={req_id} gid={gid_i} fn={str(greq.function_name)}")
 
             # Force per-gid token
-            self._override_token_for_gid(args_map, gid_s)
+            # self._override_token_for_gid(args_map, gid_s)
 
             # Optional: expose gid to local RPC layer explicitly
             try:
