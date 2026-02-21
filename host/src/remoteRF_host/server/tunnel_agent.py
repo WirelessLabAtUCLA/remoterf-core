@@ -72,6 +72,15 @@ def _die_config(net_env: Path, msg: str, *, code: int = 2) -> NoReturn:
     error("  hostrf -c -a --show")
     raise SystemExit(code)
 
+def _die_host_config(host_env: Path, msg: str, *, code: int = 2) -> NoReturn:
+    error(f"Host config error: {msg}")
+    error(f"Config file: {host_env}")
+    error("Fix:")
+    error(f"  Edit {host_env} and set a unique HOST_ID, e.g.")
+    error("    HOST_ID=my-host-1")
+    error("  Ensure only one agent uses a given HOST_ID at a time.")
+    raise SystemExit(code)
+
 # -------------------------
 # Generic Argument message import
 # -------------------------
@@ -385,9 +394,10 @@ class HostTunnelAgent:
         dev_env = load_env_file(self.cfg.devices_env_path)
 
         host_id = host_env.get("HOST_ID", "").strip() or os.getenv("HOST_ID", "").strip()
+        host_id = host_env.get("HOST_ID", "").strip() or os.getenv("HOST_ID", "").strip()
         if not host_id:
-            host_id = f"host-{secrets.token_hex(4)}"
-            warn(f"HOST_ID not set; using generated host_id={host_id} (set HOST_ID to make stable).")
+            _die_host_config(Path(self.cfg.host_env_path), "HOST_ID is not set (server requires a stable, explicit host id).")
+        self._host_id = host_id
         self._host_id = host_id
 
         mt = (
@@ -756,7 +766,14 @@ class HostTunnelAgent:
                     details = e.details() or ""
                 except Exception:
                     details = ""
+
                 warn(f"gRPC error: code={code} details={details}")
+
+                # --- NEW: treat these as fatal config errors (do NOT reconnect-loop) ---
+                if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.INVALID_ARGUMENT):
+                    # Usually means: host_id conflict OR missing/invalid host_id (after your server patch)
+                    msg = f"Server rejected this host: {details or code}"
+                    _die_host_config(Path(self.cfg.host_env_path), msg)
 
             except Exception:
                 exception("Unexpected error in run loop.")
