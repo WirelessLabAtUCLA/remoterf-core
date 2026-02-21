@@ -39,6 +39,7 @@ from .device_manager import get_all_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
 
+from ..host import host_tunnel_server as hts
 from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
 from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
 from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
@@ -47,7 +48,6 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 
 from pathlib import Path
-
 
 def _xdg_config_home() -> Path:
     return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -91,8 +91,6 @@ def _get_port(name: str, *, default: int | None = None) -> int:
     if n <= 0 or n > 65535:
         raise SystemExit(f"{name} out of range (1..65535): {n}")
     return n
-
-TUNNEL_REGISTRY: HostTunnelRegistry | None = None
 
 session = PromptSession()
 
@@ -208,16 +206,15 @@ def serve():
     # Create server credentials
     server_credentials = grpc.ssl_server_credentials(
         ((private_key, certificate_chain,),))
-    
-    # --- attach HostTunnel to the SAME grpc server/port/creds ---
-    directory_env = Path(__file__).resolve().parent.parent / "config" / ".env.host_directory"
-    
-        # --- attach HostTunnel to the SAME grpc server/port/creds ---
-    global TUNNEL_REGISTRY
-    TUNNEL_REGISTRY = HostTunnelRegistry()
+
+    reg = hts.get_tunnel_registry()
+    assert reg is not None
+
+    # publish registry where device_manager expects it
+    hts.TUNNEL_REGISTRY = reg
 
     host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
-        HostTunnelServicer(TUNNEL_REGISTRY),
+        HostTunnelServicer(reg),
         server
     )
 
@@ -391,11 +388,8 @@ def _fmt_ms_ago(ms: int) -> str:
     return f"{dt/60_000:.1f}m"
 
 def _cmd_hosts_status() -> None:
-    global TUNNEL_REGISTRY
-    reg = TUNNEL_REGISTRY
-    if reg is None:
-        printf("Host tunnel registry not initialized yet.", Sty.RED)
-        return
+    reg = hts.get_tunnel_registry()
+    assert reg is not None
 
     hosts = reg.list_hosts()     # host_id -> HostStatus
     devices = reg.list_devices() # device_id -> DeviceStatus
@@ -432,11 +426,8 @@ def _cmd_hosts_status() -> None:
             )
 
 def _cmd_devices_status() -> None:
-    global TUNNEL_REGISTRY
-    reg = TUNNEL_REGISTRY
-    if reg is None:
-        printf("Host tunnel registry not initialized yet.", Sty.RED)
-        return
+    reg = hts.get_tunnel_registry()
+    assert reg is not None
 
     devices = reg.list_devices()
     printf("Devices (live):", Sty.BOLD)
@@ -753,8 +744,7 @@ def _cmd_hosts_wipe(*, yes: bool = False) -> None:
                 return
 
     # 2) clear in-memory registry (THIS is what drives `hosts status`)
-    global TUNNEL_REGISTRY
-    reg = TUNNEL_REGISTRY
+    reg = hts.get_tunnel_registry()
     if reg is None:
         printf("Host tunnel registry not initialized; only persisted wipe attempted.", Sty.GRAY)
     else:

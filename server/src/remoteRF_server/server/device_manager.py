@@ -19,6 +19,117 @@ import adi
 from ..common.utils import validate_token  # your salt/hash validator
 from ..host import host_tunnel_server as hts  # gives access to hts.TUNNEL_REGISTRY
 
+import time  # add near imports
+
+_state_lock = threading.RLock()
+
+@dataclass
+class _DeviceState:
+    dev: object
+    salt: str
+    hsh: str
+    name: str
+    ident: str
+    dtype: str
+    io_lock: threading.RLock
+
+# gid -> state
+_devices: Dict[int, _DeviceState] = {}
+
+# -----------------------------
+# Host device pulling/grabbing
+# -----------------------------
+
+def _get_host_registry():
+    return hts.get_tunnel_registry()
+
+def _local_devices_str_snapshot() -> Dict[int, str]:
+    """
+    Local devices from devices.env (whether connected or not).
+    """
+    out: Dict[int, str] = {}
+    with _state_lock:
+        for gid, st in _devices.items():
+            name = (st.name or f"device-{gid}").strip()
+            status = "online" if (st.dev is not None) else "offline"
+
+            dtype = (st.dtype or "").strip()
+            ident = (st.ident or "").strip()
+
+            meta_parts: List[str] = ["local"]
+            if dtype:
+                meta_parts.append(f"type={dtype}")
+            if ident:
+                meta_parts.append(f"ident={ident}")
+
+            # optional: show reservation state
+            if st.salt or st.hsh:
+                status = status + ", reserved"
+
+            out[int(gid)] = f"{name} [{', '.join(meta_parts)}] ({status})"
+    return out
+
+def _host_devices_str_snapshot() -> Dict[int, str]:
+    """
+    Pull a FRESH host-device directory snapshot every call.
+
+    Includes:
+      - devices on currently connected hosts (online)
+      - devices on disconnected hosts that were previously seen/persisted (offline)
+    """
+    reg = _get_host_registry()
+    if reg is None:
+        return {}
+
+    # force refresh of directory snapshot
+    snap = reg.device_directory_cached(ttl_ms=0)  # device_id -> (host_id, info_obj, is_active)
+
+    # optional: last-seen data (persisted in registry status)
+    try:
+        status_map = reg.list_devices()  # device_id -> DeviceStatus
+    except Exception:
+        status_map = {}
+
+    now_ms = int(time.time() * 1000)
+
+    out: Dict[int, str] = {}
+    for device_id, (host_id, info_obj, is_active) in snap.items():
+        # you said host device IDs are numeric and globally unique => treat as gid
+        try:
+            gid = int(str(device_id))
+        except Exception:
+            continue
+
+        local_id = int(getattr(info_obj, "local_id", 0) or 0)
+        label = str(getattr(info_obj, "label", "") or "").strip()
+        serial = str(getattr(info_obj, "serial", "") or "").strip()
+        kind = str(getattr(info_obj, "kind", "") or "").strip()
+
+        status = "online" if bool(is_active) else "offline"
+        name = label or f"host-device-{gid}"
+
+        last_seen = ""
+        ds = status_map.get(str(device_id))
+        if ds is not None:
+            try:
+                ls = int(getattr(ds, "last_seen_ms", 0) or 0)
+                if ls > 0:
+                    age_s = max(0, (now_ms - ls) // 1000)
+                    last_seen = f", seen={age_s}s ago"
+            except Exception:
+                pass
+
+        out[gid] = (
+            f"{name} "
+            f"[host={host_id}, local_id={local_id}"
+            f"{', kind=' + kind if kind else ''}"
+            f"{', serial=' + serial if serial else ''}"
+            f"{last_seen}"
+            f"] ({status})"
+        )
+
+    return out
+
 # -----------------------------
 # Config paths (server-side)
 # -----------------------------
@@ -32,55 +143,6 @@ def _cfg_dir() -> Path:
 
 def _devices_env_path() -> Path:
     return _cfg_dir() / "devices.env"
-
-# -----------------------------
-# Host stuff
-# -----------------------------
-
-def _get_host_registry():
-    # host_tunnel_server sets this when the tunnel server starts
-    return getattr(hts, "TUNNEL_REGISTRY", None)
-
-
-def _host_devices_str_snapshot() -> Dict[int, str]:
-    """
-    Pull a FRESH host-device directory snapshot every call.
-    Assumes host device_ids are numeric strings that should be treated as gids.
-    """
-    reg = _get_host_registry()
-    if reg is None:
-        return {}
-
-    # ttl_ms=0 => force refresh (no caching)
-    snap = reg.device_directory_cached(ttl_ms=0)  # device_id -> (host_id, info_obj, is_active)
-
-    out: Dict[int, str] = {}
-    for device_id, (host_id, info_obj, is_active) in snap.items():
-        # You said host device IDs are already globally unique => treat as gid.
-        try:
-            gid = int(str(device_id))
-        except Exception:
-            # If something non-numeric ever sneaks in, just skip it.
-            continue
-
-        local_id = int(getattr(info_obj, "local_id", 0) or 0)
-        label = str(getattr(info_obj, "label", "") or "").strip()
-        serial = str(getattr(info_obj, "serial", "") or "").strip()
-        kind = str(getattr(info_obj, "kind", "") or "").strip()
-
-        status = "online" if bool(is_active) else "offline"
-        name = label or f"host-device-{gid}"
-
-        # keep it human-readable for CLI/UI
-        out[gid] = (
-            f"{name} "
-            f"[host={host_id}, local_id={local_id}"
-            f"{', kind=' + kind if kind else ''}"
-            f"{', serial=' + serial if serial else ''}"
-            f"] ({status})"
-        )
-
-    return out
 
 # -----------------------------
 # Pluto helpers
@@ -229,21 +291,6 @@ def _connect_from_record(rec: Dict[str, str]):
 # Thread-safe runtime state
 # -----------------------------
 
-_state_lock = threading.RLock()
-
-@dataclass
-class _DeviceState:
-    dev: object
-    salt: str
-    hsh: str
-    name: str
-    ident: str
-    dtype: str
-    io_lock: threading.RLock
-
-# gid -> state
-_devices: Dict[int, _DeviceState] = {}
-
 # legacy maps (kept for your existing server calls/UI)
 devices_info: Dict[int, str] = {}
 device_serialization: Dict[int, str] = {}
@@ -351,12 +398,21 @@ def get_all_devices() -> Dict[int, Tuple[object, str, str]]:
         return out
 
 def get_all_devices_str() -> Dict[int, str]:
-    # local snapshot (fast)
-    with _state_lock:
-        out = dict(devices_info)
+    # local snapshot (includes offline local definitions)
+    out = _local_devices_str_snapshot()
 
-    # host snapshot (fresh pull each call)
-    out.update(_host_devices_str_snapshot())
+    # host snapshot (includes online + offline-but-known host devices)
+    host_out = _host_devices_str_snapshot()
+
+    # merge with collision handling
+    for gid, s in host_out.items():
+        if gid in out:
+            # preserve both entries in the UI list; avoid overwriting
+            alt = -int(gid) - 1  # deterministic "shadow key"
+            out[alt] = s + " [gid-collision]"
+        else:
+            out[gid] = s
+
     return out
 
 def set_device(device_id: int, salt: str, hash: str):
