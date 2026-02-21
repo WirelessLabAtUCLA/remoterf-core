@@ -337,9 +337,11 @@ todo:
 
 <!-- HostRF meta data -> push upon connection + retry connection on host side. -->
 
-Host ID (NEEDS TO BE UNIQUE AND TELL THE HOST THAT) (or if device also does it as well.)
+<!-- Host ID (NEEDS TO BE UNIQUE AND TELL THE HOST THAT) (or if device also does it as well.) -->
 
-ServerRF display meta data as part of devices list / reservation + online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
+ServerRF display meta data as part of devices list / reservation 
+
++ online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
 
 set_device token (virtual devices) + routing/relay to proper host (multiplexed)
 

@@ -10,7 +10,7 @@ import secrets
 import traceback
 import hashlib
 import re
-import os
+import uuid
 
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any, List, Set, Iterator
@@ -47,11 +47,12 @@ from .host_directory_store import (
 #   LOG_MODE = "ALL"   -> show everything (INFO + WARN + ERROR)
 # =============================================================================
 
-LOG_MODE = "OFF"  # <-- change this
+LOG_MODE = "WARN"  # <-- set to ALL while debugging session UUIDs
 
 _LOG_LOCK = threading.Lock()
 
 HOST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")  # adjust if you want
+
 
 class HostIdConflictError(RuntimeError):
     def __init__(self, host_id: str, *, age_ms: int, replace_after_ms: int) -> None:
@@ -62,6 +63,7 @@ class HostIdConflictError(RuntimeError):
         self.host_id = host_id
         self.age_ms = age_ms
         self.replace_after_ms = replace_after_ms
+
 
 def _validate_host_id(raw: str) -> str:
     hid = (raw or "").strip()
@@ -76,12 +78,14 @@ def _validate_host_id(raw: str) -> str:
         )
     return hid
 
+
 def _ts() -> str:
     t = time.time()
     sec = int(t)
     ms = int((t - sec) * 1000)
     lt = time.localtime(sec)
     return time.strftime("%H:%M:%S", lt) + f".{ms:03d}"
+
 
 def _should_log(level: str) -> bool:
     lvl = (level or "").upper()
@@ -92,27 +96,33 @@ def _should_log(level: str) -> bool:
         return lvl in ("WARN", "ERROR")
     if mode == "ALL":
         return lvl in ("INFO", "WARN", "ERROR")
-    # safe default if mis-set
     return lvl in ("WARN", "ERROR")
+
 
 def _log(level: str, msg: str) -> None:
     if not _should_log(level):
         return
     tn = threading.current_thread().name
-    print(f"{_ts()} {level:<5} [{tn}] hostrf.host_tunnel_server: {msg}", file=sys.stderr, flush=True)
+    with _LOG_LOCK:
+        print(f"{_ts()} {level:<5} [{tn}] hostrf.host_tunnel_server: {msg}", file=sys.stderr, flush=True)
+
 
 def info(msg: str) -> None:
     _log("INFO", msg)
 
+
 def warn(msg: str) -> None:
     _log("WARN", msg)
+
 
 def error(msg: str) -> None:
     _log("ERROR", msg)
 
+
 def exception(msg: str) -> None:
     _log("ERROR", msg)
     traceback.print_exc(limit=80, file=sys.stderr)
+
 
 # =============================================================================
 # Helpers
@@ -122,9 +132,11 @@ def host_key(host_id: str) -> str:
     h = hashlib.sha256((host_id or "").encode("utf-8")).hexdigest()
     return h[:16]  # short stable key
 
+
 def _safe_thread_tag(s: str) -> str:
     s = s or "peer"
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", s)[:64]
+
 
 def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
     if src_map is None:
@@ -136,6 +148,7 @@ def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
         for k, v in dict(src_map).items():
             dst_map[str(k)].CopyFrom(v)
 
+
 # =============================================================================
 # Types
 # =============================================================================
@@ -145,11 +158,13 @@ class DeviceRoute:
     host_id: str
     host_local_id: int
 
+
 @dataclass
 class HostStatus:
     host_id: str
     online: bool = False
     last_seen_ms: int = 0
+
 
 @dataclass
 class DeviceStatus:
@@ -159,19 +174,17 @@ class DeviceStatus:
     online: bool = False
     last_seen_ms: int = 0
 
+
 # =============================================================================
 # Session
 # =============================================================================
 
 class HostSession:
-    """
-    Represents one connected host (one bidi stream).
-    Owns:
-      - outbound frame queue
-      - inflight req_id -> Future
-    """
-    def __init__(self, host_id: str, *, outbound_max: int = 2048) -> None:
+    def __init__(self, host_id: str, *, peer: str = "<?>", session_uuid: str = "", outbound_max: int = 2048) -> None:
         self.host_id = host_id
+        self.peer = peer
+        self.session_uuid = (session_uuid or uuid.uuid4().hex[:10])
+
         self.out_q: "queue.Queue[Optional[host_tunnel_pb2.HostFrame]]" = queue.Queue(maxsize=int(outbound_max))
         self.inflight: Dict[str, Future] = {}
         self.inflight_lock = threading.Lock()
@@ -179,34 +192,40 @@ class HostSession:
         self.alive = True
         self.outbound_max = int(outbound_max)
 
-        info(f"[session] created host_id={self.host_id!r} outbound_max={self.outbound_max}")
+        info(
+            f"[session] created host_id={self.host_id!r} sess={self.session_uuid} "
+            f"peer={self.peer} outbound_max={self.outbound_max}"
+        )
 
     def send(self, frame: host_tunnel_pb2.HostFrame, *, timeout: float = 2.0) -> bool:
         which = frame.WhichOneof("msg")
         if not self.alive:
-            warn(f"[session] send refused (dead session) host_id={self.host_id!r} type={which}")
+            warn(f"[session] send refused (dead session) host_id={self.host_id!r} sess={self.session_uuid} type={which}")
             return False
         try:
             self.out_q.put(frame, timeout=timeout)
-            info(f"[session] queued outbound host_id={self.host_id!r} type={which}")
+            info(f"[session] queued outbound host_id={self.host_id!r} sess={self.session_uuid} type={which}")
             return True
         except queue.Full:
-            warn(f"[session] outbound queue FULL host_id={self.host_id!r} max={self.outbound_max} drop type={which}")
+            warn(
+                f"[session] outbound queue FULL host_id={self.host_id!r} sess={self.session_uuid} "
+                f"max={self.outbound_max} drop type={which}"
+            )
             return False
         except Exception:
-            exception(f"[session] send exception host_id={self.host_id!r} type={which}")
+            exception(f"[session] send exception host_id={self.host_id!r} sess={self.session_uuid} type={which}")
             return False
 
     def close(self) -> None:
         if not self.alive:
             return
-        info(f"[session] closing host_id={self.host_id!r}")
+        info(f"[session] closing host_id={self.host_id!r} sess={self.session_uuid} peer={self.peer}")
         self.alive = False
 
         try:
             self.out_q.put_nowait(None)
         except Exception:
-            exception(f"[session] close: failed to enqueue sentinel host_id={self.host_id!r}")
+            exception(f"[session] close: failed to enqueue sentinel host_id={self.host_id!r} sess={self.session_uuid}")
 
         with self.inflight_lock:
             for rid, fut in list(self.inflight.items()):
@@ -214,7 +233,8 @@ class HostSession:
                     fut.set_exception(RuntimeError(f"Host '{self.host_id}' disconnected (req_id={rid})"))
             self.inflight.clear()
 
-        info(f"[session] closed host_id={self.host_id!r}")
+        info(f"[session] closed host_id={self.host_id!r} sess={self.session_uuid}")
+
 
 # =============================================================================
 # Registry
@@ -352,7 +372,10 @@ class HostTunnelRegistry:
 
             self._invalidate_caches_locked()
 
-        info(f"[registry] persisted directory loaded: routes={len(self._routes)} hosts={len(self._host_status)} devices={len(self._device_status)}")
+        info(
+            f"[registry] persisted directory loaded: routes={len(self._routes)} "
+            f"hosts={len(self._host_status)} devices={len(self._device_status)}"
+        )
 
     # ---------------------------
     # persistence write helpers
@@ -412,28 +435,33 @@ class HostTunnelRegistry:
     # directory/status mutators
     # ---------------------------
 
-    def register_host(
-        self,
-        host_id: str,
-        session: HostSession,
-        *,
-        replace_if_stale_ms: int = 15_000,  # tweak: how long without heartbeat before we allow replacement
-    ) -> None:
-        info(f"[registry] register_host: host_id={host_id!r}")
+    def register_host(self, host_id: str, session: HostSession, *, replace_if_stale_ms: int = 15_000) -> None:
+        info(
+            f"[registry] register_host: host_id={host_id!r} incoming_sess={session.session_uuid} "
+            f"incoming_peer={session.peer}"
+        )
 
         with self._lock:
             old = self._hosts.get(host_id)
             if old is not None and old.alive:
                 age_ms = int(now_ms() - int(getattr(old, "last_heartbeat_ms", 0) or 0))
+
                 if age_ms < replace_if_stale_ms:
-                    # conflict: someone else is already using this host_id
+                    warn(
+                        f"[registry] HostIdConflict host_id={host_id!r} age_ms={age_ms} "
+                        f"incoming_sess={session.session_uuid} incoming_peer={session.peer} "
+                        f"existing_sess={getattr(old,'session_uuid','?')} existing_peer={getattr(old,'peer','?')}"
+                    )
                     raise HostIdConflictError(host_id, age_ms=age_ms, replace_after_ms=replace_if_stale_ms)
 
-                # stale: allow replacement
-                warn(f"[registry] register_host: replacing STALE session host_id={host_id!r} age_ms={age_ms}")
+                warn(
+                    f"[registry] replacing STALE host_id={host_id!r} age_ms={age_ms} "
+                    f"incoming_sess={session.session_uuid} incoming_peer={session.peer} "
+                    f"existing_sess={getattr(old,'session_uuid','?')} existing_peer={getattr(old,'peer','?')}"
+                )
                 old.close()
 
-            self._hosts[host_id] = session
+            self._hosts[host_id] = session  # (removed duplicate assignment)
 
             hs = self._host_status.get(host_id) or HostStatus(host_id=host_id)
             hs.online = True
@@ -444,7 +472,7 @@ class HostTunnelRegistry:
             self._persist_host(host_id)
             self._invalidate_caches_locked()
 
-        info(f"[registry] register_host done: host_id={host_id!r} online=True")
+        info(f"[registry] register_host done: host_id={host_id!r} online=True incoming_sess={session.session_uuid}")
 
     def drop_host(self, host_id: str) -> None:
         info(f"[registry] drop_host: host_id={host_id!r}")
@@ -778,6 +806,7 @@ class HostTunnelRegistry:
             cancel_on_timeout=cancel_on_timeout,
         )
 
+
 # =============================================================================
 # Convenience forwarders
 # =============================================================================
@@ -804,6 +833,7 @@ def handle_host_device(
     )
     return dict(resp.results)
 
+
 def handle_host_device_request(
     registry: HostTunnelRegistry,
     *,
@@ -824,6 +854,7 @@ def handle_host_device_request(
         cancel_on_timeout=True,
     )
 
+
 # =============================================================================
 # Servicer
 # =============================================================================
@@ -839,7 +870,8 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
             peer = "unknown-peer"
 
         peer_tag = _safe_thread_tag(peer)
-        info(f"[Connect] new stream peer={peer}")
+        stream_uuid = uuid.uuid4().hex[:10]
+        info(f"[Connect] new stream peer={peer} stream_sess={stream_uuid}")
 
         host_id: Optional[str] = None
         session: Optional[HostSession] = None
@@ -848,46 +880,50 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
 
         def inbound_loop():
             nonlocal host_id, session
-            info(f"[inbound] start peer={peer}")
+            info(f"[inbound] start peer={peer} stream_sess={stream_uuid}")
 
             try:
                 for frame in request_iterator:
                     which = frame.WhichOneof("msg")
                     if which is None:
-                        warn(f"[inbound] frame with no msg peer={peer}")
+                        warn(f"[inbound] frame with no msg peer={peer} stream_sess={stream_uuid}")
                         continue
 
-                    info(f"[inbound] IN type={which} peer={peer} host_id={host_id or '?'}")
+                    info(f"[inbound] IN type={which} peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
 
                     if which == "hello":
                         hello = frame.hello
                         raw = str(getattr(hello, "host_id", "") or "")
+
                         try:
                             host_id = _validate_host_id(raw)
                         except ValueError as e:
-                            error(f"[inbound] invalid hello.host_id peer={peer} err={e}")
+                            error(f"[inbound] invalid hello.host_id peer={peer} stream_sess={stream_uuid} err={e}")
                             fatal["code"] = "INVALID_ARGUMENT"
                             fatal["details"] = str(e)
                             stop.set()
                             return
 
                         ver = str(getattr(hello, "version", "") or "")
-                        info(f"[inbound] HELLO host_id={host_id!r} version={ver!r} peer={peer}")
+                        info(f"[inbound] HELLO host_id={host_id!r} version={ver!r} peer={peer} stream_sess={stream_uuid}")
 
-                        session = HostSession(host_id)
+                        # ONE session per stream
+                        session = HostSession(host_id, peer=peer, session_uuid=stream_uuid)
+
+                        # ONE register per stream
                         try:
                             self.registry.register_host(host_id, session, replace_if_stale_ms=15_000)
                         except HostIdConflictError as e:
-                            error(f"[inbound] HostIdConflictError host_id={host_id!r} err={e}")
+                            error(f"[inbound] HostIdConflictError host_id={host_id!r} stream_sess={stream_uuid} err={e}")
                             fatal["code"] = "ALREADY_EXISTS"
                             fatal["details"] = str(e)
+                            try:
+                                session.close()
+                            except Exception:
+                                pass
                             stop.set()
                             return
-                        ver = str(getattr(hello, "version", "") or "")
-                        info(f"[inbound] HELLO host_id={host_id!r} version={ver!r} peer={peer}")
 
-                        session = HostSession(host_id)
-                        self.registry.register_host(host_id, session)
                         self.registry.persist_host_meta_from_hello(hello)
 
                         # Ask host for metadata immediately on join
@@ -903,26 +939,30 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     )
                                 )
                             )
-                            info(f"[inbound] sent MetaRequest req_id={mrid} ok={ok} host_id={host_id!r}")
+                            info(f"[inbound] sent MetaRequest req_id={mrid} ok={ok} host_id={host_id!r} stream_sess={stream_uuid}")
                         except Exception:
                             exception("[inbound] FAILED sending MetaRequest")
 
                         # heartbeat ack
                         try:
-                            ok = session.send(host_tunnel_pb2.HostFrame(heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())))
-                            info(f"[inbound] sent heartbeat ack ok={ok} host_id={host_id!r}")
+                            ok = session.send(
+                                host_tunnel_pb2.HostFrame(
+                                    heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())
+                                )
+                            )
+                            info(f"[inbound] sent heartbeat ack ok={ok} host_id={host_id!r} stream_sess={stream_uuid}")
                         except Exception:
                             exception("[inbound] FAILED sending heartbeat ack")
 
                     elif which == "device_announce":
                         if session is None or host_id is None:
-                            warn(f"[inbound] device_announce before hello/session: ignoring peer={peer}")
+                            warn(f"[inbound] device_announce before hello/session: ignoring peer={peer} stream_sess={stream_uuid}")
                             continue
 
                         ann = frame.device_announce
                         n = len(getattr(ann, "devices", []))
                         info(
-                            f"[inbound] DEVICE_ANNOUNCE host_id={host_id!r} n={n} "
+                            f"[inbound] DEVICE_ANNOUNCE host_id={host_id!r} n={n} stream_sess={stream_uuid} "
                             f"unix_ms={int(getattr(ann,'unix_ms',0) or 0)} full_snapshot={bool(getattr(ann,'full_snapshot',False))}"
                         )
 
@@ -937,49 +977,53 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
 
                         try:
                             self.registry.announce_devices(host_id, list(ann.devices))
-                            info(f"[inbound] registry announce applied host_id={host_id!r}")
+                            info(f"[inbound] registry announce applied host_id={host_id!r} stream_sess={stream_uuid}")
                         except DeviceIdConflictError as e:
-                            error(f"[inbound] DeviceIdConflictError host_id={host_id!r} err={e}")
+                            error(f"[inbound] DeviceIdConflictError host_id={host_id!r} stream_sess={stream_uuid} err={e}")
                             fatal["code"] = "ALREADY_EXISTS"
                             fatal["details"] = str(e)
                             stop.set()
                             return
                         except Exception:
-                            exception(f"[inbound] announce_devices crashed host_id={host_id!r}")
+                            exception(f"[inbound] announce_devices crashed host_id={host_id!r} stream_sess={stream_uuid}")
 
                         # heartbeat ack after announce
                         try:
-                            ok = session.send(host_tunnel_pb2.HostFrame(heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())))
-                            info(f"[inbound] sent heartbeat ack after announce ok={ok} host_id={host_id!r}")
+                            ok = session.send(
+                                host_tunnel_pb2.HostFrame(
+                                    heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())
+                                )
+                            )
+                            info(f"[inbound] sent heartbeat ack after announce ok={ok} host_id={host_id!r} stream_sess={stream_uuid}")
                         except Exception:
                             exception("[inbound] FAILED sending heartbeat ack after announce")
 
                     elif which == "rpc_response":
                         if session is None:
-                            warn(f"[inbound] rpc_response before session: ignoring peer={peer}")
+                            warn(f"[inbound] rpc_response before session: ignoring peer={peer} stream_sess={stream_uuid}")
                             continue
 
                         resp = frame.rpc_response
                         rid = str(getattr(resp, "req_id", "") or "")
                         ok = bool(getattr(resp, "ok", False))
                         err_s = str(getattr(resp, "error", "") or "")
-                        info(f"[inbound] RPC_RESPONSE req_id={rid} ok={ok} error={err_s!r}")
+                        info(f"[inbound] RPC_RESPONSE req_id={rid} ok={ok} error={err_s!r} stream_sess={stream_uuid}")
 
                         with session.inflight_lock:
                             fut = session.inflight.get(rid)
 
                         if fut is not None and not fut.done():
                             fut.set_result(resp)
-                            info(f"[inbound] delivered rpc_response to waiter req_id={rid}")
+                            info(f"[inbound] delivered rpc_response to waiter req_id={rid} stream_sess={stream_uuid}")
                         else:
-                            warn(f"[inbound] rpc_response has no inflight waiter req_id={rid}")
+                            warn(f"[inbound] rpc_response has no inflight waiter req_id={rid} stream_sess={stream_uuid}")
 
                     elif which == "meta_response":
                         try:
                             mr = frame.meta_response
                             ok = bool(getattr(mr, "ok", False))
                             err_s = str(getattr(mr, "error", "") or "")
-                            info(f"[inbound] META_RESPONSE ok={ok} error={err_s!r}")
+                            info(f"[inbound] META_RESPONSE ok={ok} error={err_s!r} stream_sess={stream_uuid}")
                             try:
                                 info(f"[inbound] META_RESPONSE proto:\n{mr}")
                             except Exception:
@@ -992,24 +1036,27 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             ms = int(getattr(frame.heartbeat, "unix_ms", 0) or 0) or now_ms()
                             session.last_heartbeat_ms = ms
                             self.registry.heartbeat(host_id, ms)
-                            info(f"[inbound] HEARTBEAT host_id={host_id!r} unix_ms={ms}")
+                            info(f"[inbound] HEARTBEAT host_id={host_id!r} unix_ms={ms} stream_sess={stream_uuid}")
                         else:
-                            warn(f"[inbound] heartbeat before hello/session: ignoring peer={peer} host_id={(host_id or '?')!r}")
+                            warn(
+                                f"[inbound] heartbeat before hello/session: ignoring peer={peer} stream_sess={stream_uuid} "
+                                f"host_id={(host_id or '?')!r}"
+                            )
 
                     elif which == "cancel":
                         try:
                             rid = str(getattr(frame.cancel, "req_id", "") or "")
-                            warn(f"[inbound] CANCEL received from host?? req_id={rid} peer={peer}")
+                            warn(f"[inbound] CANCEL received from host?? req_id={rid} peer={peer} stream_sess={stream_uuid}")
                         except Exception:
                             exception("[inbound] cancel frame parse failed")
 
                     else:
-                        warn(f"[inbound] unknown frame type={which} peer={peer}")
+                        warn(f"[inbound] unknown frame type={which} peer={peer} stream_sess={stream_uuid}")
 
             except Exception:
-                exception(f"[inbound] loop crashed peer={peer} host_id={host_id or '?'}")
+                exception(f"[inbound] loop crashed peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
             finally:
-                info(f"[inbound] exiting peer={peer} host_id={host_id or '?'}")
+                info(f"[inbound] exiting peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
                 stop.set()
                 if host_id is not None:
                     try:
@@ -1025,14 +1072,14 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
         t = threading.Thread(target=inbound_loop, daemon=True, name=f"inbound_{peer_tag}")
         t.start()
 
-        info(f"[Connect] outbound pump starting peer={peer}")
+        info(f"[Connect] outbound pump starting peer={peer} stream_sess={stream_uuid}")
 
         printed_waiting = False
         while not stop.is_set():
             if fatal:
                 code = fatal.get("code", "")
                 details = fatal.get("details", "fatal")
-                error(f"[Connect] aborting stream peer={peer} code={code} details={details}")
+                error(f"[Connect] aborting stream peer={peer} stream_sess={stream_uuid} code={code} details={details}")
                 if code == "ALREADY_EXISTS":
                     context.abort(grpc.StatusCode.ALREADY_EXISTS, details)
                 if code == "INVALID_ARGUMENT":
@@ -1041,7 +1088,7 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
 
             if session is None:
                 if not printed_waiting:
-                    info(f"[Connect] waiting for HELLO peer={peer}")
+                    info(f"[Connect] waiting for HELLO peer={peer} stream_sess={stream_uuid}")
                     printed_waiting = True
                 time.sleep(0.05)
                 continue
@@ -1051,18 +1098,19 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
             except queue.Empty:
                 continue
             except Exception:
-                exception(f"[Connect] outbound queue get failed peer={peer} host_id={host_id or '?'}")
+                exception(f"[Connect] outbound queue get failed peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
                 continue
 
             if out is None:
-                info(f"[Connect] outbound sentinel -> end stream peer={peer} host_id={host_id or '?'}")
+                info(f"[Connect] outbound sentinel -> end stream peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
                 break
 
             out_type = out.WhichOneof("msg")
-            info(f"[Connect] OUT type={out_type} peer={peer} host_id={host_id or '?'}")
+            info(f"[Connect] OUT type={out_type} peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
             yield out
 
-        info(f"[Connect] stream ended peer={peer} host_id={host_id or '?'}")
+        info(f"[Connect] stream ended peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
+
 
 # =============================================================================
 # Credentials + server start
@@ -1083,6 +1131,7 @@ def build_server_credentials(
             require_client_auth=require_client_auth,
         )
     return grpc.ssl_server_credentials(((private_key_pem, certificate_chain_pem),))
+
 
 def start_host_tunnel_server(
     *,

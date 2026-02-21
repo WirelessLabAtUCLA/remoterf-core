@@ -405,7 +405,7 @@ def _cmd_hosts_status() -> None:
     for did, ds in devices.items():
         by_host.setdefault(ds.host_id or "-", []).append(did)
 
-    printf("Hosts (live):", Sty.BOLD)
+    printf("Hosts:", Sty.BOLD)
     if not hosts:
         printf("  (none)", Sty.GRAY)
         return
@@ -415,8 +415,8 @@ def _cmd_hosts_status() -> None:
         printf(
             "  ", Sty.DEFAULT,
             f"{hid}", Sty.MAGENTA,
-            "  online=", Sty.DEFAULT, f"{hs.online}", Sty.GREEN if hs.online else Sty.RED,
-            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(hs.last_seen_ms)} ago", Sty.BLUE,
+            "  online=", Sty.DEFAULT, f"{hs.online}", Sty.GRAY if hs.online else Sty.GRAY,
+            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(hs.last_seen_ms)} ago", Sty.GRAY,
             "  devices=", Sty.DEFAULT, f"{len(dlist)}", Sty.GRAY
         )
         for did in dlist:
@@ -427,8 +427,8 @@ def _cmd_hosts_status() -> None:
                 "     - ", Sty.DEFAULT,
                 f"{did}", Sty.MAGENTA,
                 "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
-                "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GREEN if ds.online else Sty.RED,
-                "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
+                "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GRAY if ds.online else Sty.GRAY,
+                "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.GRAY
             )
 
 def _cmd_devices_status() -> None:
