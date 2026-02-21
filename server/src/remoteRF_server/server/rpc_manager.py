@@ -63,7 +63,7 @@ class RpcManager:
     def run_rpc(self, *, function_name, args) -> map:
         fn_type = function_name.split(':', 1)[0]
         
-        print(f"RPC: {function_name}, ARGS: {args}")
+        # print(f"RPC: {function_name}, ARGS: {args}")
 
         if fn_type == "Pluto":
             if 'a' not in args:
