@@ -391,10 +391,10 @@ def _cmd_hosts_status() -> None:
     reg = hts.get_tunnel_registry()
     assert reg is not None
     
-    print("\n[hosts status] registry debug")
-    print(f"  hts module: {hts.__name__}")
-    reg = hts.get_tunnel_registry(create=False)
-    print(f"  registry id: {id(reg) if reg else None}\n")
+    # print("\n[hosts status] registry debug")
+    # print(f"  hts module: {hts.__name__}")
+    # reg = hts.get_tunnel_registry(create=False)
+    # print(f"  registry id: {id(reg) if reg else None}\n")
 
     hosts = reg.list_hosts()     # host_id -> HostStatus
     devices = reg.list_devices() # device_id -> DeviceStatus

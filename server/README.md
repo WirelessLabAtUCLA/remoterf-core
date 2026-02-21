@@ -339,7 +339,7 @@ todo:
 
 <!-- Host ID (NEEDS TO BE UNIQUE AND TELL THE HOST THAT) (or if device also does it as well.) -->
 
-ServerRF display meta data as part of devices list / reservation 
+<!-- ServerRF display meta data as part of devices list / reservation  -->
 
 + online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
 
