@@ -1,3 +1,5 @@
+
+from __future__ import annotations
 import threading
 import socket
 import os
@@ -16,6 +18,12 @@ from datetime import datetime
 # import os
 # os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 # os.environ.setdefault("GRPC_TRACE", "")
+
+from pathlib import Path
+import os
+import re
+import time
+from typing import Any
 
 import grpc
 
@@ -445,6 +453,324 @@ def _cmd_devices_status() -> None:
             "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GREEN if ds.online else Sty.RED,
             "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
         )
+        
+from typing import Iterable
+import contextlib
+
+def _repo_root_guess() -> Path:
+    """
+    Best-effort: find <repo>/src/... and return <repo>.
+    Fallback: walk up a few levels from this file.
+    """
+    p = Path(__file__).resolve()
+    for parent in p.parents:
+        if parent.name == "src":
+            return parent.parent
+    # fallback
+    return p.parents[3] if len(p.parents) >= 4 else p.parent
+
+# Optional: if you later add "kick" support (see section 2)
+HOST_TUNNEL_EPOCH = 0
+
+def _read_env_kv_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+def _env_values_as_paths(env_path: Path) -> list[Path]:
+    """
+    Parse an env file and treat values that look like filesystem paths as candidate dirs.
+    Relative paths are resolved relative to the env file's directory.
+    """
+    kv = _read_env_kv_file(env_path)
+    base = env_path.parent
+    out: list[Path] = []
+
+    for _, v in kv.items():
+        if not v:
+            continue
+        # heuristics: looks like a path
+        if ("/" not in v) and ("\\" not in v) and (not v.startswith(".")) and (not v.startswith("~")):
+            continue
+
+        p = Path(v).expanduser()
+        if not p.is_absolute():
+            p = (base / p).resolve()
+        out.append(p)
+
+    return out
+
+def _host_state_dirs() -> list[Path]:
+    """
+    Aggressive candidate list:
+      - user config (~/.config/remoterf or REMOTERF_CONFIG_DIR)
+      - repo/.config
+      - repo/config  (+ common subdirs)
+      - src/remoteRF_server/config
+      - plus env overrides + paths referenced by .env.host_directory (if present)
+    """
+    repo = _repo_root_guess()
+
+    cands: list[Path] = [
+        _cfg_dir(),
+        repo / ".config",
+        repo / "config",
+        repo / "config" / "remoteRF_server",
+        repo / "config" / "remoteRF_host",
+        repo / "src" / "remoteRF_server" / "config",
+        (Path(__file__).resolve().parent.parent / "config"),
+    ]
+
+    # Environment overrides (add any you might plausibly use)
+    for k in (
+        "REMOTERF_HOSTDIR_DIR",
+        "REMOTERF_HOST_DIRECTORY_DIR",
+        "REMOTERF_HOST_DIR",
+        "HOST_DIRECTORY_DIR",
+        "HOST_DIRECTORY_PATH",
+        "REMOTERF_STATE_DIR",
+    ):
+        v = os.getenv(k)
+        if v:
+            cands.append(Path(v).expanduser())
+
+    # If you have a .env.host_directory file, harvest any path-like values from it
+    env_host_dir = repo / "src" / "remoteRF_server" / "config" / ".env.host_directory"
+    if env_host_dir.exists():
+        cands.extend(_env_values_as_paths(env_host_dir))
+
+    # de-dupe + keep only dirs (or dirs that could exist)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in cands:
+        try:
+            rp = str(d.expanduser().resolve())
+        except Exception:
+            rp = str(d)
+        if rp not in seen:
+            seen.add(rp)
+            out.append(d)
+    return out
+
+def _host_state_files() -> list[Path]:
+    """
+    Broader scan than just host_directory.env:
+    We only match filenames that clearly look like host/tunnel/registry state.
+    """
+    patterns = [
+        "host_directory*.env",
+        "host_directory*.json",
+        "host_directory*.db",
+        "host_directory*.sqlite*",
+        "host_directory*.pkl",
+        "host_tunnel*.env",
+        "host_tunnel*.json",
+        "tunnel_registry*.env",
+        "tunnel_registry*.json",
+        "*host*registry*.json",
+        "*host*registry*.db",
+        "*host*registry*.sqlite*",
+        "*host*state*.json",
+        "*host*state*.db",
+        "*host*state*.sqlite*",
+    ]
+
+    files: list[Path] = []
+    for d in _host_state_dirs():
+        try:
+            if not d.exists() or not d.is_dir():
+                continue
+        except Exception:
+            continue
+
+        for pat in patterns:
+            try:
+                files.extend(sorted(d.glob(pat)))
+            except Exception:
+                pass
+
+    # de-dupe
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in files:
+        try:
+            rp = str(p.resolve())
+        except Exception:
+            rp = str(p)
+        if rp not in seen:
+            seen.add(rp)
+            out.append(p)
+    return out
+
+def _deep_clear_state(obj: Any) -> list[str]:
+    """
+    Best-effort: clear dict/list/set fields on an object, recursively,
+    but only for fields that look like state (host/device/route/session/cache/store/etc).
+    """
+    cleared: list[str] = []
+    seen: set[int] = set()
+
+    state_name = re.compile(r"(host|device|route|session|dir|store|cache|meta|seen|status)", re.I)
+
+    def walk(x: Any, prefix: str) -> None:
+        oid = id(x)
+        if oid in seen:
+            return
+        seen.add(oid)
+
+        # containers
+        if isinstance(x, dict):
+            x.clear()
+            cleared.append(prefix)
+            return
+        if isinstance(x, list):
+            x.clear()
+            cleared.append(prefix)
+            return
+        if isinstance(x, set):
+            x.clear()
+            cleared.append(prefix)
+            return
+
+        # objects with __dict__
+        d = getattr(x, "__dict__", None)
+        if not isinstance(d, dict):
+            return
+
+        for k, v in list(d.items()):
+            # never touch locks/threads/etc
+            if k in ("_lock", "lock", "_thread", "thread", "_executor", "executor"):
+                continue
+            if not state_name.search(k):
+                continue
+
+            if isinstance(v, (dict, list, set)):
+                try:
+                    v.clear()
+                    cleared.append(f"{prefix}.{k}")
+                except Exception:
+                    pass
+            else:
+                # recurse into nested state objects (EnvStore, etc.)
+                walk(v, f"{prefix}.{k}")
+
+    walk(obj, obj.__class__.__name__)
+    return cleared
+
+def _try_clear_registry_in_memory(reg: object) -> list[str]:
+    """
+    Stronger in-memory clear:
+      - calls obvious reset/clear methods if present
+      - clears common containers
+      - recursively clears state-like fields (even if names differ)
+    """
+    cleared: list[str] = []
+
+    lock = getattr(reg, "_lock", None)
+    acquired = False
+    try:
+        if lock is not None and hasattr(lock, "acquire") and hasattr(lock, "release"):
+            lock.acquire()
+            acquired = True
+
+        # Prefer explicit APIs if you have them
+        for meth in (
+            "clear",
+            "reset",
+            "wipe",
+            "wipe_all",
+            "wipe_state",
+            "clear_state",
+            "reset_state",
+            "prune",
+            "gc",
+        ):
+            fn = getattr(reg, meth, None)
+            if callable(fn):
+                try:
+                    fn()
+                    cleared.append(f"{meth}()")
+                except Exception:
+                    pass
+
+        # Clear obvious containers by direct attribute scan
+        for attr, v in list(getattr(reg, "__dict__", {}).items()):
+            if isinstance(v, (dict, list, set)):
+                try:
+                    v.clear()
+                    cleared.append(attr)
+                except Exception:
+                    pass
+
+        # Recursive targeted clear (for EnvStore etc.)
+        cleared.extend(_deep_clear_state(reg))
+
+    finally:
+        if acquired:
+            try:
+                lock.release()
+            except Exception:
+                pass
+
+    # de-dupe
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in cleared:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+def _cmd_hosts_wipe(*, yes: bool = False) -> None:
+    if not yes:
+        try:
+            resp = session.prompt(stylize("Type 'wipe-hosts' to confirm wiping host state: ", Sty.RED))
+        except KeyboardInterrupt:
+            printf("Cancelled.", Sty.GRAY)
+            return
+        if (resp or "").strip().lower() != "wipe-hosts":
+            printf("Wipe aborted.", Sty.GRAY)
+            return
+
+    # 1) delete persisted files (if any)
+    files = [p for p in _host_state_files() if p.exists()]
+    if not files:
+        printf("No persisted host directory files found (searched common dirs/patterns).", Sty.YELLOW)
+    else:
+        for p in files:
+            try:
+                p.unlink()
+                printf("Deleted: ", Sty.DEFAULT, f"{p}", Sty.MAGENTA)
+            except Exception as e:
+                printf("ERROR deleting: ", Sty.RED, f"{p} -> {e}", Sty.DEFAULT)
+                return
+
+    # 2) clear in-memory registry (THIS is what drives `hosts status`)
+    global TUNNEL_REGISTRY
+    reg = TUNNEL_REGISTRY
+    if reg is None:
+        printf("Host tunnel registry not initialized; only persisted wipe attempted.", Sty.GRAY)
+    else:
+        cleared = _try_clear_registry_in_memory(reg)
+        if cleared:
+            printf("Cleared in-memory registry state:", Sty.GREEN)
+            # keep output short-ish
+            for item in cleared[:20]:
+                printf("  - ", Sty.DEFAULT, item, Sty.GRAY)
+            if len(cleared) > 20:
+                printf("  ...", Sty.GRAY)
+        else:
+            printf("WARNING: in-memory wipe could not confirm any cleared fields.", Sty.YELLOW)
+            printf("If `hosts status` still shows data, it is almost certainly being repopulated by live connections.", Sty.YELLOW)
+
+    printf("Host wipe complete.", Sty.GREEN)
 
 # def help():
 #     printf("/------- HELP -------/", Sty.BOLD)
@@ -571,6 +897,7 @@ def help() -> None:
     
     printf("Host Tunnel (live):", Sty.BOLD)
     printf("  hosts status            ", Sty.MAGENTA, "- Live host online/last_seen/devices", Sty.DEFAULT)
+    printf("  hosts wipe              ", Sty.MAGENTA, "- Wipe persisted host directory state (and clear in-memory)", Sty.DEFAULT)
     printf("  devices status          ", Sty.MAGENTA, "- Live device online/last_seen/route", Sty.DEFAULT)
     print()
 
@@ -669,7 +996,6 @@ def server_input(inpu: str) -> bool:
         # ---- host tunnel ----
         "hosts status": lambda: _stay(_cmd_hosts_status),
         "host status": lambda: _stay(_cmd_hosts_status),
-        "tunnel hosts": lambda: _stay(_cmd_hosts_status),
 
         "devices status": lambda: _stay(_cmd_devices_status),
         "tunnel devices": lambda: _stay(_cmd_devices_status),
@@ -679,6 +1005,12 @@ def server_input(inpu: str) -> bool:
 
     fn = DISPATCH.get(cmd)
     if fn is None:
+        # allow: "hosts wipe" and "hosts wipe -y"
+        if cmd.startswith("hosts wipe"):
+            yes = ("-y" in cmd.split()) or ("--yes" in cmd.split())
+            _cmd_hosts_wipe(yes=yes)
+            return True
+
         printf("Unknown command: ", Sty.RED, f"{inpu}", Sty.DEFAULT)
         printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands.", Sty.DEFAULT)
         return True

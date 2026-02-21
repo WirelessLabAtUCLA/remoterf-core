@@ -51,6 +51,31 @@ LOG_MODE = "OFF"  # <-- change this
 
 _LOG_LOCK = threading.Lock()
 
+HOST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")  # adjust if you want
+
+class HostIdConflictError(RuntimeError):
+    def __init__(self, host_id: str, *, age_ms: int, replace_after_ms: int) -> None:
+        super().__init__(
+            f"host_id '{host_id}' already in use (last heartbeat {age_ms}ms ago). "
+            f"Try again after {replace_after_ms}ms or fix the conflicting host config."
+        )
+        self.host_id = host_id
+        self.age_ms = age_ms
+        self.replace_after_ms = replace_after_ms
+
+def _validate_host_id(raw: str) -> str:
+    hid = (raw or "").strip()
+    if not hid:
+        raise ValueError("Missing host_id (set HOST_ID in host.env; do not auto-generate).")
+    if hid == "unknown-host":
+        raise ValueError("host_id cannot be 'unknown-host' (set HOST_ID in host.env).")
+    if not HOST_ID_RE.fullmatch(hid):
+        raise ValueError(
+            "Invalid host_id. Allowed: 1..64 chars of [A-Za-z0-9_.-]. "
+            f"Got: {hid!r}"
+        )
+    return hid
+
 def _ts() -> str:
     t = time.time()
     sec = int(t)
@@ -387,12 +412,25 @@ class HostTunnelRegistry:
     # directory/status mutators
     # ---------------------------
 
-    def register_host(self, host_id: str, session: HostSession) -> None:
+    def register_host(
+        self,
+        host_id: str,
+        session: HostSession,
+        *,
+        replace_if_stale_ms: int = 15_000,  # tweak: how long without heartbeat before we allow replacement
+    ) -> None:
         info(f"[registry] register_host: host_id={host_id!r}")
+
         with self._lock:
             old = self._hosts.get(host_id)
-            if old is not None:
-                warn(f"[registry] register_host: replacing existing session host_id={host_id!r}")
+            if old is not None and old.alive:
+                age_ms = int(now_ms() - int(getattr(old, "last_heartbeat_ms", 0) or 0))
+                if age_ms < replace_if_stale_ms:
+                    # conflict: someone else is already using this host_id
+                    raise HostIdConflictError(host_id, age_ms=age_ms, replace_after_ms=replace_if_stale_ms)
+
+                # stale: allow replacement
+                warn(f"[registry] register_host: replacing STALE session host_id={host_id!r} age_ms={age_ms}")
                 old.close()
 
             self._hosts[host_id] = session
@@ -823,7 +861,28 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
 
                     if which == "hello":
                         hello = frame.hello
-                        host_id = str(getattr(hello, "host_id", "")).strip() or "unknown-host"
+                        raw = str(getattr(hello, "host_id", "") or "")
+                        try:
+                            host_id = _validate_host_id(raw)
+                        except ValueError as e:
+                            error(f"[inbound] invalid hello.host_id peer={peer} err={e}")
+                            fatal["code"] = "INVALID_ARGUMENT"
+                            fatal["details"] = str(e)
+                            stop.set()
+                            return
+
+                        ver = str(getattr(hello, "version", "") or "")
+                        info(f"[inbound] HELLO host_id={host_id!r} version={ver!r} peer={peer}")
+
+                        session = HostSession(host_id)
+                        try:
+                            self.registry.register_host(host_id, session, replace_if_stale_ms=15_000)
+                        except HostIdConflictError as e:
+                            error(f"[inbound] HostIdConflictError host_id={host_id!r} err={e}")
+                            fatal["code"] = "ALREADY_EXISTS"
+                            fatal["details"] = str(e)
+                            stop.set()
+                            return
                         ver = str(getattr(hello, "version", "") or "")
                         info(f"[inbound] HELLO host_id={host_id!r} version={ver!r} peer={peer}")
 
@@ -976,6 +1035,8 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                 error(f"[Connect] aborting stream peer={peer} code={code} details={details}")
                 if code == "ALREADY_EXISTS":
                     context.abort(grpc.StatusCode.ALREADY_EXISTS, details)
+                if code == "INVALID_ARGUMENT":
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, details)
                 context.abort(grpc.StatusCode.UNKNOWN, details)
 
             if session is None:
