@@ -485,38 +485,81 @@ class ReservationHandler:
         count = self.cursor.fetchone()[0]
         return count
     
+    # @db_connection
+    # def update_devices(self):
+    #     devices = get_all_devices()
+    #     for device_id in list(devices.keys()):
+    #         self._clean_expired_reservations(device_id)
+            
+    #     self.cursor.execute('SELECT * FROM Reservations')
+    #     reservations = self.cursor.fetchall()
+        
+    #     reservations_now = 0
+        
+    #     for reservation in reservations:    # Update tokens for each device
+    #         if datetime.strptime(reservation[3], '%Y-%m-%d %H:%M:%S') <= datetime.now() and datetime.strptime(reservation[4], '%Y-%m-%d %H:%M:%S') > datetime.now():
+    #             del devices[reservation[2]]
+    #             set_device(reservation[2], reservation[5], reservation[6])
+                
+    #             # if not get_transmitter_state(): # Turn transmitter on
+    #             #     start_transmitter()
+                    
+    #             reservations_now += 1
+                
+    #     if reservations_now == 0: # Turn transmitter off if no resservations
+    #         # terminate_transmitter()
+    #         pass
+                
+    #     for device in devices:
+    #         set_device(device, '', '')
+    
+    from datetime import datetime
+
     @db_connection
     def update_devices(self):
-        devices = get_all_devices()
-        for device_id in list(devices.keys()):
-            self._clean_expired_reservations(device_id)
-            
-        self.cursor.execute('SELECT * FROM Reservations')
+        devices = get_all_devices()  # whatever your local inventory is
+
+        # Build a lookup: canonical string -> original key in `devices`
+        # (handles int keys, str keys, etc.)
+        key_by_str = {str(k).strip(): k for k in devices.keys()}
+
+        # Clean expired reservations for devices we actually know locally
+        for k in list(devices.keys()):
+            self._clean_expired_reservations(str(k).strip())
+
+        self.cursor.execute("SELECT * FROM Reservations")
         reservations = self.cursor.fetchall()
-        
+
+        now = datetime.now()
         reservations_now = 0
-        
-        for reservation in reservations:    # Update tokens for each device
-            if datetime.strptime(reservation[3], '%Y-%m-%d %H:%M:%S') <= datetime.now() and datetime.strptime(reservation[4], '%Y-%m-%d %H:%M:%S') > datetime.now():
-                del devices[reservation[2]]
-                set_device(reservation[2], reservation[5], reservation[6])
-                
-                # if not get_transmitter_state(): # Turn transmitter on
-                #     start_transmitter()
-                    
+
+        for reservation in reservations:
+            start = datetime.strptime(reservation[3], "%Y-%m-%d %H:%M:%S")
+            end = datetime.strptime(reservation[4], "%Y-%m-%d %H:%M:%S")
+
+            if start <= now < end:
+                dev_id = str(reservation[2]).strip()
+
+                # If this reservation corresponds to a local device, remove it from the "clear later" list.
+                orig_key = key_by_str.pop(dev_id, None)
+                if orig_key is not None:
+                    devices.pop(orig_key, None)  # safe even if already removed
+
+                # Apply reservation token/state for this device_id (local or virtual)
+                set_device(dev_id, reservation[5] or "", reservation[6] or "")
+
                 reservations_now += 1
-                
-        if reservations_now == 0: # Turn transmitter off if no resservations
+
+        if reservations_now == 0:
             # terminate_transmitter()
             pass
-                
-        for device in devices:
-            set_device(device, '', '')
+
+        # Clear tokens for remaining *local* devices that are not currently reserved
+        for k in devices.keys():
+            set_device(str(k).strip(), "", "")
         
 start_transmitter()
 reservation_handler = ReservationHandler()
-
-
 
 # region Logging purposes
 

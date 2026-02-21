@@ -183,11 +183,7 @@ def _sync_host_devices(*, force: bool = False) -> None:
             if st.origin == "host" and gid not in present:
                 st.online = False
 
-
 def _local_devices_str_snapshot() -> Dict[int, str]:
-    """
-    Local devices from devices.env (whether connected or not).
-    """
     out: Dict[int, str] = {}
     with _state_lock:
         for gid, st in _devices.items():
@@ -195,21 +191,12 @@ def _local_devices_str_snapshot() -> Dict[int, str]:
                 continue
 
             name = (st.name or f"device-{gid}").strip()
+
             status = "online" if _is_connected(st) else "offline"
-
-            dtype = (st.dtype or "").strip()
-            ident = (st.ident or "").strip()
-
-            meta_parts: List[str] = ["local"]
-            if dtype:
-                meta_parts.append(f"type={dtype}")
-            if ident:
-                meta_parts.append(f"ident={ident}")
-
             if st.salt or st.hsh:
-                status = status + ", reserved"
+                status = f"{status}, reserved"
 
-            out[int(gid)] = f"{name} [{', '.join(meta_parts)}] ({status})"
+            out[int(gid)] = f"{name} ({status})"
     return out
 
 def _host_devices_str_snapshot() -> Dict[int, str]:
@@ -559,7 +546,7 @@ def get_all_devices_str() -> Dict[int, str]:
         else:
             out[gid] = s
 
-    return out
+    return dict(sorted(out.items(), key=lambda kv: int(kv[0])))
 
 
 def set_device(device_id: int, salt: str, hash: str):
