@@ -1118,17 +1118,34 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             warn(f"[inbound] rpc_response has no inflight waiter req_id={rid} stream_sess={stream_uuid}")
 
                     elif which == "meta_response":
-                        try:
-                            mr = frame.meta_response
-                            ok = bool(getattr(mr, "ok", False))
-                            err_s = str(getattr(mr, "error", "") or "")
-                            info(f"[inbound] META_RESPONSE ok={ok} error={err_s!r} stream_sess={stream_uuid}")
-                            try:
-                                info(f"[inbound] META_RESPONSE proto:\n{mr}")
-                            except Exception:
-                                pass
-                        except Exception:
-                            exception("[inbound] meta_response handling crashed")
+                        mr = frame.meta_response
+                        ok = bool(getattr(mr, "ok", False))
+                        err_s = str(getattr(mr, "error", "") or "")
+                        info(f"[inbound] META_RESPONSE ok={ok} error={err_s!r} stream_sess={stream_uuid}")
+
+                        # ---- NEW: apply devices from meta_response if present ----
+                        if ok and host_id is not None:
+                            devs = []
+                            # try common field names defensively
+                            for fld in ("devices", "device_infos", "device_info"):
+                                try:
+                                    v = getattr(mr, fld, None)
+                                    if v:
+                                        devs = list(v)
+                                        break
+                                except Exception:
+                                    pass
+
+                            if devs:
+                                info(f"[inbound] META_RESPONSE applying {len(devs)} devices to registry host_id={host_id!r}")
+                                try:
+                                    self.registry.announce_devices(host_id, devs)
+                                    # optional: heartbeat bump
+                                    self.registry.heartbeat(host_id, now_ms())
+                                except Exception:
+                                    exception("[inbound] META_RESPONSE announce_devices failed")
+                            else:
+                                info("[inbound] META_RESPONSE had no devices field (or empty)")
 
                     elif which == "heartbeat":
                         if session is not None and host_id is not None:

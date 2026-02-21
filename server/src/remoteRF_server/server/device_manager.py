@@ -70,21 +70,12 @@ def _local_devices_str_snapshot() -> Dict[int, str]:
     return out
 
 def _host_devices_str_snapshot() -> Dict[int, str]:
-    """
-    Pull a FRESH host-device directory snapshot every call.
-
-    Includes:
-      - devices on currently connected hosts (online)
-      - devices on disconnected hosts that were previously seen/persisted (offline)
-    """
     reg = _get_host_registry()
     if reg is None:
         return {}
 
-    # force refresh of directory snapshot
     snap = reg.device_directory_cached(ttl_ms=0)  # device_id -> (host_id, info_obj, is_active)
 
-    # optional: last-seen data (persisted in registry status)
     try:
         status_map = reg.list_devices()  # device_id -> DeviceStatus
     except Exception:
@@ -94,11 +85,16 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 
     out: Dict[int, str] = {}
     for device_id, (host_id, info_obj, is_active) in snap.items():
-        # you said host device IDs are numeric and globally unique => treat as gid
+        # Prefer numeric device_id (old world), otherwise fall back to local_id (compat/UI key).
         try:
             gid = int(str(device_id))
         except Exception:
-            continue
+            try:
+                gid = int(getattr(info_obj, "local_id", 0) or 0)
+            except Exception:
+                continue
+            if gid <= 0:
+                continue
 
         local_id = int(getattr(info_obj, "local_id", 0) or 0)
         label = str(getattr(info_obj, "label", "") or "").strip()
@@ -121,11 +117,13 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 
         out[gid] = (
             f"{name} "
-            f"[host={host_id}, local_id={local_id}"
-            f"{', kind=' + kind if kind else ''}"
-            f"{', serial=' + serial if serial else ''}"
-            f"{last_seen}"
-            f"] ({status})"
+            # f"[host={host_id}, local_id={local_id}"
+            # f"{', kind=' + kind if kind else ''}"
+            # f"{', serial=' + serial if serial else ''}"
+            # f"{last_seen}"
+            # f"] ({status})"
+            
+            f"({status})"
         )
 
     return out
@@ -403,6 +401,24 @@ def get_all_devices_str() -> Dict[int, str]:
 
     # host snapshot (includes online + offline-but-known host devices)
     host_out = _host_devices_str_snapshot()
+
+    # ---- DEBUG: print full host_out ----
+    # try:
+    #     from ..host import host_tunnel_server as hts  # adjust if your canonical import differs
+    #     reg = hts.get_tunnel_registry(create=False) if hasattr(hts, "get_tunnel_registry") else None
+    #     print("\n[device_manager] host_out dump")
+    #     print(f"  hts module: {getattr(hts, '__name__', '<?>')}")
+    #     print(f"  registry id: {id(reg) if reg is not None else None}")
+    #     print(f"  host_out count: {len(host_out)}")
+
+    #     if not host_out:
+    #         print("  (empty)")
+    #     else:
+    #         for gid, s in sorted(host_out.items(), key=lambda kv: int(kv[0])):
+    #             print(f"  {gid}: {s}")
+    #     print()
+    # except Exception as e:
+    #     print(f"[device_manager] host_out dump failed: {e}")
 
     # merge with collision handling
     for gid, s in host_out.items():

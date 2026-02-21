@@ -343,7 +343,11 @@ ServerRF display meta data as part of devices list / reservation
 
 + online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
 
-set_device token (virtual devices) + routing/relay to proper host (multiplexed)
+Test local pluto on server (to make sure nothing broke!)
+
+set_device token (virtual devices) + routing/relay to proper host (multiplexed) + host side pipeline
+
+Test local pluto on server (to make sure nothing broke!)
 
 User side testing + integration
 
