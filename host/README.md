@@ -192,3 +192,8 @@ Clear all device config:
 ```bash
 hostrf -d --wipe
 ```
+
+Run to start the host. You should be able to see host on the server if setup properly.
+```bash
+hostrf -s
+```
