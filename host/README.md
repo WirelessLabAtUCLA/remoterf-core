@@ -174,7 +174,7 @@ Add pluto to device list. Understand that the device_id (int) needs to be GLOBAL
 hostrf --device --add --pluto <id>:<device_name>:<hw_serial>
 
 #Example
-hostrf -d -a --pluto 10:hostrf_pluto_0:104473
+hostrf -d -a --pluto 10:"hostrf pluto 0":104473
 ```
 
 Remove device:
