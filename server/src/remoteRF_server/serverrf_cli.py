@@ -8,7 +8,11 @@ import re
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timezone
+import base64
+import secrets
+import hashlib
 
+from .host.host_auth_token import create_host_token, delete_host_token, wipe_all_host_tokens, show_host_tokens
 
 def _x509_notafter_utc(cert_path: Path) -> Optional[datetime]:
     # openssl output: notAfter=Feb 16 23:12:02 2027 GMT
@@ -121,6 +125,13 @@ def print_help() -> None:
         "  --show | -s                        Show current ports\n"
         "  -w | --wipe [-y]                   Wipe ONLY port config (server.env)\n"
         "\n"
+        "Hosts:\n"
+        "  serverrf --host --token-create <host_id>   Create/rotate host token (prints token to copy)\n"
+        "  serverrf --host --list                     List all host token records\n"
+        "  serverrf --host --delete <host_id>         Delete host token record\n"
+        "  serverrf --host --wipe [-y]                Wipe ALL host token records\n"
+        "  serverrf --host --list --secrets           (optional) include salt/hash\n"
+        "\n"
         "Devices:\n"
         "  serverrf -d | --device [options]\n"
         "\n"
@@ -156,6 +167,12 @@ def print_help() -> None:
         "  serverrf --config --show\n"
         "  serverrf -c -s\n"
         "  serverrf --config --wipe -y\n"
+        "\n"
+        "  serverrf --host --token-create lab-host-01\n"
+        "  serverrf --host --list\n"
+        "  serverrf --host --delete lab-host-01\n"
+        "  serverrf --host --wipe -y\n"
+        "\n"
         "\n"
         "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
         "  serverrf --device --edit-name 0 \"New Pluto Name\"\n"
@@ -697,6 +714,14 @@ def main() -> int:
     device_remove_gid: Optional[str] = None
     device_edit_gid: Optional[str] = None
     device_edit_new_name: Optional[str] = None
+    
+    # host commands
+    host_mode = False
+    host_token_create_id: Optional[str] = None
+    host_delete_id: Optional[str] = None
+    host_list = False
+    host_wipe = False
+    host_show_secrets = False  # optional
 
     i = 0
     while i < len(argv):
@@ -776,6 +801,44 @@ def main() -> int:
                 print("ERROR: --cert-port expects an int", file=sys.stderr)
                 return 2
             i += 2
+            continue
+        
+        # enter host mode
+        if tok in ("--host", "-host"):
+            host_mode = True
+            i += 1
+            continue
+
+        # host verbs
+        if host_mode and tok in ("--token-create", "-token-create"):
+            if i + 1 >= len(argv):
+                print("ERROR: --token-create expects <host_id>", file=sys.stderr)
+                return 2
+            host_token_create_id = argv[i + 1].strip()
+            i += 2
+            continue
+
+        if host_mode and tok in ("--delete", "-delete", "--token-delete", "-token-delete"):
+            if i + 1 >= len(argv):
+                print("ERROR: --delete expects <host_id>", file=sys.stderr)
+                return 2
+            host_delete_id = argv[i + 1].strip()
+            i += 2
+            continue
+
+        if host_mode and tok in ("--list", "-list", "--show", "-show"):
+            host_list = True
+            i += 1
+            continue
+
+        if host_mode and tok in ("--wipe", "-wipe", "-w"):
+            host_wipe = True
+            i += 1
+            continue
+
+        if host_mode and tok in ("--secrets", "-secrets"):
+            host_show_secrets = True
+            i += 1
             continue
 
         # device verbs/options
@@ -894,6 +957,84 @@ def main() -> int:
     if device_mode and (config_mode or show_certs or wipe_certs or (gen_ip is not None)):
         print("ERROR: --device cannot be combined with config/cert commands. Run them separately.", file=sys.stderr)
         return 2
+    
+    if host_mode and (device_mode or config_mode or show_certs or wipe_certs or (gen_ip is not None)):
+        print("ERROR: --host cannot be combined with device/config/cert commands. Run them separately.", file=sys.stderr)
+        return 2
+    
+    if host_mode:
+        actions = int(host_token_create_id is not None) + int(host_delete_id is not None) + int(host_list) + int(host_wipe)
+        if actions == 0:
+            print_help()
+            return 2
+        if actions > 1:
+            print("ERROR: host commands are mutually exclusive. Use exactly one of: --token-create, --delete, --list, --wipe", file=sys.stderr)
+            return 2
+
+        if host_wipe and not yes:
+            # mimic your other wipe confirmations
+            try:
+                if input("This will delete ALL host tokens. Type 'wipe' to confirm: ").strip().lower() != "wipe":
+                    print("Wipe aborted.")
+                    return 1
+            except KeyboardInterrupt:
+                print("\nCancelled.")
+                return 1
+            
+    # ----------------
+    # Host mode execution
+    # ----------------
+    if host_mode:
+        # 1) list
+        if host_list:
+            show_host_tokens(include_secrets=host_show_secrets, file=sys.stdout)
+            return 0
+
+        # 2) delete
+        if host_delete_id is not None:
+            try:
+                ok = delete_host_token(host_delete_id)
+            except Exception as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 2
+
+            if ok:
+                print(f"Deleted host token: {host_delete_id}")
+                return 0
+            else:
+                print(f"No host token found for: {host_delete_id}")
+                return 1
+
+        # 3) wipe all
+        if host_wipe:
+            try:
+                n = wipe_all_host_tokens()
+            except Exception as e:
+                print(f"ERROR: {e}", file=sys.stderr)
+                return 2
+            print(f"Wiped {n} host token record(s).")
+            return 0
+
+        # 4) token create
+        if host_token_create_id is None:
+            print_help()
+            return 2
+
+        try:
+            token = create_host_token(host_token_create_id, length=16, overwrite=True)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+
+        print("Host token created.")
+        print("")
+        print("Paste into the host's .config/host.env:")
+        print(f'HOST_ID="{host_token_create_id}"')
+        print(f'HOST_TOKEN="{token}"')
+        print("")
+        # IMPORTANT: don't use _cfg_dir()/hosts_auth.env anymore if you moved storage to db/
+        print("(Server stored verifier in: ~/.config/remoterf/db/hosts_auth.env)")  # or call a helper if you expose it
+        return 0
 
     # ----------------
     # Device mode execution
