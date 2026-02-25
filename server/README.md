@@ -328,9 +328,7 @@ After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. 
 * `db purge` — Remove all database entries
 
 ---
-
-## 
-todo:
+<!-- todo: -->
 <!-- Adding plutos via the CLI -->
 <!-- Testing functionality (disregarding Host pipeline) -->
 <!-- Clean up serverrf CLI + basic documentation for all commands, usergroups, export codes by CSV. -->
@@ -341,7 +339,7 @@ todo:
 
 <!-- ServerRF display meta data as part of devices list / reservation  -->
 
-+ online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
+<!-- + online/activity status (appended into device name) + (plus host side warning if the device id is NOT globally unique!)
 
 Test local pluto on server (to make sure nothing broke!)
 
@@ -353,20 +351,20 @@ User side testing + integration
 
 hostrf side CLI/server (basically just device list)
 
-edge case testing (disconnected hosts, disconnected server, many users using multiple devices, multi-host)
+edge case testing (disconnected hosts, disconnected server, many users using multiple devices, multi-host) -->
 
 <!-- HostRF integration -> Host directory, device routing, dynamic reservation pulling, with activity/status (online, offline, etc.)  -->
 
-Cleanup code comments.
+<!-- Cleanup code comments. -->
 
-Update Ian with installation demo (try myself first on the NUC once!) for both server and host.
+<!-- Update Ian with installation demo (try myself first on the NUC once!) for both server and host.
 
 Nice to have (later):
 Activity/stats?
 Ability to remotely manage groups and codes as admin.
 Choice to choose usergroup/code by either int id or string name. (too lazy)
 
-todo: Specify/Pull user side --config CLI pointing to this server + debug for connection sake (later)
+todo: Specify/Pull user side --config CLI pointing to this server + debug for connection sake (later) -->
 
 
 <!-- # Remote RF Linux Server
