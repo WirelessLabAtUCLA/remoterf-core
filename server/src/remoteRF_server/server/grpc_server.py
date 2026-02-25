@@ -868,6 +868,7 @@ def help() -> None:
 
     printf("Devices:", Sty.BOLD)
     printf("  devices list             ", Sty.MAGENTA, "- List devices", Sty.DEFAULT)
+    printf("  devices status          ", Sty.MAGENTA, "- Live device online/last_seen/route", Sty.DEFAULT)
     print()
 
     printf("Reservations:", Sty.BOLD)
@@ -893,8 +894,6 @@ def help() -> None:
     printf("Host Tunnel (live):", Sty.BOLD)
     printf("  hosts status            ", Sty.MAGENTA, "- Live host online/last_seen/devices", Sty.DEFAULT)
     printf("  hosts wipe              ", Sty.MAGENTA, "- Wipe persisted host directory state (and clear in-memory)", Sty.DEFAULT)
-    printf("  devices status          ", Sty.MAGENTA, "- Live device online/last_seen/route", Sty.DEFAULT)
-    print()
 
     printf("Database:", Sty.BOLD)
     printf("  db purge                 ", Sty.MAGENTA, "- Remove all database entries", Sty.DEFAULT)
