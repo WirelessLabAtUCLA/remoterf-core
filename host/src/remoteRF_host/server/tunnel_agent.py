@@ -408,10 +408,12 @@ class HostTunnelAgent:
         self._cancel_lock = threading.Lock()
 
         self._host_id: str = ""
-        self._master_token: str = "***REMOVED***"  # do not print
+        self._master_token: str = "Master"  # do not print
 
         # Inventory (gid -> record)
         self._devices: Dict[int, Dict[str, str]] = {}
+        
+        self._host_token: str = "" 
 
     def stop(self) -> None:
         info("Stop requested.")
@@ -481,6 +483,12 @@ class HostTunnelAgent:
         if not host_id:
             _die_host_config(Path(self.cfg.host_env_path), "HOST_ID is not set (server requires a stable, explicit host id).")
         self._host_id = host_id
+        
+        # NEW: load host token (required)
+        tok = host_env.get("HOST_TOKEN", "").strip() or os.getenv("HOST_TOKEN", "").strip()
+        if not tok:
+            _die_host_config(Path(self.cfg.host_env_path), "HOST_TOKEN is not set.")
+        self._host_token = tok
 
         mt = (
             host_env.get("HOST_MASTER_TOKEN", "").strip()
@@ -511,9 +519,13 @@ class HostTunnelAgent:
     # -------- frames --------
 
     def _hello_frame(self) -> host_pb2.HostFrame:
-        return host_pb2.HostFrame(
-            hello=host_pb2.HostHello(host_id=self._host_id, version=self.cfg.version)
-        )
+        hello = host_pb2.HostHello(host_id=self._host_id, version=self.cfg.version)
+
+        # Back/forward compatible: only set if the field exists in this build.
+        if hasattr(hello, "host_token"):
+            hello.host_token = self._host_token
+
+        return host_pb2.HostFrame(hello=hello)
 
     def _heartbeat_frame(self) -> host_pb2.HostFrame:
         return host_pb2.HostFrame(

@@ -125,12 +125,21 @@ hostrf -c -a --show
 
 ### 2) Set host parameters
 
-Set hostname:
+On the remoterf server, run the below:
+
+Example uses 'lab-host-01' as the host name.
+It will return a valid command you can just copy and paste into the host CLI.
 
 ```bash
-hostrf --config --host <hostname>
+hostrf --host --token-create lab-host-01 --length 8
+```
+
+Given the parameters/tokens returned, run the below:
+
+```bash
+hostrf --config --host <hostname> \"TOKEN\"
 #example:
-hostrf -c -h host_0
+hostrf -c -h lab-host-01 "UTzhag"
 ```
 
 <!-- 164.67.195.207:61005 -->

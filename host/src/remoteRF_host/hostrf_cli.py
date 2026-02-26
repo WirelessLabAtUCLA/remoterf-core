@@ -58,25 +58,26 @@ def print_help() -> None:
         "  -a -w [-y]                           Wipe ONLY address stuff (net.env + ca.crt)\n"
         "\n"
         "Host option:\n"
-        "  -h, --host <str>                     Set host name (HOST_ID)\n"
-        "  -h --show                            Show host name\n"
-        "  -h --wipe [-y]                       Wipe ONLY host-id (host.env)\n"
+        "  --host <host_id> \"<token>\"       Set HOST_ID + HOST_TOKEN (both required)\n"
+        "  --host --show                      Show host config (host.env)\n"
+        "  --host --wipe [-y]                 Wipe ONLY host config (host.env)\n"
         "\n"
         "Device option:\n"
-        "  --device --add --pluto <gid:name:serial>  Add device (fails if gid OR serial already used)\n"
+        "  --device --add --pluto <gid:\"name\":serial>  Add device (fails if gid OR serial already used)\n"
+        "  --device --edit-name <gid> \"<new_name>\"     Edit device name (DEVICE_<gid>_NAME)\n"
         "  --device --remove <gid>                   Remove device\n"
         "  --device --show                           Show all devices\n"
         "  --device --wipe [-y]                      Wipe ONLY device stuff (devices.env)\n"
         "\n"
         "Wipe all:\n"
-        "  -w, --wipe [-y]                       Wipe ALL config\n"
+        "  -w, --wipe [-y]                      Wipe ALL config\n"
         "\n"
         "Examples:\n"
         "  hostrf -c -a 1.2.3.4:61007\n"
         "  hostrf -c -a --show\n"
         "  hostrf -c -a -w -y\n"
         "\n"
-        "  hostrf -c -h lab-host-01\n"
+        "  hostrf -c -h lab-host-01 \"my-host-token\"\n"
         "  hostrf -c -h --show\n"
         "  hostrf -c -h --wipe -y\n"
         "\n"
@@ -242,6 +243,28 @@ def _show_addr() -> int:
         print(f"  REMOTERF_CA_CERT={kv['REMOTERF_CA_CERT']}")
     return 0
 
+def _configure_host_pair(host_id: str, token: str) -> int:
+    host_id = (host_id or "").strip()
+    token = (token or "").strip()
+
+    if not host_id:
+        print("ERROR: host_id is empty", file=sys.stderr)
+        return 2
+    if not token:
+        print("ERROR: token is empty", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+
+    kv = _read_env_kv(_host_env_path())  # preserve anything else
+    kv["HOST_ID"] = host_id
+    kv["HOST_TOKEN"] = token
+    _write_env_kv(_host_env_path(), kv)
+
+    print("Configured host:")
+    print(f"  {_host_env_path()}")
+    return 0
+
 def _configure_host(host_id: str) -> int:
     host_id = (host_id or "").strip()
     if not host_id:
@@ -249,10 +272,38 @@ def _configure_host(host_id: str) -> int:
         return 2
 
     _cfg_dir().mkdir(parents=True, exist_ok=True)
-    _write_env_kv(_host_env_path(), {"HOST_ID": host_id})
+
+    kv = _read_env_kv(_host_env_path())  # preserve existing keys like HOST_TOKEN
+    kv["HOST_ID"] = host_id
+    _write_env_kv(_host_env_path(), kv)
 
     print("Configured host:")
     print(f"  {_host_env_path()}")
+    return 0
+
+def _set_token(token: str) -> int:
+    tok = (token or "").strip()
+    if not tok:
+        print("ERROR: token is empty", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+
+    p = _host_env_path()
+    kv = _read_env_kv(p)
+
+    # Optional but recommended: require HOST_ID to exist so tokens are never “floating”
+    hid = (kv.get("HOST_ID", "") or "").strip()
+    if not hid:
+        print(f"ERROR: HOST_ID is not configured yet (missing/empty {p}).", file=sys.stderr)
+        print("Run: hostrf -c -h <host_id>", file=sys.stderr)
+        return 2
+
+    kv["HOST_TOKEN"] = tok
+    _write_env_kv(p, kv)
+
+    print("Configured host token:")
+    print(f"  {p}")
     return 0
 
 def _show_host() -> int:
@@ -297,6 +348,29 @@ def _device_add_pluto(spec: str) -> int:
     _write_device_records(recs)
 
     print(f"Added device: {gid} type=pluto name={name} iio_serial={iio_serial}")
+    return 0
+
+def _device_edit_name(global_id_str: str, new_name: str) -> int:
+    try:
+        gid = int((global_id_str or "").strip())
+    except Exception:
+        print("ERROR: --edit-name expects <gid:int> <new_name>", file=sys.stderr)
+        return 2
+
+    new_name = (new_name or "").strip()
+    if not new_name:
+        print("ERROR: new_name is empty", file=sys.stderr)
+        return 2
+
+    recs = _read_device_records()
+    if gid not in recs:
+        print(f"ERROR: global_id {gid} not present; cannot edit name.", file=sys.stderr)
+        return 2
+
+    recs[gid]["NAME"] = new_name
+    _write_device_records(recs)
+
+    print(f"Updated device name: {gid} name={new_name}")
     return 0
 
 def _device_remove(global_id_str: str) -> int:
@@ -439,6 +513,7 @@ def main() -> int:
     # host scope/actions
     host_selected = False
     host_value: Optional[str] = None
+    host_token_value: Optional[str] = None
     host_show = False
     host_wipe = False
 
@@ -449,6 +524,8 @@ def main() -> int:
     device_add_type: Optional[str] = None
     device_add_spec: Optional[str] = None
     device_remove_gid: Optional[str] = None
+    device_edit_gid: Optional[str] = None
+    device_edit_name: Optional[str] = None
 
     # wipe-all (only when no scope is selected at wipe time)
     wipe_all = False
@@ -476,12 +553,23 @@ def main() -> int:
         # host scope (NOTE: -h means host ONLY inside -c mode)
         if tok in ("--host", "-host", "-h"):
             host_selected = True
-            # optional value
-            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                host_value = argv[i + 1].strip()
-                i += 2
-            else:
+
+            # If next token is missing or is another flag, we don't set values here.
+            # That allows: -h --show  /  -h --wipe
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
                 i += 1
+                continue
+
+            # Otherwise we got a host_id, and we REQUIRE a token right after it.
+            host_value = argv[i + 1].strip()
+
+            if i + 2 >= len(argv) or argv[i + 2].startswith("-"):
+                print("ERROR: --host requires BOTH <host_id> and <token> when setting host config.", file=sys.stderr)
+                print("Example: hostrf --host lab-host-01 \"snofeogs\"", file=sys.stderr)
+                return 2
+
+            host_token_value = argv[i + 2].strip()
+            i += 3
             continue
 
         # device scope
@@ -536,6 +624,15 @@ def main() -> int:
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
+        
+        if device_selected and tok in ("--edit-name", "-edit-name", "--rename", "-rename"):
+            if i + 2 >= len(argv):
+                print("ERROR: --device --edit-name expects <gid> <new_name>", file=sys.stderr)
+                return 2
+            device_edit_gid = argv[i + 1].strip()
+            device_edit_name = argv[i + 2]  # user can quote spaces in the shell
+            i += 3
+            continue
 
         if device_selected and tok in ("--remove", "-remove", "-r"):
             if i + 1 >= len(argv):
@@ -564,6 +661,16 @@ def main() -> int:
     if device_wipe and (device_add_spec is not None or device_remove_gid is not None):
         print("ERROR: cannot combine device add/remove with device wipe. Use '--device --wipe' only.", file=sys.stderr)
         return 2
+    
+    if host_selected and (host_value is not None or host_token_value is not None):
+        if not host_value or not host_token_value:
+            print("ERROR: --host set requires <host_id> and <token>", file=sys.stderr)
+            return 2
+
+        # Optional: enforce minimum token length (recommended)
+        if len(host_token_value) < 4:
+            print("ERROR: host token too short (min length = 4).", file=sys.stderr)
+            return 2
 
     # ---- wipe execution ----
     if wipe_all or addr_wipe or host_wipe or device_wipe:
@@ -605,7 +712,7 @@ def main() -> int:
         did_any = True
 
     if host_value is not None:
-        rc = _configure_host(host_value)
+        rc = _configure_host_pair(host_value, host_token_value or "")
         if rc != 0:
             return rc
         did_any = True
@@ -622,6 +729,12 @@ def main() -> int:
             return rc
         did_any = True
 
+    if device_edit_gid is not None:
+        rc = _device_edit_name(device_edit_gid, device_edit_name or "")
+        if rc != 0:
+            return rc
+        did_any = True
+        
     if not did_any:
         print_help()
         return 2
