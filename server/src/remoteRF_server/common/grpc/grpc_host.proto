@@ -7,6 +7,7 @@ import "grpc.proto"; // package remote_rf; GenericRPCRequest/Response
 message HostHello {
   string host_id = 1;
   string version = 2;
+  string host_token = 3;
 }
 
 message DeviceInfo {

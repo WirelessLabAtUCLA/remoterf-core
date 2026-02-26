@@ -1052,14 +1052,8 @@ def main() -> int:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
 
-        print("Host token created.")
-        print("")
-        # Keep output ultra copy/paste friendly:
-        print(f'HOST_TOKEN="{token}"')
-        print(f'Run on host:\n  hostrf --set-token "{token}"')
-        print("")
-        # IMPORTANT: don't use _cfg_dir()/hosts_auth.env anymore if you moved storage to db/
-        print("(Server stored verifier in: ~/.config/remoterf/db/hosts_auth.env)")  # or call a helper if you expose it
+        print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
+        print(f'To config host:\n  hostrf --config --host {host_token_create_id} "{token}"')
         return 0
 
     # ----------------

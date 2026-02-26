@@ -38,6 +38,8 @@ from .host_directory_store import (
     cfg_dir_from_file,
 )
 
+from .host_auth_token import is_host_token_valid, list_hosts
+
 # =============================================================================
 # Hardcoded logging mode (NO env vars)
 #
@@ -65,6 +67,26 @@ def _grpc_err_summary(e: grpc.RpcError) -> str:
     except Exception:
         details = ""
     return f"{name}: {details}".strip()
+
+
+def _host_status(host_id: str) -> str:
+    # Optional: for nicer errors (unknown host vs not approved vs bad token)
+    try:
+        for hid, st in list_hosts():
+            if hid == host_id:
+                return (st or "").strip().lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _auth_fail_code_and_details(host_id: str) -> tuple[str, str]:
+    st = _host_status(host_id)
+    if not st:
+        return ("UNAUTHENTICATED", f"Unknown host_id={host_id!r}. Ask admin to provision a host token.")
+    if st != "approved":
+        return ("PERMISSION_DENIED", f"host_id={host_id!r} not approved (status={st!r}).")
+    return ("UNAUTHENTICATED", f"Invalid host_token for host_id={host_id!r}.")
 
 
 class HostIdConflictError(RuntimeError):
@@ -798,10 +820,16 @@ class HostTunnelRegistry:
         with sess.inflight_lock:
             sess.inflight[req_id] = fut
 
+        try:
+            gid_u32 = int(str(device_id))  # strict mode: device_id is canonical gid string
+        except Exception:
+            gid_u32 = 0
+
         rpc_req = host_tunnel_pb2.RpcRequest(
             req_id=req_id,
-            device_id=str(device_id),
+            global_device_id=int(gid_u32),
             local_device_id=int(route.host_local_id),
+            device_id=str(device_id),
             deadline_unix_ms=int(deadline_unix_ms or 0),
         )
         rpc_req.request.CopyFrom(request)
@@ -993,7 +1021,6 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                 if registered and host_id is not None and session is not None:
                     self.registry.drop_host_if_match(host_id, session)
             except Exception:
-                # keep cleanup non-throwing
                 pass
 
             # close session object (no-op if already closed)
@@ -1004,7 +1031,6 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                 pass
 
         def _on_rpc_done():
-            # called by grpc when the stream is cancelled/closed
             try:
                 _cleanup("grpc-stream-done")
             except Exception:
@@ -1029,15 +1055,33 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                     info(f"[inbound] IN type={which} peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
 
                     if which == "hello":
+                        # Guard: only accept one HELLO per stream.
+                        if session is not None or host_id is not None:
+                            warn(f"[inbound] duplicate HELLO ignored host_id={host_id!r} peer={peer} stream_sess={stream_uuid}")
+                            continue
+
                         hello = frame.hello
-                        raw = str(getattr(hello, "host_id", "") or "")
+                        raw_id = str(getattr(hello, "host_id", "") or "")
+                        raw_tok = str(getattr(hello, "host_token", "") or "")  # NEW FIELD
 
                         try:
-                            host_id = _validate_host_id(raw)
+                            host_id = _validate_host_id(raw_id)
                         except ValueError as e:
                             error(f"[inbound] invalid hello.host_id peer={peer} stream_sess={stream_uuid} err={e}")
                             fatal["code"] = "INVALID_ARGUMENT"
                             fatal["details"] = str(e)
+                            stop.set()
+                            return
+
+                        # Auth gate: MUST pass before we register the host_id.
+                        if not is_host_token_valid(host_id, raw_tok, require_status="approved"):
+                            code, details = _auth_fail_code_and_details(host_id)
+                            error(
+                                f"[inbound] auth failed host_id={host_id!r} peer={peer} stream_sess={stream_uuid} "
+                                f"code={code} details={details}"
+                            )
+                            fatal["code"] = code
+                            fatal["details"] = details
                             stop.set()
                             return
 
@@ -1077,7 +1121,10 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     )
                                 )
                             )
-                            info(f"[inbound] sent MetaRequest req_id={mrid} ok={ok} host_id={host_id!r} stream_sess={stream_uuid}")
+                            info(
+                                f"[inbound] sent MetaRequest req_id={mrid} ok={ok} "
+                                f"host_id={host_id!r} stream_sess={stream_uuid}"
+                            )
                         except Exception:
                             exception("[inbound] FAILED sending MetaRequest")
 
@@ -1088,7 +1135,10 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())
                                 )
                             )
-                            info(f"[inbound] sent heartbeat ack ok={ok} host_id={host_id!r} stream_sess={stream_uuid}")
+                            info(
+                                f"[inbound] sent heartbeat ack ok={ok} "
+                                f"host_id={host_id!r} stream_sess={stream_uuid}"
+                            )
                         except Exception:
                             exception("[inbound] FAILED sending heartbeat ack")
 
@@ -1117,7 +1167,10 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             self.registry.announce_devices(host_id, list(ann.devices))
                             info(f"[inbound] registry announce applied host_id={host_id!r} stream_sess={stream_uuid}")
                         except ValueError as e:
-                            error(f"[inbound] INVALID_ARGUMENT device announce host_id={host_id!r} stream_sess={stream_uuid} err={e}")
+                            error(
+                                f"[inbound] INVALID_ARGUMENT device announce host_id={host_id!r} "
+                                f"stream_sess={stream_uuid} err={e}"
+                            )
                             fatal["code"] = "INVALID_ARGUMENT"
                             fatal["details"] = str(e)
                             stop.set()
@@ -1138,7 +1191,10 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     heartbeat=host_tunnel_pb2.Heartbeat(unix_ms=now_ms())
                                 )
                             )
-                            info(f"[inbound] sent heartbeat ack after announce ok={ok} host_id={host_id!r} stream_sess={stream_uuid}")
+                            info(
+                                f"[inbound] sent heartbeat ack after announce ok={ok} "
+                                f"host_id={host_id!r} stream_sess={stream_uuid}"
+                            )
                         except Exception:
                             exception("[inbound] FAILED sending heartbeat ack after announce")
 
@@ -1163,29 +1219,27 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             warn(f"[inbound] rpc_response has no inflight waiter req_id={rid} stream_sess={stream_uuid}")
 
                     elif which == "meta_response":
+                        # NEW proto: MetaResponse.meta.devices
+                        if host_id is None or session is None:
+                            warn(f"[inbound] meta_response before hello/session: ignoring peer={peer} stream_sess={stream_uuid}")
+                            continue
+
                         mr = frame.meta_response
                         ok = bool(getattr(mr, "ok", False))
                         err_s = str(getattr(mr, "error", "") or "")
                         info(f"[inbound] META_RESPONSE ok={ok} error={err_s!r} stream_sess={stream_uuid}")
 
-                        # ---- apply devices from meta_response if present ----
-                        if ok and host_id is not None:
-                            devs = []
-                            # try common field names defensively
-                            for fld in ("devices", "device_infos", "device_info"):
-                                try:
-                                    v = getattr(mr, fld, None)
-                                    if v:
-                                        devs = list(v)
-                                        break
-                                except Exception:
-                                    pass
+                        if ok:
+                            try:
+                                meta = getattr(mr, "meta", None)
+                                devs = list(getattr(meta, "devices", []) or [])
+                            except Exception:
+                                devs = []
 
                             if devs:
                                 info(f"[inbound] META_RESPONSE applying {len(devs)} devices to registry host_id={host_id!r}")
                                 try:
                                     self.registry.announce_devices(host_id, devs)
-                                    # optional: heartbeat bump
                                     self.registry.heartbeat(host_id, now_ms())
                                 except ValueError as e:
                                     error(f"[inbound] META_RESPONSE INVALID_ARGUMENT host_id={host_id!r} err={e}")
@@ -1193,10 +1247,16 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     fatal["details"] = str(e)
                                     stop.set()
                                     return
+                                except DeviceIdConflictError as e:
+                                    error(f"[inbound] META_RESPONSE DeviceIdConflictError host_id={host_id!r} err={e}")
+                                    fatal["code"] = "ALREADY_EXISTS"
+                                    fatal["details"] = str(e)
+                                    stop.set()
+                                    return
                                 except Exception:
                                     exception("[inbound] META_RESPONSE announce_devices failed")
                             else:
-                                info("[inbound] META_RESPONSE had no devices field (or empty)")
+                                info("[inbound] META_RESPONSE had no meta.devices (or empty)")
 
                     elif which == "heartbeat":
                         if session is not None and host_id is not None:
@@ -1206,8 +1266,8 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             info(f"[inbound] HEARTBEAT host_id={host_id!r} unix_ms={ms} stream_sess={stream_uuid}")
                         else:
                             warn(
-                                f"[inbound] heartbeat before hello/session: ignoring peer={peer} stream_sess={stream_uuid} "
-                                f"host_id={(host_id or '?')!r}"
+                                f"[inbound] heartbeat before hello/session: ignoring peer={peer} "
+                                f"stream_sess={stream_uuid} host_id={(host_id or '?')!r}"
                             )
 
                     elif which == "cancel":
@@ -1221,7 +1281,6 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         warn(f"[inbound] unknown frame type={which} peer={peer} stream_sess={stream_uuid}")
 
             except grpc.RpcError as e:
-                # Expected when client disconnects / network drops
                 warn(
                     f"[inbound] stream ended peer={peer} stream_sess={stream_uuid} "
                     f"host_id={host_id or '?'} grpc={_grpc_err_summary(e)}"
@@ -1230,7 +1289,6 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                 exception(f"[inbound] loop crashed peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
             finally:
                 info(f"[inbound] exiting peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
-                # This will only actually drop if we successfully registered AND the registry still points to this session.
                 _cleanup("inbound-exit")
 
         t = threading.Thread(target=inbound_loop, daemon=True, name=f"inbound_{peer_tag}")
@@ -1255,6 +1313,11 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         context.abort(grpc.StatusCode.ALREADY_EXISTS, details)
                     if code == "INVALID_ARGUMENT":
                         context.abort(grpc.StatusCode.INVALID_ARGUMENT, details)
+                    if code == "UNAUTHENTICATED":
+                        context.abort(grpc.StatusCode.UNAUTHENTICATED, details)
+                    if code == "PERMISSION_DENIED":
+                        context.abort(grpc.StatusCode.PERMISSION_DENIED, details)
+
                     context.abort(grpc.StatusCode.UNKNOWN, details)
 
                 if session is None:
@@ -1269,7 +1332,10 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                 except queue.Empty:
                     continue
                 except Exception:
-                    exception(f"[Connect] outbound queue get failed peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
+                    exception(
+                        f"[Connect] outbound queue get failed peer={peer} stream_sess={stream_uuid} "
+                        f"host_id={host_id or '?'}"
+                    )
                     continue
 
                 if out is None:
@@ -1282,14 +1348,12 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                 yield out
 
         except grpc.RpcError as e:
-            # Client went away while we were yielding
             warn(
                 f"[Connect] outbound ended peer={peer} stream_sess={stream_uuid} "
                 f"host_id={host_id or '?'} grpc={_grpc_err_summary(e)}"
             )
             _cleanup("outbound-grpc", detail=_grpc_err_summary(e))
         except GeneratorExit:
-            # Normal generator close on cancellation
             _cleanup("generator-exit")
             raise
         finally:
@@ -1373,12 +1437,14 @@ def start_host_tunnel_server(
     th.start()
     return server, th, reg
 
+
 # -----------------------------------------------------------------------------
 # Singleton registry (process-wide)
 # -----------------------------------------------------------------------------
 
 _TUNNEL_REGISTRY_LOCK = threading.Lock()
 TUNNEL_REGISTRY: Optional["HostTunnelRegistry"] = None
+
 
 def get_tunnel_registry(*, create: bool = True) -> Optional["HostTunnelRegistry"]:
     global TUNNEL_REGISTRY
@@ -1392,6 +1458,7 @@ def get_tunnel_registry(*, create: bool = True) -> Optional["HostTunnelRegistry"
         if TUNNEL_REGISTRY is None:
             TUNNEL_REGISTRY = HostTunnelRegistry()
         return TUNNEL_REGISTRY
+
 
 def set_tunnel_registry(reg: "HostTunnelRegistry") -> "HostTunnelRegistry":
     """Force the singleton to a specific instance."""
