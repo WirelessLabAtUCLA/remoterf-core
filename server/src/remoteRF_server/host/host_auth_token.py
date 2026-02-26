@@ -120,7 +120,7 @@ def _save_db_kv(kv: Dict[str, str]) -> None:
 def create_host_token(
     host_id: str,
     *,
-    length: int = 16,
+    length: int = 8,
     status: str = "approved",
     overwrite: bool = True,
 ) -> str:

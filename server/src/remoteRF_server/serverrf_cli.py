@@ -126,8 +126,8 @@ def print_help() -> None:
         "  -w | --wipe [-y]                   Wipe ONLY port config (server.env)\n"
         "\n"
         "Hosts:\n"
-        "  serverrf --host --token-create <host_id>   Create/rotate host token (prints token to copy)\n"
-        "  serverrf --host --list                     List all host token records\n"
+        "  serverrf --host --token-create <host_id> [--length <int>]   Create/rotate host token\n"
+        "  serverrf --host --show                     Show all host token records\n"
         "  serverrf --host --delete <host_id>         Delete host token record\n"
         "  serverrf --host --wipe [-y]                Wipe ALL host token records\n"
         "  serverrf --host --list --secrets           (optional) include salt/hash\n"
@@ -168,11 +168,10 @@ def print_help() -> None:
         "  serverrf -c -s\n"
         "  serverrf --config --wipe -y\n"
         "\n"
-        "  serverrf --host --token-create lab-host-01\n"
-        "  serverrf --host --list\n"
+        "  serverrf --host --token-create lab-host-01 --length 8\n"
+        "  serverrf --host --show\n"
         "  serverrf --host --delete lab-host-01\n"
         "  serverrf --host --wipe -y\n"
-        "\n"
         "\n"
         "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
         "  serverrf --device --edit-name 0 \"New Pluto Name\"\n"
@@ -722,6 +721,7 @@ def main() -> int:
     host_list = False
     host_wipe = False
     host_show_secrets = False  # optional
+    host_token_length: Optional[int] = None
 
     i = 0
     while i < len(argv):
@@ -815,6 +815,21 @@ def main() -> int:
                 print("ERROR: --token-create expects <host_id>", file=sys.stderr)
                 return 2
             host_token_create_id = argv[i + 1].strip()
+            i += 2
+            continue
+        
+        if host_mode and tok in ("--length", "-length", "--token-length"):
+            if i + 1 >= len(argv):
+                print("ERROR: --length expects <int>", file=sys.stderr)
+                return 2
+            try:
+                host_token_length = int(argv[i + 1].strip())
+            except Exception:
+                print("ERROR: --length expects an int", file=sys.stderr)
+                return 2
+            if host_token_length < 4 or host_token_length > 64:
+                print("ERROR: --length out of range (4..64)", file=sys.stderr)
+                return 2
             i += 2
             continue
 
@@ -1021,7 +1036,8 @@ def main() -> int:
             return 2
 
         try:
-            token = create_host_token(host_token_create_id, length=16, overwrite=True)
+            token_len = host_token_length if host_token_length is not None else 8
+            token = create_host_token(host_token_create_id, length=token_len, overwrite=True)
         except Exception as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
