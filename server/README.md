@@ -354,9 +354,36 @@ serverrf --host --delete host-name
 serverrf --host --wipe
 ```
 
-## Status
+## Status (Optional)
 
 If you desire to pull the server information (ie: live updates of reservation, server usage parameters, etc.)
+
+It uses GitHub Gists to push the status updates.
+
+Create public gist on your github. Keep note of the file name: (example)
+https://gist.github.com/ethange1/2a35e08a90bf88a70dfe7f42a55685ed
+
+The last one is the "GIST_ID" part of the URL, e.g. "2a35e08a90bf88a70dfe7f42a55685ed"
+
+Creating the GitHub PAT Token
+
+* GitHub → Settings
+* Developer settings
+* Personal access tokens → Fine-grained tokens
+* Generate new token
+* Set repository access to "Public Respositories"
+* Permissions: enable Gists: Read and write
+* Generate + copy the token (you only see it once)
+
+```bash
+serverrf --gist --set --id <gist_id> --file <filename>
+```
+
+Run the server normally, and you should see your gist change every minute!
+
+```bash
+serverrf -s
+```
 
 <!-- todo: -->
 <!-- Adding plutos via the CLI -->
