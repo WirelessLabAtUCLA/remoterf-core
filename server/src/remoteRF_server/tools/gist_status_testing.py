@@ -24,7 +24,7 @@ GIST_ID = "2a35e08a90bf88a70dfe7f42a55685ed"
 
 # LIMIT OF 1 per minute ! BE MINDFUL OF RATE LIMITS! 
 
-GH_TOKEN = "***REMOVED***"
+GH_TOKEN = ""
 
 FILENAME = "ucla-wlab-remoterf-status.json"
 
