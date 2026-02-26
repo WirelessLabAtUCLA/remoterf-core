@@ -49,7 +49,11 @@ from .host_auth_token import is_host_token_valid, list_hosts
 #   LOG_MODE = "ALL"   -> show everything (INFO + WARN + ERROR)
 # =============================================================================
 
-LOG_MODE = "WARN"  # <-- set to ALL while debugging session UUIDs
+LOG_MODE = "OFF"  # <-- set to ALL while debugging session UUIDs
+
+# def set_log_mode(mode: str) -> None:
+#     global LOG_MODE
+#     LOG_MODE = (mode or "").upper()[:4]  # basic sanity check
 
 _LOG_LOCK = threading.Lock()
 

@@ -354,6 +354,10 @@ serverrf --host --delete host-name
 serverrf --host --wipe
 ```
 
+## Status
+
+If you desire to pull the server information (ie: live updates of reservation, server usage parameters, etc.)
+
 <!-- todo: -->
 <!-- Adding plutos via the CLI -->
 <!-- Testing functionality (disregarding Host pipeline) -->
