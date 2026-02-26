@@ -13,28 +13,16 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Any, List, Iterator
 from contextlib import contextmanager
 
-from ..common.utils import validate_token  # your salt/hash validator
-from ..host import host_tunnel_server as hts  # gives access to hts.TUNNEL_REGISTRY
+from ..common.utils import validate_token  
+from ..host import host_tunnel_server as hts  
 
 _state_lock = threading.RLock()
 
-
-# ============================================================
-# Virtual device (server-side proxy for host-managed hardware)
-# ============================================================
-
 @dataclass(frozen=True)
 class VirtualDevice:
-    """
-    Server-side proxy for a host-managed device.
-
-    IMPORTANT:
-      - This is NOT an adi device.
-      - It only carries routing metadata so your pipeline can forward later.
-    """
     gid: int
     host_id: str
-    device_id: str  # whatever key the host directory uses (stringified)
+    device_id: str  
     label: str = ""
     serial: str = ""
     kind: str = ""
@@ -42,10 +30,8 @@ class VirtualDevice:
     def __repr__(self) -> str:
         return f"<VirtualDevice gid={self.gid} host={self.host_id} device_id={self.device_id}>"
 
-
 def is_virtual(dev: object) -> bool:
     return isinstance(dev, VirtualDevice)
-
 
 @dataclass
 class _DeviceState:
@@ -59,10 +45,8 @@ class _DeviceState:
     dtype: str
     io_lock: threading.RLock = field(default_factory=threading.RLock)
 
-
 # gid -> state
 _devices: Dict[int, _DeviceState] = {}
-
 
 def _is_connected(st: _DeviceState) -> bool:
     if st.origin == "local":
@@ -70,29 +54,16 @@ def _is_connected(st: _DeviceState) -> bool:
     # host
     return bool(st.online)
 
-
-# ============================================================
 # Host device pulling/grabbing
-# ============================================================
 
 def _get_host_registry():
     return hts.get_tunnel_registry()
-
 
 _host_sync_lock = threading.RLock()
 _host_sync_last_ms = 0
 _HOST_SYNC_TTL_MS = 500  # tune later
 
-
 def _sync_host_devices(*, force: bool = False) -> None:
-    """
-    Pull host directory and upsert host devices into _devices using their GID.
-
-    - Does NOT touch local devices (origin="local")
-    - Preserves salt/hsh/io_lock for existing entries
-    - Marks missing host devices offline (keeps their proxy for reservations)
-    - Updates devices_info/device_serialization for host devices (best-effort)
-    """
     global _host_sync_last_ms
 
     now_ms = int(time.time() * 1000)
@@ -253,9 +224,7 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 
     return out
 
-# ============================================================
 # Config paths (server-side)
-# ============================================================
 
 def _xdg_config_home() -> Path:
     return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -269,10 +238,7 @@ def _cfg_dir() -> Path:
 def _devices_env_path() -> Path:
     return _cfg_dir() / "devices.env"
 
-
-# ============================================================
 # Pluto helpers
-# ============================================================
 
 def connect_pluto(*, ip: str = "", usb: str = ""):
     try:
@@ -286,7 +252,6 @@ def connect_pluto(*, ip: str = "", usb: str = ""):
     except Exception as e:
         print(f"Pluto {ip}: {e}")
         return None
-
 
 def get_usb_port_from_serial(serial: str) -> str | None:
     serial = (serial or "").strip()
@@ -308,21 +273,16 @@ def get_usb_port_from_serial(serial: str) -> str | None:
     print(f"No device found with serial {serial}")
     return None
 
-
-# ============================================================
 # Parse devices.env
-# ============================================================
 
 _ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 _DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
-
 
 def _strip_quotes(v: str) -> str:
     v = (v or "").strip()
     if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
         return v[1:-1]
     return v
-
 
 def _read_env_file(path: Path) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -345,12 +305,9 @@ def _read_env_file(path: Path) -> Dict[str, str]:
         out[k] = v
     return out
 
-
 def _load_device_records() -> Dict[int, Dict[str, str]]:
-    """
-    Returns:
-      { gid: { "TYPE":..., "NAME":..., "IDENT_KIND":..., "IDENT":..., ... } }
-    """
+    # Returns: { gid: { "TYPE":..., "NAME":..., "IDENT_KIND":..., "IDENT":..., ... } }
+
     kv = _read_env_file(_devices_env_path())
     recs: Dict[int, Dict[str, str]] = {}
 
@@ -384,11 +341,9 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
 
     return recs
 
-
 def _connect_from_record(rec: Dict[str, str]):
-    """
-    Returns (device_obj, ident, dtype).
-    """
+    # Returns (device_obj, ident, dtype).
+   
     dtype = (rec.get("TYPE") or "").strip().lower()
     ident_kind = (rec.get("IDENT_KIND") or "").strip().lower()
     ident = (rec.get("IDENT") or "").strip()
@@ -416,10 +371,7 @@ def _connect_from_record(rec: Dict[str, str]):
 
     return (None, ident, dtype)
 
-
-# ============================================================
 # Thread-safe runtime state
-# ============================================================
 
 # legacy maps (kept for your existing server calls/UI)
 devices_info: Dict[int, str] = {}
@@ -427,7 +379,6 @@ device_serialization: Dict[int, str] = {}
 
 # master token (overrideable)
 master_token = os.getenv("REMOTERF_MASTER_TOKEN", "***REMOVED***")
-
 
 def _init_from_env() -> None:
     records = _load_device_records()
@@ -475,20 +426,9 @@ def _init_from_env() -> None:
 # initialize on import
 _init_from_env()
 
-
-# ============================================================
 # Legacy reservation helpers (master token parsing)
-# ============================================================
 
 def parse_mastertoken(token: str):
-    """
-    Matches:
-      {master_token}_0
-      {master_token}-1
-      {master_token}_0_force
-
-    Returns (device_id:int, force:bool) or None.
-    """
     if not token:
         return None
     prefix = re.escape(master_token)
@@ -500,10 +440,7 @@ def parse_mastertoken(token: str):
     force = token.endswith("_force")
     return (device_id, force)
 
-
-# ============================================================
 # Transmitter stubs (legacy)
-# ============================================================
 
 _transmitter = None
 
@@ -516,10 +453,7 @@ def terminate_transmitter():
 def get_transmitter_state() -> bool:
     return False
 
-
-# ============================================================
 # Legacy API (state-safe)
-# ============================================================
 
 def get_all_devices() -> Dict[int, Tuple[object, str, str]]:
     _sync_host_devices()
@@ -530,7 +464,6 @@ def get_all_devices() -> Dict[int, Tuple[object, str, str]]:
             if _is_connected(st):
                 out[gid] = (st.dev, st.salt, st.hsh)  # dev may be VirtualDevice for host
         return out
-
 
 def get_all_devices_str() -> Dict[int, str]:
     _sync_host_devices()
@@ -547,7 +480,6 @@ def get_all_devices_str() -> Dict[int, str]:
             out[gid] = s
 
     return dict(sorted(out.items(), key=lambda kv: int(kv[0])))
-
 
 def set_device(device_id: int, salt: str, hash: str):
     # ensure host devices are upserted so reservations can apply to them too
@@ -570,7 +502,6 @@ def set_device(device_id: int, salt: str, hash: str):
         st.salt = str(salt or "")
         st.hsh = str(hash or "")
 
-
 def device_exists(device_id: int) -> bool:
     did = int(device_id)
 
@@ -588,7 +519,6 @@ def device_exists(device_id: int) -> bool:
         return False
     return bool(reg.is_host_device(str(did)))
 
-
 def device_is_available(device_id: int) -> bool:
     _sync_host_devices()
 
@@ -597,7 +527,6 @@ def device_is_available(device_id: int) -> bool:
         if not st or not _is_connected(st):
             return False
         return (st.salt == "") and (st.hsh == "")
-
 
 def get_device_by_id(device_id: int):
     _sync_host_devices()
@@ -608,17 +537,7 @@ def get_device_by_id(device_id: int):
             return None
         return (st.dev, st.salt, st.hsh)
 
-
 def get_device(*, api_token: str):
-    """
-    Legacy behavior preserved:
-      - master_token returns first available device object
-      - master_token_<id>[_force] selects a specific device
-      - otherwise validate against per-device salt/hash (set via reservations)
-    Returns the connected device object or None.
-
-    NOTE: This does NOT serialize hardware I/O; use acquire_device() for that.
-    """
     if not api_token:
         return None
 
@@ -662,25 +581,10 @@ def get_device(*, api_token: str):
 
     return None
 
-
-# ============================================================
 # Per-device I/O locking (true concurrency support)
-# ============================================================
 
 @contextmanager
 def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
-    """
-    Thread-safe way to use a device:
-      with acquire_device(token) as (gid, dev):
-          ...
-
-    - Selects the device using the SAME logic as get_device()
-    - Then acquires that device's io_lock
-    - Yields (gid, dev)
-
-    NOTE:
-      dev can be an adi device (local) OR a VirtualDevice (host).
-    """
     if not api_token:
         raise RuntimeError("missing api_token")
 
@@ -733,10 +637,7 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
     finally:
         lock.release()
 
-
-# ============================================================
 # Optional: reload device definitions (atomic swap)
-# ============================================================
 
 def reload_devices() -> None:
     """
@@ -798,7 +699,6 @@ def reload_devices() -> None:
 
     # refresh host online/offline status after reload (best-effort)
     _sync_host_devices(force=True)
-
 
 def set_pluto(ip: str = "192.168.2.1"):
     # kept for compatibility (no-op)

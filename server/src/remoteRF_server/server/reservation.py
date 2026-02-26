@@ -7,9 +7,6 @@ from pathlib import Path
 from functools import wraps
 import json
 
-
-
-
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
 from .acc_perms import perms, userperms

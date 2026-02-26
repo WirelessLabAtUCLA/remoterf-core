@@ -1,9 +1,7 @@
-# from ....client import * 
 from ...server.device_manager import set_pluto, get_device as device_pluto
 from ...common.utils.process_arg import unmap_arg, map_arg
-# from ...common.grpc import grpc_pb2
         
-class PlutoServer: # server
+class PlutoServer: 
     
     @staticmethod
     def handle_call(*, function_name, args):
@@ -21,11 +19,6 @@ class PlutoServer: # server
                 PlutoServer.set(function_name=function_name, value=args[function_name], token=unmap_arg(args['a']))
                 
             elif function_type in ("CALL0", "CALL1"):
-                # One function to handle both zero-arg and one-arg calls
-                # print(f'CALL: {function_name}, ARGS: {args}')
-                
-                # print(f'CALL: {function_name}, ARGS: {args}')
-                
                 return PlutoServer.call_func(
                     function_name=function_name,
                     function_type=function_type,
@@ -33,21 +26,12 @@ class PlutoServer: # server
                     token=unmap_arg(args['a'])
                 )
             else:
-                # You can decide how to handle unknown function types
                 raise ValueError(f"Unknown function_type: {function_type}. Is that a function you can call?")
-                
-            # else:
-                # return PlutoServer.other(function_name=function_name, args=args)
         except Exception as e:
-            # print(f"UE: Pluto_server ln:23: {e}")
             return {function_name:map_arg('None'), "Error":map_arg(f'{e}')}
         
     @staticmethod
     def call_func(*, function_name, function_type, args, token):
-        """
-        Calls a device method with either 0 or 1 argument.
-        function_type can be CALL0 or CALL1.
-        """
         device = device_pluto(api_token=token)
         if device is None:
             return {function_name: map_arg('None'), "UE": map_arg("API Token Invalid")}

@@ -20,12 +20,8 @@ from concurrent import futures
 
 import grpc
 
-# Your existing GenericRPC schema compiled to python.
-from ..common.grpc import grpc_pb2 as generic_pb2  # type: ignore
-
-# Your existing map_arg helper that produces generic_pb2.Argument
-from ..common.utils.process_arg import map_arg  # type: ignore
-
+from ..common.utils.process_arg import map_arg  
+from ..common.grpc import grpc_pb2 as generic_pb2  
 from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
 from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
 
@@ -49,16 +45,9 @@ from .host_auth_token import is_host_token_valid, list_hosts
 #   LOG_MODE = "ALL"   -> show everything (INFO + WARN + ERROR)
 # =============================================================================
 
-LOG_MODE = "OFF"  # <-- set to ALL while debugging session UUIDs
-
-# def set_log_mode(mode: str) -> None:
-#     global LOG_MODE
-#     LOG_MODE = (mode or "").upper()[:4]  # basic sanity check
-
+LOG_MODE = "OFF" 
 _LOG_LOCK = threading.Lock()
-
 HOST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")  # adjust if you want
-
 
 def _grpc_err_summary(e: grpc.RpcError) -> str:
     try:
@@ -72,9 +61,7 @@ def _grpc_err_summary(e: grpc.RpcError) -> str:
         details = ""
     return f"{name}: {details}".strip()
 
-
 def _host_status(host_id: str) -> str:
-    # Optional: for nicer errors (unknown host vs not approved vs bad token)
     try:
         for hid, st in list_hosts():
             if hid == host_id:
@@ -83,7 +70,6 @@ def _host_status(host_id: str) -> str:
         pass
     return ""
 
-
 def _auth_fail_code_and_details(host_id: str) -> tuple[str, str]:
     st = _host_status(host_id)
     if not st:
@@ -91,7 +77,6 @@ def _auth_fail_code_and_details(host_id: str) -> tuple[str, str]:
     if st != "approved":
         return ("PERMISSION_DENIED", f"host_id={host_id!r} not approved (status={st!r}).")
     return ("UNAUTHENTICATED", f"Invalid host_token for host_id={host_id!r}.")
-
 
 class HostIdConflictError(RuntimeError):
     def __init__(self, host_id: str, *, age_ms: int, replace_after_ms: int) -> None:
@@ -102,7 +87,6 @@ class HostIdConflictError(RuntimeError):
         self.host_id = host_id
         self.age_ms = age_ms
         self.replace_after_ms = replace_after_ms
-
 
 def _validate_host_id(raw: str) -> str:
     hid = (raw or "").strip()
@@ -117,14 +101,12 @@ def _validate_host_id(raw: str) -> str:
         )
     return hid
 
-
 def _ts() -> str:
     t = time.time()
     sec = int(t)
     ms = int((t - sec) * 1000)
     lt = time.localtime(sec)
     return time.strftime("%H:%M:%S", lt) + f".{ms:03d}"
-
 
 def _should_log(level: str) -> bool:
     lvl = (level or "").upper()
@@ -137,7 +119,6 @@ def _should_log(level: str) -> bool:
         return lvl in ("INFO", "WARN", "ERROR")
     return lvl in ("WARN", "ERROR")
 
-
 def _log(level: str, msg: str) -> None:
     if not _should_log(level):
         return
@@ -145,37 +126,28 @@ def _log(level: str, msg: str) -> None:
     with _LOG_LOCK:
         print(f"{_ts()} {level:<5} [{tn}] hostrf.host_tunnel_server: {msg}", file=sys.stderr, flush=True)
 
-
 def info(msg: str) -> None:
     _log("INFO", msg)
-
 
 def warn(msg: str) -> None:
     _log("WARN", msg)
 
-
 def error(msg: str) -> None:
     _log("ERROR", msg)
-
 
 def exception(msg: str) -> None:
     _log("ERROR", msg)
     traceback.print_exc(limit=80, file=sys.stderr)
 
-
-# =============================================================================
 # Helpers
-# =============================================================================
 
 def host_key(host_id: str) -> str:
     h = hashlib.sha256((host_id or "").encode("utf-8")).hexdigest()
     return h[:16]  # short stable key
 
-
 def _safe_thread_tag(s: str) -> str:
     s = s or "peer"
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", s)[:64]
-
 
 def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
     if src_map is None:
@@ -187,10 +159,7 @@ def _copy_argument_map(dst_map: Any, src_map: Any) -> None:
         for k, v in dict(src_map).items():
             dst_map[str(k)].CopyFrom(v)
 
-
-# =============================================================================
 # Types
-# =============================================================================
 
 @dataclass(frozen=True)
 class DeviceRoute:
@@ -213,10 +182,7 @@ class DeviceStatus:
     online: bool = False
     last_seen_ms: int = 0
 
-
-# =============================================================================
 # Session
-# =============================================================================
 
 class HostSession:
     def __init__(self, host_id: str, *, peer: str = "<?>", session_uuid: str = "", outbound_max: int = 2048) -> None:
@@ -274,23 +240,9 @@ class HostSession:
 
         info(f"[session] closed host_id={self.host_id!r} sess={self.session_uuid}")
 
-
-# =============================================================================
 # Registry
-# =============================================================================
 
 class HostTunnelRegistry:
-    """
-    Persistent host/device directory + live sessions.
-
-    Persists under <repo_root>/.config/:
-      - host_directory.env        (append-only CSV lists)
-      - host_directory_meta.env   (upsert metadata; never deletes keys)
-
-    Enforces:
-      - device_id is globally unique across hosts (rejects conflicting host announce)
-      - STRICT MODE: device_id MUST be a canonical decimal gid string ("10", not "010", not "pluto:...")
-    """
 
     def __init__(self, *, active_cache_ttl_ms: int = 250, dir_cache_ttl_ms: int = 1000) -> None:
         self._lock = threading.RLock()
@@ -325,9 +277,7 @@ class HostTunnelRegistry:
         info(f"[registry] init cfg_dir={cfg}")
         self._load_persisted()
 
-    # ---------------------------
     # caching helpers
-    # ---------------------------
 
     def _invalidate_caches_locked(self) -> None:
         self._active_hosts_cache_ts_ms = 0
@@ -339,9 +289,7 @@ class HostTunnelRegistry:
         self._active_hosts_cache = {hid for hid, sess in self._hosts.items() if sess is not None and sess.alive}
         self._active_hosts_cache_ts_ms = now
 
-    # ---------------------------
     # persistence load
-    # ---------------------------
 
     def _load_persisted(self) -> None:
         kv_lists = self._env_lists.read_kv()
@@ -424,9 +372,7 @@ class HostTunnelRegistry:
             f"hosts={len(self._host_status)} devices={len(self._device_status)}"
         )
 
-    # ---------------------------
     # persistence write helpers
-    # ---------------------------
 
     def _persist_host_meta(self, host_id: str, *, host_name: str = "", platform: str = "", version: str = "") -> None:
         hk = host_key(host_id)
@@ -478,9 +424,7 @@ class HostTunnelRegistry:
             f"label={label!r} serial={serial!r} kind={kind!r}"
         )
 
-    # ---------------------------
     # directory/status mutators
-    # ---------------------------
 
     def register_host(self, host_id: str, session: HostSession, *, replace_if_stale_ms: int = 15_000) -> None:
         info(
@@ -544,11 +488,6 @@ class HostTunnelRegistry:
         info(f"[registry] drop_host done: host_id={host_id!r} online=False")
 
     def drop_host_if_match(self, host_id: str, session: HostSession) -> bool:
-        """
-        Like drop_host(), but only drops if the currently-registered session for host_id
-        is EXACTLY 'session' (object identity). Prevents an older stale session's cleanup
-        from dropping a newer replacement session.
-        """
         with self._lock:
             cur = self._hosts.get(host_id)
             if cur is not session:
@@ -701,9 +640,7 @@ class HostTunnelRegistry:
 
         info(f"[registry] announce_devices done: host_id={host_id!r} routes={len(self._routes)}")
 
-    # ---------------------------
     # FAST PATHS (use per-RPC)
-    # ---------------------------
 
     def is_host_device(self, device_id: str) -> bool:
         did = (device_id or "").strip()
@@ -732,9 +669,7 @@ class HostTunnelRegistry:
             r = self._routes.get(did)
             return r.host_id if r else None
 
-    # ---------------------------
     # UI/diagnostics snapshots
-    # ---------------------------
 
     def device_directory_cached(self, *, ttl_ms: Optional[int] = None) -> Dict[str, Tuple[str, Any, bool]]:
         now = now_ms()
@@ -765,9 +700,7 @@ class HostTunnelRegistry:
             self._dir_cache_ts_ms = now
             return dict(out)
 
-    # ---------------------------
     # misc accessors
-    # ---------------------------
 
     def list_routes(self) -> Dict[str, Tuple[str, int]]:
         with self._lock:
@@ -781,9 +714,7 @@ class HostTunnelRegistry:
         with self._lock:
             return dict(self._device_status)
 
-    # ---------------------------
     # forwarding
-    # ---------------------------
 
     def _get_session_and_route(self, device_id: str) -> Tuple[HostSession, DeviceRoute]:
         with self._lock:
@@ -921,10 +852,7 @@ class HostTunnelRegistry:
             cancel_on_timeout=cancel_on_timeout,
         )
 
-
-# =============================================================================
 # Convenience forwarders
-# =============================================================================
 
 def handle_host_device(
     registry: HostTunnelRegistry,
@@ -948,7 +876,6 @@ def handle_host_device(
     )
     return dict(resp.results)
 
-
 def handle_host_device_request(
     registry: HostTunnelRegistry,
     *,
@@ -969,10 +896,7 @@ def handle_host_device_request(
         cancel_on_timeout=True,
     )
 
-
-# =============================================================================
 # Servicer
-# =============================================================================
 
 class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
     def __init__(self, registry: HostTunnelRegistry) -> None:
@@ -1364,10 +1288,7 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
             _cleanup("connect-finally")
             info(f"[Connect] stream ended peer={peer} stream_sess={stream_uuid} host_id={host_id or '?'}")
 
-
-# =============================================================================
 # Credentials + server start
-# =============================================================================
 
 def build_server_credentials(
     *,
@@ -1441,14 +1362,10 @@ def start_host_tunnel_server(
     th.start()
     return server, th, reg
 
-
-# -----------------------------------------------------------------------------
 # Singleton registry (process-wide)
-# -----------------------------------------------------------------------------
 
 _TUNNEL_REGISTRY_LOCK = threading.Lock()
 TUNNEL_REGISTRY: Optional["HostTunnelRegistry"] = None
-
 
 def get_tunnel_registry(*, create: bool = True) -> Optional["HostTunnelRegistry"]:
     global TUNNEL_REGISTRY
@@ -1462,7 +1379,6 @@ def get_tunnel_registry(*, create: bool = True) -> Optional["HostTunnelRegistry"
         if TUNNEL_REGISTRY is None:
             TUNNEL_REGISTRY = HostTunnelRegistry()
         return TUNNEL_REGISTRY
-
 
 def set_tunnel_registry(reg: "HostTunnelRegistry") -> "HostTunnelRegistry":
     """Force the singleton to a specific instance."""

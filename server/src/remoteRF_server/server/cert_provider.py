@@ -1,20 +1,4 @@
 # cert_provider.py
-"""
-RemoteRF Certificate Provider (bootstrap service)
-
-Updated per request:
-- Hostname/port are not hardcoded at module scope.
-- Caller (e.g., grpc_server.py) provides host/port via start_cert_provider(host=..., port=...).
-
-Behavior:
-- Serves the public CA cert (ca.crt) over a separate TCP port.
-- If the client speaks HTTP (GET /ca.crt), responds with HTTP 200 + PEM.
-- Otherwise, on any TCP connect, sends PEM bytes and closes.
-
-IMPORTANT:
-- This must only ever serve PUBLIC material (ca.crt).
-- Never serve ca.key / server.key.
-"""
 
 from __future__ import annotations
 
@@ -27,35 +11,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 CERT_NAME = "server.crt"
-
-# ---------------------------------------------------------------------
-# Path resolution / loading
-# ---------------------------------------------------------------------
-# def resolve_ca_path(ca_path: Optional[str | Path] = None) -> Path:
-#     """
-#     Resolve the CA certificate path.
-
-#     If `ca_path` is provided, uses it (expanded).
-#     Otherwise, tries common repo-relative locations.
-#     """
-#     if ca_path is not None:
-#         p = Path(ca_path).expanduser().resolve()
-#         if not p.exists():
-#             raise FileNotFoundError(f"CA cert not found at: {p}")
-#         return p
-
-#     here = Path(__file__).resolve()
-#     candidates = [
-#         here.parent / "certs" / CERT_NAME,              # if cert_provider.py is in core/
-#         here.parent.parent / "core" / "certs" / CERT_NAME,
-#         here.parent.parent / "certs" / CERT_NAME,
-#     ]
-#     for p in candidates:
-#         if p.exists():
-#             return p
-#     raise FileNotFoundError(
-#         f"Could not find {CERT_NAME}. Tried:\n  " + "\n  ".join(str(c) for c in candidates)
-#     )
 
 def resolve_ca_path(ca_path: Optional[str | Path] = None) -> Path:
     """
@@ -107,10 +62,8 @@ def sha256_fingerprint_pem(pem_bytes: bytes) -> str:
     h = hashlib.sha256(pem_bytes).hexdigest()
     return ":".join(h[i:i+2] for i in range(0, len(h), 2))
 
-
-# ---------------------------------------------------------------------
 # Server implementation
-# ---------------------------------------------------------------------
+
 class _CertProviderHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         try:
@@ -193,14 +146,6 @@ def start_cert_provider(
     ca_path: Optional[str | Path] = None,
     daemon: bool = True,
 ) -> Tuple[_ThreadingCertServer, threading.Thread]:
-    """
-    Start the cert provider in a background thread.
-
-    Caller provides host/port (keeps config centralized in grpc_server.py).
-
-    Returns:
-      (server, thread)
-    """
     ca_pem = load_ca_pem(ca_path)
     server = _ThreadingCertServer((host, port), ca_pem=ca_pem)
 
@@ -208,15 +153,12 @@ def start_cert_provider(
     t.start()
     return server, t
 
-
 def stop_cert_provider(server: _ThreadingCertServer) -> None:
     server.shutdown()
     server.server_close()
 
+# Optional standalone mode 
 
-# ---------------------------------------------------------------------
-# Optional standalone mode for local testing
-# ---------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="RemoteRF CA certificate bootstrap provider.")
     parser.add_argument("--host", required=True)

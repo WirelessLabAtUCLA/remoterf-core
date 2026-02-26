@@ -1,4 +1,5 @@
 # remoteRF_server/host/host_auth_token.py
+
 from __future__ import annotations
 
 import os
@@ -26,7 +27,6 @@ def _validate_host_id(raw: str) -> str:
     return hid
 
 def _hosts_auth_path() -> Path:
-    # Now uses your unified remoterf root layout
     return get_db_dir() / "hosts_auth.env"
 
 def _utc_now_s() -> str:
@@ -35,10 +35,7 @@ def _utc_now_s() -> str:
 def _host_key(host_id: str) -> str:
     return hashlib.sha256(host_id.encode("utf-8")).hexdigest()[:16]
 
-
-# -----------------------------
 # Minimal env read/write
-# -----------------------------
 
 def _read_env_kv(path: Path) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -65,10 +62,7 @@ def _write_env_kv(path: Path, kv: Dict[str, str]) -> None:
             lines.append(f"{k}={v}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-
-# -----------------------------
 # Cached DB load (thread-safe)
-# -----------------------------
 
 _DB_LOCK = threading.RLock()
 _DB_CACHE_MTIME: float = 0.0
@@ -112,10 +106,7 @@ def _save_db_kv(kv: Dict[str, str]) -> None:
         _DB_CACHE = dict(kv)
         _DB_CACHE_MTIME = mtime
 
-
-# -----------------------------
 # Public API
-# -----------------------------
 
 def create_host_token(
     host_id: str,
@@ -124,12 +115,6 @@ def create_host_token(
     status: str = "approved",
     overwrite: bool = True,
 ) -> str:
-    """
-    Create (or rotate) a token bound to host_id.
-
-    Returns the *plaintext* token (print it once / paste into host.env).
-    Stores only salt+hash in hosts_auth.env.
-    """
     hid = _validate_host_id(host_id)
     hk = _host_key(hid)
 
@@ -166,9 +151,6 @@ def set_host_status(host_id: str, status: str) -> None:
     _save_db_kv(kv)
 
 def is_host_token_valid(host_id: str, token: str, *, require_status: str = "approved") -> bool:
-    """
-    True iff host_id exists, status matches, and token validates.
-    """
     try:
         hid = _validate_host_id(host_id)
     except Exception:
@@ -200,9 +182,6 @@ def is_host_token_valid(host_id: str, token: str, *, require_status: str = "appr
         return False
 
 def list_hosts() -> List[Tuple[str, str]]:
-    """
-    Returns list of (host_id, status).
-    """
     kv = _load_db_kv()
     out: List[Tuple[str, str]] = []
     # Scan by HOST_<hk>_ID keys
@@ -228,14 +207,7 @@ def _host_record_keys(hk: str) -> list[str]:
         f"HOST_{hk}_UPDATED_UTC",
     ]
 
-
 def list_host_token_records(*, include_secrets: bool = False) -> list[dict[str, str]]:
-    """
-    List all host token records.
-
-    NOTE: plaintext tokens are NOT stored, so they cannot be displayed.
-    include_secrets=True will include SALT/HASH (still not plaintext token).
-    """
     kv = _load_db_kv()
     out: list[dict[str, str]] = []
 
@@ -265,12 +237,7 @@ def list_host_token_records(*, include_secrets: bool = False) -> list[dict[str, 
     out.sort(key=lambda r: r.get("host_id", ""))
     return out
 
-
 def delete_host_token(host_id: str) -> bool:
-    """
-    Delete the stored token verifier (salt/hash/status/etc) for host_id.
-    Returns True if something was removed.
-    """
     hid = _validate_host_id(host_id)
     hk = _host_key(hid)
 
@@ -289,12 +256,7 @@ def delete_host_token(host_id: str) -> bool:
         _save_db_kv(kv)
     return removed
 
-
 def wipe_all_host_tokens() -> int:
-    """
-    Wipe ALL host token records from hosts_auth.env.
-    Returns the number of host records removed (counted by HOST_<hk>_ID entries).
-    """
     kv = _load_db_kv()
 
     # Count how many hosts are present
@@ -312,11 +274,7 @@ def wipe_all_host_tokens() -> int:
     _save_db_kv(kv)
     return len(host_keys)
 
-
 def show_host_tokens(*, include_secrets: bool = False, file=sys.stdout) -> None:
-    """
-    Pretty-print host token records to a file-like.
-    """
     recs = list_host_token_records(include_secrets=include_secrets)
     if not recs:
         print(f"No host tokens found ({_hosts_auth_path()}).", file=file)

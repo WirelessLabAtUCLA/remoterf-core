@@ -10,27 +10,19 @@ from typing import Dict, List, Optional
 
 _ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 
-
 def now_ms() -> int:
     import time
     return int(time.time() * 1000)
 
-
 def repo_root_from_file(file: str) -> Path:
-    """
-    Find repo root by locating 'src' in parents.
-    Fallback: go up 3 levels.
-    """
     p = Path(file).resolve()
     for parent in p.parents:
         if parent.name == "src":
             return parent.parent
     return p.parents[3]
 
-
 def cfg_dir_from_file(file: str) -> Path:
     return repo_root_from_file(file) / ".config"
-
 
 def sanitize_env_key(s: str) -> str:
     s = (s or "").strip().upper()
@@ -38,17 +30,14 @@ def sanitize_env_key(s: str) -> str:
     s = re.sub(r"_+", "_", s)
     return s[:120]
 
-
 def strip_quotes(v: str) -> str:
     v = (v or "").strip()
     if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
         return v[1:-1]
     return v
 
-
 def csv_split(v: str) -> List[str]:
     return [x.strip() for x in (v or "").split(",") if x.strip()]
-
 
 class DeviceIdConflictError(RuntimeError):
     def __init__(self, *, device_id: str, existing_host: str, new_host: str) -> None:
@@ -59,14 +48,7 @@ class DeviceIdConflictError(RuntimeError):
         self.existing_host = existing_host
         self.new_host = new_host
 
-
 class EnvStore:
-    """
-    Minimal .env store:
-      - append_to_csv_list(): append-only semantics for CSV list keys
-      - upsert_kv(): update/insert scalar keys (never deletes)
-      - set_kv_if_absent(): only writes if key doesn't exist
-    """
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
