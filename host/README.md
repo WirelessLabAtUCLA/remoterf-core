@@ -131,7 +131,7 @@ Example uses 'lab-host-01' as the host name.
 It will return a valid command you can just copy and paste into the host CLI.
 
 ```bash
-hostrf --host --token-create lab-host-01 --length 8
+serverrf --host --token-create lab-host-01 --length 8
 ```
 
 Given the parameters/tokens returned, run the below:
