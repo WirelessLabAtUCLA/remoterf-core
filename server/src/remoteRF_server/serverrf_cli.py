@@ -157,7 +157,7 @@ def print_help() -> None:
         "  -v, --verbose       With --show-certs, also print x509 details (requires openssl)\n"
         "\n"
         "Examples:\n"
-        "  serverrf --gen-certs 192.168.1.24 --dns rrf2 --dns rrf2.local --force\n"
+        # "  serverrf --gen-certs 192.168.1.24 --dns rrf2 --dns rrf2.local --force\n"
         "  serverrf --gen-certs 192.168.1.50 --days 3650 --force\n"
         "  serverrf --show-certs -v\n"
         "  serverrf --wipe-certs -y\n"
@@ -168,7 +168,7 @@ def print_help() -> None:
         "  serverrf -c -s\n"
         "  serverrf --config --wipe -y\n"
         "\n"
-        "  serverrf --host --token-create lab-host-01 --length 8\n"
+        "  serverrf --host --token-create lab-host-01 --length 8 --force\n"
         "  serverrf --host --show\n"
         "  serverrf --host --delete lab-host-01\n"
         "  serverrf --host --wipe -y\n"
@@ -722,6 +722,7 @@ def main() -> int:
     host_wipe = False
     host_show_secrets = False  # optional
     host_token_length: Optional[int] = None
+    host_force = False  # host-only overwrite/rotate
 
     i = 0
     while i < len(argv):
@@ -855,6 +856,11 @@ def main() -> int:
             host_show_secrets = True
             i += 1
             continue
+        
+        if host_mode and tok in ("--force", "-f", "--rotate"):
+            host_force = True
+            i += 1
+            continue
 
         # device verbs/options
         if device_mode and tok in ("--show", "-show", "-s"):
@@ -977,6 +983,10 @@ def main() -> int:
         print("ERROR: --host cannot be combined with device/config/cert commands. Run them separately.", file=sys.stderr)
         return 2
     
+    if host_force and host_token_create_id is None:
+        print("ERROR: --force is only valid with --host --token-create <host_id>", file=sys.stderr)
+        return 2
+    
     if host_mode:
         actions = int(host_token_create_id is not None) + int(host_delete_id is not None) + int(host_list) + int(host_wipe)
         if actions == 0:
@@ -1037,16 +1047,16 @@ def main() -> int:
 
         try:
             token_len = host_token_length if host_token_length is not None else 8
-            token = create_host_token(host_token_create_id, length=token_len, overwrite=True)
+            token = create_host_token(host_token_create_id, length=token_len, overwrite=host_force)
         except Exception as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 2
 
         print("Host token created.")
         print("")
-        print("Paste into the host's .config/host.env:")
-        print(f'HOST_ID="{host_token_create_id}"')
+        # Keep output ultra copy/paste friendly:
         print(f'HOST_TOKEN="{token}"')
+        print(f'Run on host:\n  hostrf --set-token "{token}"')
         print("")
         # IMPORTANT: don't use _cfg_dir()/hosts_auth.env anymore if you moved storage to db/
         print("(Server stored verifier in: ~/.config/remoterf/db/hosts_auth.env)")  # or call a helper if you expose it

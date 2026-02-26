@@ -140,7 +140,7 @@ def create_host_token(
 
     # If not overwriting and host exists, refuse
     if not overwrite and kv.get(f"HOST_{hk}_ID", "").strip():
-        raise ValueError(f"Host token already exists for host_id={hid!r} (use overwrite=True to rotate)")
+        raise ValueError(f"Host token already exists for host_id={hid!r} (use --force to overwrite)")
 
     kv[f"HOST_{hk}_ID"] = hid
     kv[f"HOST_{hk}_SALT"] = salt
