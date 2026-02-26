@@ -270,64 +270,90 @@ Note that all device and server config parameters need a 'restart' to take affec
 
 ## Server Runtime Configuration
 
-After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. This interactive shell is used for runtime administration: managing users, devices, reservations, user groups, and enrollment codes.
+After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. This interactive shell is used for runtime administration: users, devices, reservations, user groups, enrollment codes, and live host-tunnel state.
 
 ---
 
-#### Server
+### Server
 
-* `help` / `h` — Show help
-* `clear` — Clear the screen
-* `status` — Show server status (uptime / bind info)
-* `quit` / `exit` — Exit the server shell
+* `help` / `h` / `?` — Show help
+* `clear` / `cls` — Clear the screen
+* `status` / `server status` — Show server status (start time / uptime / bind + cert ports)
+* `quit` / `exit` / `q` — Exit the server shell
 
 ---
 
-#### Users
+### Users
 
 * `users list` — List all accounts
-* `users manage` — Manage a specific user 
+* `users manage` — Manage a specific user (perms / delete / reservations)
 * `users purge` — Delete **all** users
+* `users perms` — Show permissions table
 
 ---
 
-#### Devices
+### Devices
 
 * `devices list` — List all devices
+* `devices status` — Show live device routing/online/last_seen from the Host Tunnel
 
 ---
 
-#### Reservations
+### Reservations
 
 * `reservations list` — List all reservations
 * `reservations purge` — Delete **all** reservations
 
 ---
 
-#### Groups
+### Groups
 
 * `groups list` — List user groups
 * `groups create` — Create a user group *(interactive)*
 * `groups edit` — Edit a user group *(interactive)*
 * `groups delete` — Delete a user group *(interactive)*
-* `groups csv` - Export all groups as a CSV
+* `groups csv` — Export all groups as a CSV
 
 ---
 
-#### Enrollment Codes
+### Enrollment Codes
 
 * `codes list` — List enrollment codes
 * `codes create` — Create enrollment codes *(interactive)*
 * `codes delete` — Delete an enrollment code *(interactive)*
-* `codes csv` - Export all codes as a CSV
+* `codes csv` — Export all codes as a CSV
 
 ---
 
-#### Database
+### Host Tunnel
+
+* `hosts status` — Show live host online/last_seen and associated devices
+* `hosts wipe` — Wipe persisted host directory state and clear in-memory registry *(prompts for confirmation)*
+* `hosts wipe -y` / `hosts wipe --yes` — Same as above, no prompt
+
+---
+
+### Database
 
 * `db purge` — Remove all database entries
 
----
+
+## Adding Hosts
+
+You will need, for each host, to run this first on the server CLI:
+
+```bash
+serverrf --host --token-create host-name --length 8
+```
+
+Which will return the corresponding command to run on the respective host to give that host access to the server. Below are some other related commands (ie: 'whitelists' hosts)
+
+```bash
+serverrf --host --show
+serverrf --host --delete host-name
+serverrf --host --wipe
+```
+
 <!-- todo: -->
 <!-- Adding plutos via the CLI -->
 <!-- Testing functionality (disregarding Host pipeline) -->
