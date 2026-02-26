@@ -1,67 +1,128 @@
 # remoteRF_server/tools/gist_status.py
 
+from __future__ import annotations
+
 import json
 import os
+import sys
 import time
 import threading
-import requests  # pip install requests
+from pathlib import Path
+from typing import Dict, Optional
 
-# Create public gist on your github. Keep note of the file name
-# https://gist.github.com/ethange1/2a35e08a90bf88a70dfe7f42a55685ed
+import requests
 
-# The last one is the "GIST_ID" part of the URL, e.g. "2a35e08a90bf88a70dfe7f42a55685ed"
 
-GIST_ID = "2a35e08a90bf88a70dfe7f42a55685ed"      
+def _xdg_config_home() -> Path:
+    return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
 
-# Create the GITHUB_TOKEN (so your server can update it)
-# GitHub → Settings
-# Developer settings
-# Personal access tokens → Fine-grained tokens
-# Generate new token
-# Set repository access to "Public Respositories"
-# Permissions: enable Gists: Read and write
-# Generate + copy the token (you only see it once)
 
-# LIMIT OF 1 per minute ! BE MINDFUL OF RATE LIMITS! 
+def _cfg_dir() -> Path:
+    return Path(os.getenv("REMOTERF_CONFIG_DIR", _xdg_config_home() / "remoterf"))
 
-GH_TOKEN = ""
 
-FILENAME = "ucla-wlab-remoterf-status.json"
+def _read_env_kv(path: Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
 
-# HOW TO PULL! https://gist.githubusercontent.com/ethange1/2a35e08a90bf88a70dfe7f42a55685ed/raw/ucla-wlab-remoterf-status.json
+
+def _load_gist_env() -> tuple[str, str, str]:
+    p = _cfg_dir() / "gist.env"
+    kv = _read_env_kv(p)
+
+    gist_id = kv.get("STATUS_GIST_ID", "").strip()
+    token = kv.get("GITHUB_TOKEN", "").strip()
+    filename = kv.get("STATUS_GIST_FILENAME", "").strip()
+
+    missing = []
+    if not gist_id:
+        missing.append("STATUS_GIST_ID")
+    if not token:
+        missing.append("GITHUB_TOKEN")
+    if not filename:
+        missing.append("STATUS_GIST_FILENAME")
+
+    if missing:
+        print(f"[gist_status] Missing {', '.join(missing)} in {p}", file=sys.stderr)
+        print(
+            "[gist_status] Fix: run:\n"
+            "  serverrf --gist --set --id <gist_id> --file <filename>\n"
+            "Or manually create gist.env with those keys.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    return gist_id, token, filename
+
 
 def build_status() -> dict:
-    return {
-        "updated_unix": int(time.time()),
-    }
+    return {"updated_unix": int(time.time())}
 
-def push_gist(payload: dict) -> None:
-    url = f"https://api.github.com/gists/{GIST_ID}"
+
+def push_gist(*, gist_id: str, gh_token: str, filename: str, payload: dict) -> None:
+    url = f"https://api.github.com/gists/{gist_id}"
     headers = {
-        "Authorization": f"Bearer {GH_TOKEN}",
+        "Authorization": f"Bearer {gh_token}",
         "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
     body = {
         "files": {
-            FILENAME: {
+            filename: {
                 "content": json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
             }
         }
     }
     r = requests.patch(url, headers=headers, json=body, timeout=10)
-    print(r.status_code, r.text)
-    print("Retry-After:", r.headers.get("Retry-After"))
-    print("X-RateLimit-Remaining:", r.headers.get("X-RateLimit-Remaining"))
     r.raise_for_status()
 
-def status_publisher_loop(period_sec: int = 30) -> None:
+
+def _publisher_loop(period_sec: int) -> None:
+    gist_id, gh_token, filename = _load_gist_env()
+
+    try:
+        push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
+        print("[gist_status] initial publish ok", file=sys.stderr)
+    except Exception as e:
+        print(f"[gist_status] initial publish failed: {e}", file=sys.stderr)
+
     while True:
         try:
-            push_gist(build_status())
+            push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
         except Exception as e:
-            print(f"[status] publish failed: {e}")
+            print(f"[gist_status] publish failed: {e}", file=sys.stderr)
         time.sleep(period_sec)
-        
-status_publisher_loop(30)
 
-# threading.Thread(target=status_publisher_loop, daemon=True).start()
+_publisher_thread: Optional[threading.Thread] = None
+_publisher_lock = threading.Lock()
+
+def start_status_publisher(*, period_sec: int = 60) -> None:
+    global _publisher_thread
+    with _publisher_lock:
+        if _publisher_thread is not None and _publisher_thread.is_alive():
+            return
+
+        t = threading.Thread(
+            target=_publisher_loop,
+            args=(int(period_sec),),
+            name="gist-status-publisher",
+            daemon=True,
+        )
+        t.start()
+        _publisher_thread = t
+        print(f"[gist_status] started (period={period_sec}s)", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    # Standalone test mode (blocks)
+    start_status_publisher(period_sec=60)
+    while True:
+        time.sleep(3600)

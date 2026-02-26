@@ -47,6 +47,8 @@ from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
 from pathlib import Path
 from prompt_toolkit import PromptSession
 
+from ..tools.gist_status import start_status_publisher
+
 from pathlib import Path
 
 def _xdg_config_home() -> Path:
@@ -224,6 +226,8 @@ def serve():
     # Cert fetcher
     from .cert_provider import start_cert_provider
     cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(cert_port))
+    
+    start_status_publisher(period_sec=60)
 
     # Add secure port
     server.add_secure_port(f'{local_ip}:{local_port}', server_credentials)

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import base64
 import secrets
 import hashlib
+import getpass
 
 from .host.host_auth_token import create_host_token, delete_host_token, wipe_all_host_tokens, show_host_tokens
 
@@ -96,6 +97,9 @@ def _gen_certs_path() -> Path:
         return p1
     return (_repo_root() / "tools" / "gen_certs.py").resolve()
 
+def _gist_env_path() -> Path:
+    # Stored alongside server.env/devices.env under ~/.config/remoterf by default
+    return _cfg_dir() / "gist.env"
 
 # -----------------------------
 # Help (exact commands only)
@@ -156,7 +160,17 @@ def print_help() -> None:
         "  -y, --yes           Skip wipe confirmation prompts\n"
         "  -v, --verbose       With --show-certs, also print x509 details (requires openssl)\n"
         "\n"
+        "Gist Status:\n"
+        "  serverrf --gist --set --id <gist_id> --file <filename> [--token <tok> | --token-stdin]\n"
+        "  serverrf --gist --show [--secrets]\n"
+        "  serverrf --gist --wipe [-y]\n"
+        "\n"
         "Examples:\n"
+        "  serverrf --gist --set --id 2a35e0... --file ucla-wlab-remoterf-status.json\n"
+        "  serverrf --gist --set --id 2a35e0... --file status.json --token-stdin\n"
+        "  serverrf --gist --show\n"
+        "  serverrf --gist --wipe -y\n"
+        "\n"
         # "  serverrf --gen-certs 192.168.1.24 --dns rrf2 --dns rrf2.local --force\n"
         "  serverrf --gen-certs 192.168.1.50 --days 3650 --force\n"
         "  serverrf --show-certs -v\n"
@@ -234,6 +248,90 @@ def _validate_port(n: int, *, name: str) -> Optional[str]:
         return f"{name} out of range (1..65535)"
     return None
 
+def _redact(s: str) -> str:
+    s = (s or "").strip()
+    if len(s) <= 8:
+        return "****"
+    return f"{s[:4]}...{s[-4:]}"
+
+
+def _gist_show(*, show_secrets: bool = False) -> int:
+    p = _gist_env_path()
+    if not p.exists():
+        print(f"No gist config found (missing {p}).")
+        return 0
+
+    kv = _read_env_kv(p)
+    print(f"Gist config: {p}")
+    gid = kv.get("STATUS_GIST_ID", "")
+    fn = kv.get("STATUS_GIST_FILENAME", "")
+    tok = kv.get("GITHUB_TOKEN", "")
+
+    print(f"  STATUS_GIST_ID={gid}")
+    print(f"  STATUS_GIST_FILENAME={fn}")
+    if show_secrets:
+        print(f"  GITHUB_TOKEN={tok}")
+    else:
+        print(f"  GITHUB_TOKEN={_redact(tok)}  (use --secrets to show)")
+    return 0
+
+
+def _gist_set(*, gist_id: str, filename: str, token: str) -> int:
+    gist_id = (gist_id or "").strip()
+    filename = (filename or "").strip()
+    token = (token or "").strip()
+
+    if not gist_id:
+        print("ERROR: missing --id <gist_id>", file=sys.stderr)
+        return 2
+    if not filename:
+        print("ERROR: missing --file <filename>", file=sys.stderr)
+        return 2
+    if not token:
+        print("ERROR: missing token (use prompt or --token-stdin or --token)", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    p = _gist_env_path()
+
+    kv = _read_env_kv(p)
+    kv["STATUS_GIST_ID"] = gist_id
+    kv["STATUS_GIST_FILENAME"] = filename
+    kv["GITHUB_TOKEN"] = token
+
+    _write_env_kv(p, kv)
+
+    try:
+        os.chmod(p, 0o600)
+    except Exception:
+        pass
+
+    print("Configured gist status env:")
+    print(f"  {p}")
+    print(f"  STATUS_GIST_ID={gist_id}")
+    print(f"  STATUS_GIST_FILENAME={filename}")
+    print(f"  GITHUB_TOKEN={_redact(token)}")
+    return 0
+
+
+def _gist_wipe(*, yes: bool) -> int:
+    p = _gist_env_path()
+    if not p.exists():
+        print(f"No gist config found at: {p}")
+        return 0
+
+    if not yes:
+        try:
+            if input("This will delete gist.env (gist status config). Type 'wipe' to confirm: ").strip().lower() != "wipe":
+                print("Wipe aborted.")
+                return 1
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 1
+
+    p.unlink()
+    print("Wiped gist config (gist.env).")
+    return 0
 
 # -----------------------------
 # Subprocess utils
@@ -723,6 +821,18 @@ def main() -> int:
     host_show_secrets = False  # optional
     host_token_length: Optional[int] = None
     host_force = False  # host-only overwrite/rotate
+    
+    # gist commands
+    gist_mode = False
+    gist_show = False
+    gist_wipe = False
+    gist_set = False
+    gist_show_secrets = False
+
+    gist_id: Optional[str] = None
+    gist_filename: Optional[str] = None
+    gist_token: Optional[str] = None
+    gist_token_stdin = False
 
     i = 0
     while i < len(argv):
@@ -859,6 +969,63 @@ def main() -> int:
         
         if host_mode and tok in ("--force", "-f", "--rotate"):
             host_force = True
+            i += 1
+            continue
+        
+        # enter gist mode
+        if tok in ("--gist", "-gist"):
+            gist_mode = True
+            i += 1
+            continue
+
+        # gist verbs/options
+        if gist_mode and tok in ("--show", "-show", "-s"):
+            gist_show = True
+            i += 1
+            continue
+
+        if gist_mode and tok in ("--wipe", "-wipe", "-w"):
+            gist_wipe = True
+            i += 1
+            continue
+
+        if gist_mode and tok in ("--set", "-set", "--config", "--configure"):
+            gist_set = True
+            i += 1
+            continue
+
+        if gist_mode and tok in ("--secrets", "-secrets"):
+            gist_show_secrets = True
+            i += 1
+            continue
+
+        if gist_mode and tok == "--id":
+            if i + 1 >= len(argv):
+                print("ERROR: --id expects <gist_id>", file=sys.stderr)
+                return 2
+            gist_id = argv[i + 1].strip()
+            i += 2
+            continue
+
+        if gist_mode and tok in ("--file", "--filename"):
+            if i + 1 >= len(argv):
+                print("ERROR: --file expects <filename>", file=sys.stderr)
+                return 2
+            gist_filename = argv[i + 1].strip()
+            i += 2
+            continue
+
+        # Not recommended (shell history), but provided anyway
+        if gist_mode and tok == "--token":
+            if i + 1 >= len(argv):
+                print("ERROR: --token expects <token>", file=sys.stderr)
+                return 2
+            gist_token = argv[i + 1].strip()
+            i += 2
+            continue
+
+        if gist_mode and tok == "--token-stdin":
+            gist_token_stdin = True
             i += 1
             continue
 
@@ -1005,6 +1172,42 @@ def main() -> int:
             except KeyboardInterrupt:
                 print("\nCancelled.")
                 return 1
+            
+    if gist_mode and (device_mode or config_mode or host_mode or show_certs or wipe_certs or (gen_ip is not None)):
+        print("ERROR: --gist cannot be combined with device/config/host/cert commands. Run them separately.", file=sys.stderr)
+        return 2
+    
+    # ----------------
+    # Gist mode execution
+    # ----------------
+    if gist_mode:
+        actions = int(gist_show) + int(gist_wipe) + int(gist_set)
+        if actions == 0:
+            print_help()
+            return 2
+        if actions > 1:
+            print("ERROR: gist commands are mutually exclusive. Use exactly one of: --set, --show, --wipe", file=sys.stderr)
+            return 2
+
+        if gist_show:
+            return int(_gist_show(show_secrets=gist_show_secrets))
+
+        if gist_wipe:
+            return int(_gist_wipe(yes=yes))
+
+        # gist_set
+        if gist_id is None or gist_filename is None:
+            print("ERROR: --gist --set requires --id <gist_id> and --file <filename>", file=sys.stderr)
+            return 2
+
+        tok = gist_token or ""
+        if gist_token_stdin:
+            tok = sys.stdin.read().strip()
+        if not tok:
+            # secure prompt (no echo)
+            tok = getpass.getpass("GitHub token (won't echo): ").strip()
+
+        return int(_gist_set(gist_id=gist_id, filename=gist_filename, token=tok))
             
     # ----------------
     # Host mode execution
