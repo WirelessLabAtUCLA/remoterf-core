@@ -479,7 +479,7 @@ class ReservationHandler:
             print("No accounts found.")
             
     @db_connection
-    def get_obfuscated_device_reservations_grouped_past_days(self, days: int) -> dict[str, list[dict]]:
+    def get_obfuscated_device_reservations_grouped_past_days(self, days: int) -> dict[str, dict[str, int]]:
         try:
             days = int(days)
         except Exception:
@@ -491,9 +491,22 @@ class ReservationHandler:
         now = datetime.now()
         cutoff = now - timedelta(days=days)
 
+        # Start with ALL known devices so even unused devices appear.
+        out: dict[str, dict[str, int]] = {}
+        try:
+            all_devices = get_all_devices() or {}
+            for device_id in all_devices.keys():
+                try:
+                    dev_key = str(int(device_id))
+                except Exception:
+                    dev_key = str(device_id).strip()
+                out[dev_key] = {}
+        except Exception:
+            pass
+
         self.cursor.execute(
             """
-            SELECT device_id, start_time, end_time
+            SELECT device_id, start_time
             FROM Reservations
             WHERE end_time >= ? AND start_time <= ?
             ORDER BY device_id ASC, start_time ASC
@@ -502,29 +515,29 @@ class ReservationHandler:
         )
         rows = self.cursor.fetchall() or []
 
-        out: dict[str, list[dict]] = {}
-
-        for device_id, start_raw, end_raw in rows:
+        for device_id, start_raw in rows:
             try:
                 dev_key = str(int(device_id))
             except Exception:
                 dev_key = str(device_id).strip()
 
             try:
-                start_dt = datetime.strptime(start_raw, "%Y-%m-%d %H:%M:%S") if isinstance(start_raw, str) else start_raw
-                end_dt = datetime.strptime(end_raw, "%Y-%m-%d %H:%M:%S") if isinstance(end_raw, str) else end_raw
+                start_dt = (
+                    datetime.strptime(start_raw, "%Y-%m-%d %H:%M:%S")
+                    if isinstance(start_raw, str)
+                    else start_raw
+                )
             except Exception:
                 continue
 
+            day_key = start_dt.date().isoformat()
+
             if dev_key not in out:
-                out[dev_key] = []
+                out[dev_key] = {}
 
-            out[dev_key].append({
-                "start_time": start_dt.isoformat(),
-                "end_time": end_dt.isoformat(),
-            })
+            out[dev_key][day_key] = out[dev_key].get(day_key, 0) + 1
 
-        return out
+        return dict(sorted(out.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0]))
             
     def get_reservation_count(self, username):
         self.cursor.execute("SELECT COUNT(*) FROM Reservations WHERE username = ?", (username,))
