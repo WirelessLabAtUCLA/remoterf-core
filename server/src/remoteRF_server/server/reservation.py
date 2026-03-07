@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 from functools import wraps
 import json
+from datetime import datetime, timedelta
 
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
@@ -476,6 +477,54 @@ class ReservationHandler:
                 print("Username:", account[1], f'<{perms.get_perms(account[1])[0][0]}>', " Email:", account[2], " Created At:", account[5])
         else:
             print("No accounts found.")
+            
+    @db_connection
+    def get_obfuscated_device_reservations_grouped_past_days(self, days: int) -> dict[str, list[dict]]:
+        try:
+            days = int(days)
+        except Exception:
+            return {}
+
+        if days < 0:
+            return {}
+
+        now = datetime.now()
+        cutoff = now - timedelta(days=days)
+
+        self.cursor.execute(
+            """
+            SELECT device_id, start_time, end_time
+            FROM Reservations
+            WHERE end_time >= ? AND start_time <= ?
+            ORDER BY device_id ASC, start_time ASC
+            """,
+            (cutoff, now),
+        )
+        rows = self.cursor.fetchall() or []
+
+        out: dict[str, list[dict]] = {}
+
+        for device_id, start_raw, end_raw in rows:
+            try:
+                dev_key = str(int(device_id))
+            except Exception:
+                dev_key = str(device_id).strip()
+
+            try:
+                start_dt = datetime.strptime(start_raw, "%Y-%m-%d %H:%M:%S") if isinstance(start_raw, str) else start_raw
+                end_dt = datetime.strptime(end_raw, "%Y-%m-%d %H:%M:%S") if isinstance(end_raw, str) else end_raw
+            except Exception:
+                continue
+
+            if dev_key not in out:
+                out[dev_key] = []
+
+            out[dev_key].append({
+                "start_time": start_dt.isoformat(),
+                "end_time": end_dt.isoformat(),
+            })
+
+        return out
             
     def get_reservation_count(self, username):
         self.cursor.execute("SELECT COUNT(*) FROM Reservations WHERE username = ?", (username,))

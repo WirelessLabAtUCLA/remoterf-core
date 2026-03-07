@@ -64,7 +64,16 @@ def _load_gist_env() -> tuple[str, str, str]:
 
 
 def build_status() -> dict:
-    return {"updated_unix": int(time.time())}
+    payload = {
+        "updated_unix": int(time.time()),
+        "reservation_history_days": 7,
+        "reservations": [],
+    }
+
+    from ..server.reservation import reservation_handler
+    payload["reservations"] = reservation_handler.get_obfuscated_device_reservations_grouped_past_days(7)
+
+    return payload
 
 
 def push_gist(*, gist_id: str, gh_token: str, filename: str, payload: dict) -> None:
@@ -101,8 +110,10 @@ def _publisher_loop(period_sec: int) -> None:
             print(f"[gist_status] publish failed: {e}", file=sys.stderr)
         time.sleep(period_sec)
 
+
 _publisher_thread: Optional[threading.Thread] = None
 _publisher_lock = threading.Lock()
+
 
 def start_status_publisher(*, period_sec: int = 60) -> None:
     global _publisher_thread
@@ -122,7 +133,6 @@ def start_status_publisher(*, period_sec: int = 60) -> None:
 
 
 if __name__ == "__main__":
-    # Standalone test mode (blocks)
     start_status_publisher(period_sec=60)
     while True:
         time.sleep(3600)
