@@ -2,23 +2,20 @@
 
 Debugging needed! (to determine what/why exactly causes the 'slowness') (could also just be the wifi speed, etc.)
 
-<!-- Currently, all calls route through TCP. (handshaking, might be slow).
-
-Implement parallel UDP port with multiplexed streams, so that some actions can be implemented as 'lossy' (packets may be lost) BUT at a much higher data rate.
-
-Optional argument in each function that specifies that (like remoteRF_is_lossy: True, etc.), determines the stream transport (TCP vs UDP). -->
-
 # Proper `Gist` Server Information
 
 Pull data from the main database (with some options to set, like whitelist for devices AND user groups + max timestamp/payload size)
 
-Check for if gist isn't setup, no 'warning' or anything.
+Check for if gist isn't setup, no 'warning' or anything. + "Github device status" (grid)
 
 # Interface Description Language `IDL`:
 
 A device API “contract” that hosts/servers can publish, and clients can discover + bind to automatically, so adding a new device does not require shipping a new hard-coded client library for that device.
 
 “Reflective IDL + Generic Invoke”
+
+- Rewriting Pluto Stuff so that the client side is 'reflection' based.
+- ^ Probably have a 'debug-remoterf-package' for this typa stuff!
 
 ## Server-Side
 
@@ -72,9 +69,16 @@ Testing wise, implement for a webcamera + maybe something more complicated?
 
 L3-routed Mesh (Headscale, Tailscale, Nebula style)
 
-All the network 'heads' (servers) would live in a single VPN plane with a VPN gateway server.
+All the network 'heads' (servers) would live in a single VPN plane with public VPN gateway server(s).
 
 * Control Plane and Data Plane
+
+you have:
+
+- multiple sites/nodes
+- each with its own local network
+- connected through routed IP links
+- where packets can move between sites based on routes
 
 Example:
 
@@ -82,5 +86,4 @@ Example:
 * WireGuard Data Plane
 
 First simply allow these servers to talk to each other properly + Permissions, etc. 
-
-Afterwords, to support '3rd party' individuals, I would implement seperate 'regional' nodes that exist as a L7 proxy into the main net.
+Afterwords, to support '3rd party' individuals, I would implement seperate 'regional' nodes that exist as a L7 proxy (regular user) into the main net.
