@@ -66,12 +66,13 @@ def _load_gist_env() -> tuple[str, str, str]:
 def build_status() -> dict:
     payload = {
         "updated_unix": int(time.time()),
-        "reservation_history_days": 7,
+        "reservation_history_days": 90,
         "reservations": [],
     }
 
     from ..server.reservation import reservation_handler
-    payload["reservations"] = reservation_handler.get_obfuscated_device_reservations_grouped_past_days(7)
+    payload["reservations"] = reservation_handler.get_obfuscated_device_reservations_grouped_past_days(90)
+    payload["usage"] = reservation_handler.get_obfuscated_usage_summary()
 
     return payload
 

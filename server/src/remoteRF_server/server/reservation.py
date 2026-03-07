@@ -7,6 +7,7 @@ from pathlib import Path
 from functools import wraps
 import json
 from datetime import datetime, timedelta
+import re
 
 from ..common.utils import *
 from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
@@ -491,53 +492,158 @@ class ReservationHandler:
         now = datetime.now()
         cutoff = now - timedelta(days=days)
 
-        # Start with ALL known devices so even unused devices appear.
-        out: dict[str, dict[str, int]] = {}
+        def _parse_logged_int(v) -> int:
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                return int(v)
+
+            s = str(v).strip()
+
+            # Handles strings like:
+            #   "int64_value: 2"
+            #   "int64_value: 1772587800"
+            if ":" in s:
+                s = s.split(":", 1)[1].strip()
+
+            # remove quotes/newlines if present
+            s = s.strip().strip('"').strip("'")
+            return int(float(s))
+
+        # Take a consistent snapshot of the log file under the same lock used by writers.
         try:
-            all_devices = get_all_devices() or {}
-            for device_id in all_devices.keys():
-                try:
-                    dev_key = str(int(device_id))
-                except Exception:
-                    dev_key = str(device_id).strip()
-                out[dev_key] = {}
+            with log_lock:
+                activity_log = _load_logs()
         except Exception:
-            pass
+            activity_log = []
 
-        self.cursor.execute(
-            """
-            SELECT device_id, start_time
-            FROM Reservations
-            WHERE end_time >= ? AND start_time <= ?
-            ORDER BY device_id ASC, start_time ASC
-            """,
-            (cutoff, now),
-        )
-        rows = self.cursor.fetchall() or []
+        out: dict[str, dict[str, int]] = {}
 
-        for device_id, start_raw in rows:
+        for entry in activity_log:
             try:
-                dev_key = str(int(device_id))
-            except Exception:
-                dev_key = str(device_id).strip()
+                if not isinstance(entry, dict):
+                    continue
 
-            try:
-                start_dt = (
-                    datetime.strptime(start_raw, "%Y-%m-%d %H:%M:%S")
-                    if isinstance(start_raw, str)
-                    else start_raw
-                )
+                if str(entry.get("action", "")).strip() != "reserve_device":
+                    continue
+
+                details = entry.get("details", {})
+                if not isinstance(details, dict):
+                    continue
+
+                args = details.get("args", {})
+                result = details.get("result", {})
+
+                if not isinstance(args, dict) or not isinstance(result, dict):
+                    continue
+
+                # Only count SUCCESSFUL reservations
+                if "Token" not in result:
+                    continue
+
+                raw_device_id = args.get("dd")
+                raw_start = args.get("st")
+                raw_end = args.get("et")
+
+                if raw_device_id is None or raw_start is None or raw_end is None:
+                    continue
+
+                device_id = _parse_logged_int(raw_device_id)
+                start_ts = _parse_logged_int(raw_start)
+                end_ts = _parse_logged_int(raw_end)
+
+                start_dt = datetime.fromtimestamp(start_ts)
+                end_dt = datetime.fromtimestamp(end_ts)
+
+                # Same overlap semantics as before
+                if end_dt < cutoff or start_dt > now:
+                    continue
+
+                dev_key = str(device_id)
+                day_key = start_dt.date().isoformat()
+
+                if dev_key not in out:
+                    out[dev_key] = {}
+
+                out[dev_key][day_key] = out[dev_key].get(day_key, 0) + 1
+
             except Exception:
                 continue
 
-            day_key = start_dt.date().isoformat()
+        return dict(sorted(out.items(), key=lambda kv: int(kv[0])))
+    
+    @db_connection
+    def get_obfuscated_usage_summary(self) -> dict[str, int | float]:
 
-            if dev_key not in out:
-                out[dev_key] = {}
+        int_re = re.compile(r'int64_value:\s*([0-9]+)')
+        str_re = re.compile(r'string_value:\s*"([^"]*)"')
 
-            out[dev_key][day_key] = out[dev_key].get(day_key, 0) + 1
+        def _parse_proto_value(v):
+            if isinstance(v, (int, float)):
+                return v
+            if not isinstance(v, str):
+                return v
 
-        return dict(sorted(out.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0]))
+            m_int = int_re.search(v)
+            if m_int:
+                return int(m_int.group(1))
+
+            m_str = str_re.search(v)
+            if m_str:
+                return m_str.group(1)
+
+            return v
+
+        try:
+            with log_lock:
+                activity_log = _load_logs()
+        except Exception:
+            activity_log = []
+
+        accounts: set[str] = set()
+        total_reservations = 0
+        total_reserved_seconds = 0
+
+        for entry in activity_log:
+            try:
+                if not isinstance(entry, dict):
+                    continue
+
+                action = entry.get("action")
+                username = entry.get("username")
+                details = entry.get("details", {}) or {}
+                args = details.get("args", {}) or {}
+                result = details.get("result", {}) or {}
+
+                if not isinstance(args, dict) or not isinstance(result, dict):
+                    continue
+
+                # Count accounts from successful logins
+                if action == "login" and "UC" in result:
+                    uc_name = _parse_proto_value(result.get("UC"))
+                    if uc_name:
+                        accounts.add(str(uc_name))
+                    elif username:
+                        accounts.add(str(username))
+
+                # Count reservations + reserved time
+                if action == "reserve_device":
+                    total_reservations += 1
+
+                    st = _parse_proto_value(args.get("st"))
+                    et = _parse_proto_value(args.get("et"))
+
+                    if isinstance(st, int) and isinstance(et, int) and et > st:
+                        total_reserved_seconds += (et - st)
+
+            except Exception:
+                continue
+
+        return {
+            "account_count": len(accounts),
+            "total_reservations": int(total_reservations),
+            "total_reserved_hours": round(total_reserved_seconds / 3600.0, 1),
+        }
             
     def get_reservation_count(self, username):
         self.cursor.execute("SELECT COUNT(*) FROM Reservations WHERE username = ?", (username,))
