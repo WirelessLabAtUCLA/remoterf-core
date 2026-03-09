@@ -1,4 +1,5 @@
 * New Schema Manager (device manager parallel) that:
+- Try Catch on the decorators
 - Sever Device Manager (ie: nuke the guy, replace with schema based). Hosts will function the same (ie: don't touch the host shit)
 
 - Loads all devices based on device_manifest.yml 
