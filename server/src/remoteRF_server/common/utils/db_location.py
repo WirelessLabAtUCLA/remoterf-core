@@ -19,3 +19,6 @@ def get_certs_dir() -> Path:
 
 def get_db_dir() -> Path:
     return get_remoterf_root() / "db"
+
+def get_drivers_dir() -> Path:
+    return get_remoterf_root() / "drivers"
