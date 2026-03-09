@@ -20,7 +20,7 @@
 
 - Implementing HackRF driver, testing integration with USRP, other big boi SDRs, NON-SDR equipment like cameras ...
 
-* Integrating BACK with Host system (???) Big question of perhaps fundamental framework change? 
+* Integrating BACK with Host system (lmao ...) Big question of perhaps fundamental framework change? 
 - Like each Host dynamical grabs from the server manifest their devices AND schemas, connects/runs said schemas, then connects up the 'device' pipes? (need to discuss/think about more!)
 
 - Edge cases:
