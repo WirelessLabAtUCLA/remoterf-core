@@ -1,0 +1,62 @@
+# Example setup (currently only plutos!)
+
+devices:
+  - device_id: 0
+    device_type: pluto
+    name: Pluto SDR (loopback)
+    init:
+      serial: "10447392da11001009001500f02af8a678"
+
+  - device_id: 1
+    device_type: pluto
+    name: Pluto SDR (loopback)
+    init:
+      serial: "10447392da110010f9ff1500612ff8ecb0"
+
+  - device_id: 2
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "10447318ac0f0003050036008365171a2d"
+
+  - device_id: 3
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "10447376de0b00130b00200023119a89c6"
+
+  - device_id: 4
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "1044732a98110002faff1500f92ae517bf"
+
+  - device_id: 5
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "10447318ac0f001915003200073317bbca"
+
+  - device_id: 6
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "104473e6a60f00020d003900e21716bf22"
+
+  - device_id: 7
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "104473e6a60f000cf3ff17000b3917d48f"
+
+  - device_id: 8
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "10447318ac0f0016faff2500998717eacf"
+
+  - device_id: 9
+    device_type: pluto
+    name: Pluto SDR (OTA)
+    init:
+      serial: "104473b04a06000ffbff3900f5de83267e"
