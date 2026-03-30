@@ -227,7 +227,7 @@ def serve():
     from .cert_provider import start_cert_provider
     cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(cert_port))
     
-    start_status_publisher(period_sec=60)
+    start_status_publisher()
 
     # Add secure port
     server.add_secure_port(f'{local_ip}:{local_port}', server_credentials)

@@ -116,7 +116,7 @@ _publisher_thread: Optional[threading.Thread] = None
 _publisher_lock = threading.Lock()
 
 
-def start_status_publisher(*, period_sec: int = 60) -> None:
+def start_status_publisher() -> None:
     global _publisher_thread
     with _publisher_lock:
         if _publisher_thread is not None and _publisher_thread.is_alive():
@@ -124,16 +124,16 @@ def start_status_publisher(*, period_sec: int = 60) -> None:
 
         t = threading.Thread(
             target=_publisher_loop,
-            args=(int(period_sec),),
+            args=(int(120),),
             name="gist-status-publisher",
             daemon=True,
         )
         t.start()
         _publisher_thread = t
-        print(f"[gist_status] started (period={period_sec}s)", file=sys.stderr)
+        print(f"[gist_status] started (period={120}s)", file=sys.stderr)
 
 
-if __name__ == "__main__":
-    start_status_publisher(period_sec=120)
-    while True:
-        time.sleep(3600)
+# if __name__ == "__main__":
+#     start_status_publisher(period_sec=120)
+#     while True:
+#         time.sleep(3600)
