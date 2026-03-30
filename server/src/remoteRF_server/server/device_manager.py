@@ -324,8 +324,6 @@ def get_usb_port_from_serial(serial: str) -> str | None:
     print(f"No device found with serial {serial}")
     return None
 
-# Parse devices.env
-
 def _connect_from_record(rec: Dict[str, str]):
     # Returns (device_obj, ident, dtype).
    
