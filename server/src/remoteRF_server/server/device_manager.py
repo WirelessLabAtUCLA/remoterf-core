@@ -6,6 +6,7 @@ import os
 import re
 import time
 import adi
+import yaml
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Any, List, Iterator
 from contextlib import contextmanager
 
-from ..common.utils import validate_token  
+from ..common.utils import validate_token, get_remoterf_root
 from ..host import host_tunnel_server as hts  
 
 _state_lock = threading.RLock()
@@ -226,17 +227,67 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 
 # Config paths (server-side)
 
-def _xdg_config_home() -> Path:
-    return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
-
-
 def _cfg_dir() -> Path:
-    # default: ~/.config/remoterf
-    return Path(os.getenv("REMOTERF_CONFIG_DIR", _xdg_config_home() / "remoterf"))
+    return Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
 
+def _devices_yaml_path() -> Path:
+    p1 = _cfg_dir() / "devices.yml"
+    if p1.exists():
+        return p1
+    return _cfg_dir() / "devices.yaml"
 
-def _devices_env_path() -> Path:
-    return _cfg_dir() / "devices.env"
+def _load_device_records() -> Dict[int, Dict[str, str]]:
+    path = _devices_yaml_path()
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"Error reading YAML config {path}: {e}")
+        return {}
+
+    devices = data.get("devices") or []
+    if not isinstance(devices, list):
+        print(f"Invalid YAML config {path}: 'devices' must be a list")
+        return {}
+
+    recs: Dict[int, Dict[str, str]] = {}
+
+    for item in devices:
+        if not isinstance(item, dict):
+            continue
+
+        try:
+            gid = int(item["device_id"])
+        except Exception:
+            print(f"Skipping device entry with invalid/missing device_id: {item}")
+            continue
+
+        dtype = str(item.get("device_type") or "pluto").strip().lower()
+        if dtype != "pluto":
+            print(f"Skipping unsupported device_type={dtype!r} for gid={gid}")
+            continue
+
+        name = str(item.get("name") or f"device-{gid}").strip()
+        init = item.get("init") or {}
+        if not isinstance(init, dict):
+            init = {}
+
+        serial = str(init.get("serial") or "").strip()
+        if not serial:
+            print(f"Skipping Pluto gid={gid}: missing init.serial")
+            continue
+
+        recs[gid] = {
+            "TYPE": "pluto",
+            "NAME": name,
+            "IDENT_KIND": "iio_serial",
+            "IDENT": serial,
+        }
+
+    return recs
 
 # Pluto helpers
 
@@ -274,72 +325,6 @@ def get_usb_port_from_serial(serial: str) -> str | None:
     return None
 
 # Parse devices.env
-
-_ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
-_DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
-
-def _strip_quotes(v: str) -> str:
-    v = (v or "").strip()
-    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-        return v[1:-1]
-    return v
-
-def _read_env_file(path: Path) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    if not path.exists():
-        return out
-    try:
-        txt = path.read_text(encoding="utf-8")
-    except Exception:
-        return out
-
-    for raw in txt.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = _ENV_LINE.match(line)
-        if not m:
-            continue
-        k = m.group(1).strip()
-        v = _strip_quotes(m.group(2))
-        out[k] = v
-    return out
-
-def _load_device_records() -> Dict[int, Dict[str, str]]:
-    # Returns: { gid: { "TYPE":..., "NAME":..., "IDENT_KIND":..., "IDENT":..., ... } }
-
-    kv = _read_env_file(_devices_env_path())
-    recs: Dict[int, Dict[str, str]] = {}
-
-    # New format: DEVICE_<gid>_<FIELD>
-    for k, v in kv.items():
-        m = _DEVICE_KEY_RE.match(k.strip())
-        if not m:
-            continue
-        try:
-            gid = int(m.group(1))
-        except Exception:
-            continue
-        field = m.group(2).strip().upper()
-        recs.setdefault(gid, {})[field] = str(v).strip()
-
-    # Back-compat: DEVICE_<gid>_ID treated as IDENT
-    for k, v in kv.items():
-        kk = k.strip().upper()
-        if not kk.startswith("DEVICE_") or not kk.endswith("_ID"):
-            continue
-        mid = kk[7:-3]
-        try:
-            gid = int(mid)
-        except Exception:
-            continue
-        recs.setdefault(gid, {})
-        recs[gid].setdefault("TYPE", "pluto")
-        recs[gid].setdefault("NAME", f"device-{gid}")
-        recs[gid].setdefault("IDENT_KIND", "iio_serial")
-        recs[gid].setdefault("IDENT", str(v).strip())
-
-    return recs
 
 def _connect_from_record(rec: Dict[str, str]):
     # Returns (device_obj, ident, dtype).

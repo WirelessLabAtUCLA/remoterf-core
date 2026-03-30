@@ -12,7 +12,8 @@ dependencies = [
   "prompt_toolkit",
   "python-dotenv",
   "grpcio-tools",
-  "requests"
+  "requests",
+  "pyyaml"
 ]
 readme = "README.md"
 

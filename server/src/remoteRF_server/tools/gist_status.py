@@ -134,6 +134,6 @@ def start_status_publisher(*, period_sec: int = 60) -> None:
 
 
 if __name__ == "__main__":
-    start_status_publisher(period_sec=60)
+    start_status_publisher(period_sec=120)
     while True:
         time.sleep(3600)
