@@ -9,20 +9,19 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
-
+from .common.utils import get_remoterf_root
 
 # -----------------------------
 # Repo-local host config locations
 # -----------------------------
 
-def _repo_root() -> Path:
-    # <repo>/src/remoteRF_host/hostrf_cli.py -> parents[2] == <repo>
-    return Path(__file__).resolve().parents[2]
+import os
+from pathlib import Path
 
 def _cfg_dir() -> Path:
-    # <repo>/config/remoteRF_host/
-    # return _repo_root() / "src" / "remoteRF_host" / "config"
-    return _repo_root() / ".config"
+    p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 def _ca_path() -> Path:
     return _cfg_dir() / "ca.crt"

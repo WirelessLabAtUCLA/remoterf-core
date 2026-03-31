@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # tunnel_agent.py
 #
-# Host-side agent (repo-local config):
+# Host-side agent (shared remoterf config):
 #   Reads config from:
-#     <repo>/.config/net.env     (REMOTERF_ADDR, REMOTERF_CA_CERT, optional mTLS)
-#     <repo>/.config/host.env    (HOST_ID, optional HOST_MASTER_TOKEN)
-#     <repo>/.config/devices.env (DEVICE_<gid>_... schema)
+#     <remoterf-config>/net.env        (REMOTERF_ADDR, REMOTERF_CA_CERT, optional mTLS)
+#     <remoterf-config>/host.env       (HOST_ID, HOST_TOKEN, optional HOST_MASTER_TOKEN)
+#     <remoterf-config>/devices.yml    (or devices.yaml)
 #
 # Connects to main server via HostTunnel bidi stream, announces devices, executes RPC locally.
 #
 # Canonical identity:
 #   - gid is the ONLY global device identity.
 #   - We announce DeviceInfo.device_id = "<gid>" (decimal string)
-#   - We also set DeviceInfo.local_id = gid (route id the server uses to fill local_device_id)
+#   - We also set DeviceInfo.local_id = gid
 #
 # NO log levels / env config:
 #   INFO/WARN/ERROR always print to stderr.
@@ -28,33 +28,28 @@ import grpc
 import random
 import threading
 import traceback
+import yaml
 
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Iterable, List, Tuple, NoReturn
 
+from ..common.utils import get_remoterf_root
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
+
 
 # -------------------------
 # Logging mode
 # -------------------------
 
-# =============================================================================
-# Pick ONE:
-#   LOG_MODE = "OFF"   -> show nothing
-#   LOG_MODE = "WARN"  -> show only WARN + ERROR
-#   LOG_MODE = "ALL"   -> show everything (INFO + WARN + ERROR)
-# =============================================================================
-
-LOG_MODE = "WARN"  # <-- set to ALL while debugging session UUIDs
+LOG_MODE = "WARN"
 LOG_MODE = (LOG_MODE or "WARN").strip().upper()
 
 _LOG_PRI: Dict[str, int] = {"INFO": 10, "WARN": 20, "ERROR": 30}
 _MODE_MIN_PRI: Dict[str, int] = {"ALL": 10, "WARN": 20, "OFF": 10**9}
 
 if LOG_MODE not in _MODE_MIN_PRI:
-    # Be safe: if misconfigured, default to WARN rather than spamming.
     LOG_MODE = "WARN"
 
 
@@ -118,19 +113,24 @@ def _die_host_config(host_env: Path, msg: str, *, code: int = 2) -> NoReturn:
     error("Fix:")
     error(f"  Edit {host_env} and set a unique HOST_ID, e.g.")
     error("    HOST_ID=my-host-1")
+    error("    HOST_TOKEN=my-host-token")
     error("  Ensure only one agent uses a given HOST_ID at a time.")
     raise SystemExit(code)
 
 
-def _die_devices_config(dev_env: Path, msg: str, *, code: int = 2) -> NoReturn:
+def _die_devices_config(dev_yaml: Path, msg: str, *, code: int = 2) -> NoReturn:
     error(f"Devices config error: {msg}")
-    error(f"Config file: {dev_env}")
+    error(f"Config file: {dev_yaml}")
     error("Fix:")
-    error("  Ensure each device has a unique gid (DEVICE_<gid>_...) across ALL hosts.")
+    error("  Ensure devices.yml/devices.yaml contains a top-level 'devices:' list.")
+    error("  Ensure each device_id (gid) is unique across ALL hosts.")
     error("  Example:")
-    error("    DEVICE_10_TYPE=pluto")
-    error("    DEVICE_10_IDENT_KIND=iio_serial")
-    error("    DEVICE_10_IDENT=104473b...")
+    error("    devices:")
+    error("      - device_id: 10")
+    error("        device_type: pluto")
+    error("        name: pluto-10")
+    error("        init:")
+    error("          serial: 104473b...")
     raise SystemExit(code)
 
 
@@ -139,9 +139,9 @@ def _die_devices_config(dev_env: Path, msg: str, *, code: int = 2) -> NoReturn:
 # -------------------------
 
 try:
-    generic_pb2 = host_pb2.grpc__pb2  # generated alias inside grpc_host_pb2.py
+    generic_pb2 = host_pb2.grpc__pb2
 except Exception:
-    from ..common.grpc import grpc_pb2 as generic_pb2  # fallback
+    from ..common.grpc import grpc_pb2 as generic_pb2
 
 
 # -------------------------
@@ -165,25 +165,13 @@ def _now_ms() -> int:
 
 
 # -------------------------
-# repo-local config paths
+# Shared remoterf config paths
 # -------------------------
 
-def _repo_root() -> Path:
-    """
-    Try to find the repo root by locating the 'src' directory in parents and returning its parent.
-    Fallback: walk up a few levels from this file.
-    """
-    p = Path(__file__).resolve()
-    for parent in p.parents:
-        if parent.name == "src":
-            return parent.parent
-    if len(p.parents) >= 4:
-        return p.parents[3]
-    return p.parent
-
-
 def _cfg_dir() -> Path:
-    return _repo_root() / ".config"
+    p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _net_env_path() -> Path:
@@ -194,14 +182,14 @@ def _host_env_path() -> Path:
     return _cfg_dir() / "host.env"
 
 
-def _devices_env_path() -> Path:
-    return _cfg_dir() / "devices.env"
+def _devices_yaml_path() -> Path:
+    p1 = _cfg_dir() / "devices.yml"
+    if p1.exists():
+        return p1
+    return _cfg_dir() / "devices.yaml"
 
 
 def _resolve_path(base_env_path: Path, p: str) -> str:
-    """
-    If p is relative, resolve it relative to the directory containing base_env_path.
-    """
     if not p:
         return ""
     pp = Path(p).expanduser()
@@ -211,7 +199,7 @@ def _resolve_path(base_env_path: Path, p: str) -> str:
 
 
 # -------------------------
-# .env parsing (no deps)
+# .env parsing (for net.env / host.env only)
 # -------------------------
 
 _ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
@@ -243,70 +231,70 @@ def load_env_file(path: str) -> Dict[str, str]:
 
 
 # -------------------------
-# Device parsing (gid-centric)
+# YAML device parsing
 # -------------------------
 
-_DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
+def _load_devices_from_yaml(path: Path) -> Dict[int, Dict[str, str]]:
+    if not path.exists():
+        return {}
 
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        _die_devices_config(path, f"Failed to parse YAML: {e}")
 
-def _parse_devices_from_env(env: Dict[str, str]) -> Dict[int, Dict[str, str]]:
-    """
-    Parse devices.env written by hostrf_cli.py.
+    if not isinstance(data, dict):
+        _die_devices_config(path, "Top-level YAML must be a mapping containing 'devices'.")
 
-    Keys:
-      DEVICE_<gid>_TYPE=pluto
-      DEVICE_<gid>_NAME=pluto_aaa
-      DEVICE_<gid>_IDENT_KIND=iio_serial
-      DEVICE_<gid>_IDENT=<serial>
-
-    Returns:
-      { gid: {"type","name","ident_kind","ident","serial","kind","label"} }
-
-    NOTE:
-      - gid is the ONLY global device identity (used on the wire).
-      - TYPE/IDENT_* are purely local info for host-side device resolution.
-    """
-    recs: Dict[int, Dict[str, str]] = {}
-
-    for k, v in env.items():
-        m = _DEVICE_KEY_RE.match(k.strip())
-        if not m:
-            continue
-        gid = int(m.group(1))
-        field = m.group(2).upper().strip()
-        recs.setdefault(gid, {})[field] = str(v).strip()
+    raw_devices = data.get("devices") or []
+    if not isinstance(raw_devices, list):
+        _die_devices_config(path, "'devices' must be a list.")
 
     out: Dict[int, Dict[str, str]] = {}
     seen_physical: set[tuple[str, str, str]] = set()
 
-    for gid, r in recs.items():
-        dtype = r.get("TYPE", "").strip()
-        name = r.get("NAME", "").strip()
-        ident_kind = r.get("IDENT_KIND", "").strip()
-        ident = r.get("IDENT", "").strip()
-
-        # Require enough to resolve a physical device locally (keep strict)
-        if not dtype or not ident_kind or not ident:
+    for item in raw_devices:
+        if not isinstance(item, dict):
+            warn(f"Skipping non-mapping device entry in {path}: {item!r}")
             continue
 
-        dt = dtype.lower()
-        ik = ident_kind.lower()
-        serial = ident if ik in ("iio_serial", "serial") else ""
+        try:
+            gid = int(item["device_id"])
+        except Exception:
+            warn(f"Skipping device entry with invalid/missing device_id in {path}: {item!r}")
+            continue
 
-        phys_key = (dt, ik, ident)
+        dtype = str(item.get("device_type") or "pluto").strip()
+        dt = dtype.lower()
+        if dt != "pluto":
+            warn(f"Skipping unsupported device_type={dtype!r} for gid={gid}")
+            continue
+
+        name = str(item.get("name") or f"device-{gid}").strip()
+
+        init = item.get("init") or {}
+        if not isinstance(init, dict):
+            init = {}
+
+        serial = str(init.get("serial") or "").strip()
+        if not serial:
+            warn(f"Skipping Pluto gid={gid}: missing init.serial")
+            continue
+
+        phys_key = (dt, "iio_serial", serial)
         if phys_key in seen_physical:
-            # Not strictly illegal, but almost always a user mistake.
             _die_devices_config(
-                _devices_env_path(),
-                f"Duplicate physical identity within this host: type={dt!r} ident_kind={ik!r} ident={ident!r}",
+                path,
+                f"Duplicate physical identity within this host: type={dt!r} ident_kind='iio_serial' ident={serial!r}",
             )
         seen_physical.add(phys_key)
 
         out[int(gid)] = {
             "type": dtype,
             "name": name,
-            "ident_kind": ident_kind,
-            "ident": ident,
+            "ident_kind": "iio_serial",
+            "ident": serial,
             "serial": serial,
             "kind": dtype,
             "label": name or f"Device {gid}",
@@ -384,7 +372,7 @@ class AgentConfig:
 
     net_env_path: str
     host_env_path: str
-    devices_env_path: str
+    devices_yaml_path: str
 
     ca_pem_path: Optional[str] = None
     client_cert_pem_path: Optional[str] = None
@@ -408,12 +396,11 @@ class HostTunnelAgent:
         self._cancel_lock = threading.Lock()
 
         self._host_id: str = ""
-        self._master_token: str = "Master"  # do not print
+        self._master_token: str = "Master"
 
-        # Inventory (gid -> record)
         self._devices: Dict[int, Dict[str, str]] = {}
-        
-        self._host_token: str = "" 
+
+        self._host_token: str = ""
 
     def stop(self) -> None:
         info("Stop requested.")
@@ -477,14 +464,12 @@ class HostTunnelAgent:
 
     def _reload_from_env(self) -> None:
         host_env = load_env_file(self.cfg.host_env_path)
-        dev_env = load_env_file(self.cfg.devices_env_path)
 
         host_id = host_env.get("HOST_ID", "").strip() or os.getenv("HOST_ID", "").strip()
         if not host_id:
             _die_host_config(Path(self.cfg.host_env_path), "HOST_ID is not set (server requires a stable, explicit host id).")
         self._host_id = host_id
-        
-        # NEW: load host token (required)
+
         tok = host_env.get("HOST_TOKEN", "").strip() or os.getenv("HOST_TOKEN", "").strip()
         if not tok:
             _die_host_config(Path(self.cfg.host_env_path), "HOST_TOKEN is not set.")
@@ -501,19 +486,14 @@ class HostTunnelAgent:
             self._master_token = mt
             token_state = "set"
 
-        merged = dict(dev_env)
-        for k, v in host_env.items():
-            if k not in merged:
-                merged[k] = v
-
-        self._devices = _parse_devices_from_env(merged)
+        self._devices = _load_devices_from_yaml(Path(self.cfg.devices_yaml_path))
 
         if not self._devices:
-            warn(f"No devices found in {self.cfg.devices_env_path} (DEVICE_<gid>_...); announcing zero devices.")
+            warn(f"No devices found in {self.cfg.devices_yaml_path}; announcing zero devices.")
 
         info(
             f"Inventory reloaded: host_id={self._host_id} devices={len(self._devices)} "
-            f"master_token={token_state} host_env={self.cfg.host_env_path} devices_env={self.cfg.devices_env_path}"
+            f"master_token={token_state} host_env={self.cfg.host_env_path} devices_yaml={self.cfg.devices_yaml_path}"
         )
 
     # -------- frames --------
@@ -521,7 +501,6 @@ class HostTunnelAgent:
     def _hello_frame(self) -> host_pb2.HostFrame:
         hello = host_pb2.HostHello(host_id=self._host_id, version=self.cfg.version)
 
-        # Back/forward compatible: only set if the field exists in this build.
         if hasattr(hello, "host_token"):
             hello.host_token = self._host_token
 
@@ -533,7 +512,6 @@ class HostTunnelAgent:
         )
 
     def _device_announce_frame(self) -> host_pb2.HostFrame:
-        # Optional: dynamic labels (does not affect identity)
         dyn_labels: Dict[int, str] = {}
         if callable(get_all_devices_str):
             try:
@@ -547,10 +525,6 @@ class HostTunnelAgent:
             d = self._devices[gid]
             label = (d.get("label", "").strip() or dyn_labels.get(gid, "") or f"Device {gid}")
 
-            # CANONICAL:
-            #   device_id = "<gid>" (decimal string)
-            # ROUTING:
-            #   local_id = gid (server uses this to fill local_device_id in forwarded RPCs)
             infos.append(
                 host_pb2.DeviceInfo(
                     local_id=int(gid),
@@ -696,14 +670,6 @@ class HostTunnelAgent:
             exception(f"Failed to override token for gid={gid_s!r}")
 
     def _resolve_request_gid(self, req: host_pb2.RpcRequest) -> Tuple[str, int]:
-        """
-        Resolve the target gid for an incoming request.
-
-        Prefer req.device_id (new server; should be "<gid>").
-        Fallback to req.local_device_id (older server; we also set local_id=gid).
-
-        Returns: (gid_str, gid_int)
-        """
         gid_s = (getattr(req, "device_id", "") or "").strip()
         if gid_s:
             if not gid_s.isdigit():
@@ -733,10 +699,8 @@ class HostTunnelAgent:
 
             info(f"RpcRequest req_id={req_id} gid={gid_i} fn={str(greq.function_name)}")
 
-            # Force per-gid token
             # self._override_token_for_gid(args_map, gid_s)
 
-            # Optional: expose gid to local RPC layer explicitly
             try:
                 args_map["gid"].CopyFrom(_argument_string(gid_s))
             except Exception:
@@ -788,7 +752,6 @@ class HostTunnelAgent:
     def _outbound_generator(self, *, initial: List[host_pb2.HostFrame]) -> Iterable[host_pb2.HostFrame]:
         info("Outbound generator started.")
 
-        # CRITICAL: stream starts with HELLO then DEVICE_ANNOUNCE
         for f in initial:
             which = f.WhichOneof("msg")
             info(f"Outbound initial -> type={which}")
@@ -829,7 +792,7 @@ class HostTunnelAgent:
 
             try:
                 self._reload_from_env()
-                self._drain_outbound_queue()  # prevent stale frames across reconnects
+                self._drain_outbound_queue()
 
                 addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
                 tls = "yes" if self.cfg.ca_pem_path else "no"
@@ -838,7 +801,6 @@ class HostTunnelAgent:
                 channel = self._make_channel()
                 stub = host_pb2_grpc.HostTunnelStub(channel)
 
-                # Guaranteed first frames on this stream
                 initial = [self._hello_frame(), self._device_announce_frame()]
 
                 stream = stub.Connect(self._outbound_generator(initial=initial))
@@ -881,7 +843,6 @@ class HostTunnelAgent:
                         warn(f"Cancel req_id={rid}")
                         self._set_cancel(rid)
                     elif which == "heartbeat":
-                        # server heartbeat; ignore
                         pass
                     else:
                         warn(f"Received unknown frame type={which}")
@@ -902,13 +863,10 @@ class HostTunnelAgent:
 
                 warn(f"gRPC error: code={code} details={details}")
 
-                # Fatal rejects: don't reconnect-loop (forces user to fix config)
                 if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.INVALID_ARGUMENT):
                     dlow = (details or "").lower()
-
-                    # Heuristic: device gid conflicts are also ALREADY_EXISTS; treat as devices config
                     if "device" in dlow and "conflict" in dlow:
-                        _die_devices_config(Path(self.cfg.devices_env_path), f"Server rejected device inventory: {details or code}")
+                        _die_devices_config(Path(self.cfg.devices_yaml_path), f"Server rejected device inventory: {details or code}")
                     _die_host_config(Path(self.cfg.host_env_path), f"Server rejected this host: {details or code}")
 
             except Exception:
@@ -966,7 +924,7 @@ def main() -> None:
 
     net_env = _net_env_path()
     host_env = _host_env_path()
-    dev_env = _devices_env_path()
+    devices_yaml = _devices_yaml_path()
 
     net_kv = load_env_file(str(net_env))
     addr = (net_kv.get("REMOTERF_ADDR", "").strip() or os.getenv("REMOTERF_ADDR", "").strip())
@@ -978,7 +936,6 @@ def main() -> None:
     except Exception as e:
         _die_config(net_env, f"Invalid REMOTERF_ADDR={addr!r} ({e}).")
 
-    # cert paths resolve relative to net.env directory
     ca_path = _resolve_path(net_env, net_kv.get("REMOTERF_CA_CERT", "").strip())
     client_cert = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_CERT", "").strip())
     client_key = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_KEY", "").strip())
@@ -988,7 +945,7 @@ def main() -> None:
         server_port=server_port,
         net_env_path=str(net_env),
         host_env_path=str(host_env),
-        devices_env_path=str(dev_env),
+        devices_yaml_path=str(devices_yaml),
         version=os.getenv("HOST_VERSION", "host-agent/dev"),
         ca_pem_path=ca_path or None,
         client_cert_pem_path=client_cert or None,
@@ -996,7 +953,7 @@ def main() -> None:
     )
 
     info(f"Config loaded: addr={cfg.server_host}:{int(cfg.server_port)} tls={'yes' if cfg.ca_pem_path else 'no'}")
-    info(f"Paths: net_env={cfg.net_env_path} host_env={cfg.host_env_path} devices_env={cfg.devices_env_path}")
+    info(f"Paths: net_env={cfg.net_env_path} host_env={cfg.host_env_path} devices_yaml={cfg.devices_yaml_path}")
 
     agent = HostTunnelAgent(cfg)
     try:

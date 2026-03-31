@@ -1,14 +1,18 @@
-# device_manager.py (host)
-
 from __future__ import annotations
 
 import adi
 import os
 import re
+import yaml
 import subprocess
 import threading
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Any
+
+# Use the same helper the other device manager uses.
+# Adjust this import path only if your host package layout differs.
+from ..common.utils import get_remoterf_root
+
 
 # -----------------------------
 # Pluto helpers
@@ -38,7 +42,6 @@ def get_usb_port_from_serial(serial: str) -> Optional[str]:
         print(f"Error running iio_info: {e}")
         return None
 
-    # Be tolerant: iio_info varies; match either serial= or hw_serial=
     for line in out.splitlines():
         if (f"serial={serial}" in line) or (f"hw_serial={serial}" in line):
             m = re.search(r"\[usb:([^\]]+)\]", line)
@@ -50,125 +53,71 @@ def get_usb_port_from_serial(serial: str) -> Optional[str]:
 
 
 # -----------------------------
-# repo-local config paths
+# same YAML config loading as server device_manager
 # -----------------------------
 
-def _repo_root() -> Path:
-    """
-    Robustly find the repo root by locating the 'src' directory in parents.
-    Works for paths like:
-      <repo>/src/remoteRF_host/host/device_manager.py
-    """
-    p = Path(__file__).resolve()
-    for parent in p.parents:
-        if parent.name == "src":
-            return parent.parent
-    # fallback: best-effort
-    if len(p.parents) >= 4:
-        return p.parents[3]
-    return p.parent
+def _cfg_dir() -> Path:
+    p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
-
-def _devices_env_candidates() -> list[Path]:
-    """
-    Prefer the new canonical location used by tunnel_agent.py:
-      <repo>/.config/devices.env
-
-    But keep backwards-compat with your older layout:
-      <repo>/config/remoteRF_host/devices.env
-    """
-    root = _repo_root()
-    return [
-        root / ".config" / "devices.env",
-        root / "config" / "remoteRF_host" / "devices.env",
-    ]
-
-
-def _devices_env_path() -> Path:
-    # Allow override
-    override = (os.getenv("REMOTERF_DEVICES_ENV", "") or "").strip()
-    if override:
-        return Path(override).expanduser().resolve()
-
-    for p in _devices_env_candidates():
-        if p.exists():
-            return p
-
-    # default to canonical path even if missing
-    return _repo_root() / ".config" / "devices.env"
-
-
-# -----------------------------
-# .env parsing
-# -----------------------------
-
-_ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
-_DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
-
-def _strip_quotes(v: str) -> str:
-    v = (v or "").strip()
-    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-        return v[1:-1]
-    return v
-
-
-def _read_env_file(path: Path) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    if not path.exists():
-        return out
-    try:
-        txt = path.read_text(encoding="utf-8")
-    except Exception:
-        return out
-
-    for raw in txt.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = _ENV_LINE.match(line)
-        if not m:
-            continue
-        k = m.group(1).strip()
-        v = _strip_quotes(m.group(2))
-        out[k] = v
-    return out
+def _devices_yaml_path() -> Path:
+    p1 = _cfg_dir() / "devices.yml"
+    if p1.exists():
+        return p1
+    return _cfg_dir() / "devices.yaml"
 
 
 def _load_device_records() -> Dict[int, Dict[str, str]]:
-    """
-    Returns:
-      { gid: { "TYPE":..., "NAME":..., "IDENT_KIND":..., "IDENT":..., ... } }
-    """
-    kv = _read_env_file(_devices_env_path())
+    path = _devices_yaml_path()
+    if not path.exists():
+        return {}
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"Error reading YAML config {path}: {e}")
+        return {}
+
+    devices = data.get("devices") or []
+    if not isinstance(devices, list):
+        print(f"Invalid YAML config {path}: 'devices' must be a list")
+        return {}
+
     recs: Dict[int, Dict[str, str]] = {}
 
-    # New format: DEVICE_<gid>_<FIELD>
-    for k, v in kv.items():
-        m = _DEVICE_KEY_RE.match(k.strip())
-        if not m:
+    for item in devices:
+        if not isinstance(item, dict):
             continue
-        try:
-            gid = int(m.group(1))
-        except Exception:
-            continue
-        field = m.group(2).strip().upper()
-        recs.setdefault(gid, {})[field] = str(v).strip()
 
-    # Back-compat: DEVICE_<gid>_ID treated as IDENT (iio_serial)
-    for k, v in kv.items():
-        kk = k.strip().upper()
-        if not kk.startswith("DEVICE_") or not kk.endswith("_ID"):
-            continue
-        mid = kk[7:-3]
         try:
-            gid = int(mid)
+            gid = int(item["device_id"])
         except Exception:
+            print(f"Skipping device entry with invalid/missing device_id: {item}")
             continue
-        recs.setdefault(gid, {})
-        recs[gid].setdefault("TYPE", "pluto")
-        recs[gid].setdefault("NAME", f"device-{gid}")
-        recs[gid].setdefault("IDENT_KIND", "iio_serial")
-        recs[gid].setdefault("IDENT", str(v).strip())
+
+        dtype = str(item.get("device_type") or "pluto").strip().lower()
+        if dtype != "pluto":
+            print(f"Skipping unsupported device_type={dtype!r} for gid={gid}")
+            continue
+
+        name = str(item.get("name") or f"device-{gid}").strip()
+        init = item.get("init") or {}
+        if not isinstance(init, dict):
+            init = {}
+
+        serial = str(init.get("serial") or "").strip()
+        if not serial:
+            print(f"Skipping Pluto gid={gid}: missing init.serial")
+            continue
+
+        recs[gid] = {
+            "TYPE": "pluto",
+            "NAME": name,
+            "IDENT_KIND": "iio_serial",
+            "IDENT": serial,
+        }
 
     return recs
 
@@ -211,19 +160,15 @@ def _connect_from_record(rec: Dict[str, str]) -> Tuple[object | None, str, str]:
 
 _state_lock = threading.RLock()
 
-# legacy maps
 device_serialization: Dict[int, str] = {}
 devices_info: Dict[int, str] = {}
-
-# gid -> (dev, ident, dtype)
 devices: Dict[int, Tuple[object | None, str, str]] = {}
 
-master_token = "***REMOVED***"  # (host can have one; but host RPC should NOT need it)
+master_token = os.getenv("REMOTERF_MASTER_TOKEN", "***REMOVED***")
 
 def reload_devices() -> None:
     """
-    Reload devices.env and reconnect devices.
-    Safe to call at startup and optionally on MetaRequest / refresh flows.
+    Reload devices.yaml/devices.yml and reconnect devices.
     """
     global devices, devices_info, device_serialization
 
@@ -250,7 +195,6 @@ def reload_devices() -> None:
         device_serialization = tmp_ser
 
 
-# initialize on import
 reload_devices()
 
 
@@ -277,9 +221,6 @@ def device_exists(device_id: int | str) -> bool:
 
 
 def get_device(*, id: int | str):
-    """
-    Accepts 10 or "10". Returns the live device object, or None if missing/offline.
-    """
     try:
         did = int(id)
     except Exception:
