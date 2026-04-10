@@ -15,7 +15,7 @@ and the server auto-discovers it on startup via load_drivers().
 The admin's schema file:
     1. Imports from this module
     2. Subclasses DeviceSchema
-    3. Decorates with @register_driver("pluto")
+    3. Decorates with @idl_register("pluto")
     4. Implements make_device(**kwargs) — factory from manifest config
     5. Decorates exposed methods with @idl_expose(kind="get"|"set"|"call")
 
@@ -95,6 +95,8 @@ def register_driver(device_type: str):
         _DRIVER_REGISTRY[key] = cls
         return cls
     return decorator
+
+idl_register = register_driver
 
 def get_driver_class(device_type: str) -> type:
     cls = _DRIVER_REGISTRY.get(device_type.strip().lower())

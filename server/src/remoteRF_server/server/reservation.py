@@ -277,7 +277,11 @@ class ReservationHandler:
     def _clean_expired_reservations(self, device_id: int):
         """Remove expired reservations from the database."""
         current_time = datetime.now()
-        self.db.cursor().execute('DELETE FROM Reservations WHERE device_id = ? AND end_time < ?', (device_id, current_time))
+        cur = self.db.cursor()
+        try:
+            cur.execute('DELETE FROM Reservations WHERE device_id = ? AND end_time < ?', (device_id, current_time))
+        finally:
+            cur.close()
     
     @db_connection
     def get_reserved_device_ids_for_user(self, username: str) -> list[int]:
@@ -737,13 +741,20 @@ from pathlib import Path
 LOG_PATH = get_db_dir() / "activity_logs.npy"
 log_lock = threading.Lock()
 
-def _load_logs ():
+def _load_logs():
     if LOG_PATH.exists():
         return np.load(LOG_PATH, allow_pickle=True).tolist()
     return []
 
-def _save_logs (logs):
+def _save_logs(logs):
     np.save(LOG_PATH, logs, allow_pickle=True)
+
+def _append_log(entry: dict):
+    """Append a single log entry. Holds log_lock only during file I/O, not during the RPC call."""
+    with log_lock:
+        logs = _load_logs()
+        logs.append(entry)
+        _save_logs(logs)
 
 # Store a reference to the original handle_call so we can wrap it
 ReservationHandler._original_handle_call = ReservationHandler.handle_call
@@ -764,44 +775,33 @@ def sanitize_for_logging(obj):
     else:
         return repr(obj)
 
-# Store a reference to the original handle_call so we can wrap it
-ReservationHandler._original_handle_call = ReservationHandler.handle_call
-
 def handle_call_wrapper(self, *, function_name, args):
     """
     Wrapper around the original handle_call.
-    Ensures thread-safe logging to .npy by acquiring a global lock
-    and sanitizes the args/result for pickling.
+    The RPC call runs WITHOUT holding log_lock so a slow/stalled disk write
+    can never block the server. Logging happens after the call returns.
     """
-    with log_lock:
-        # Load logs (thread-safe)
-        activity_log = _load_logs()
+    # Make a sanitized copy of args before the call (no lock needed here)
+    sanitized_args = sanitize_for_logging(dict(args))
+    if 'pw' in sanitized_args:
+        sanitized_args['pw'] = '*'
 
-        # Make a sanitized copy of args (to hide passwords and non-pickleable objects)
-        sanitized_args = sanitize_for_logging(dict(args))
-        if 'pw' in sanitized_args:
-            sanitized_args['pw'] = '*'
+    # Run the actual RPC — NOT inside log_lock
+    result = self._original_handle_call(function_name=function_name, args=args)
 
-        # Call the original handle_call
-        result = self._original_handle_call(function_name=function_name, args=args)
-
-        # Sanitize the result
-        sanitized_result = sanitize_for_logging(result)
-
-        # Append a new entry to our logs
-        username = sanitize_for_logging(unmap_arg(args['un'])) if 'un' in args else 'N/A'
-        activity_log.append({
-            "timestamp": datetime.now().isoformat(),
-            "action": function_name,
-            "username": username,
-            "details": {
-                "args": sanitized_args,
-                "result": sanitized_result
-            }
-        })
-
-        # Save logs back to .npy (thread-safe)
-        _save_logs(activity_log)
+    # Log asynchronously after the call completes
+    sanitized_result = sanitize_for_logging(result)
+    username = sanitize_for_logging(unmap_arg(args['un'])) if 'un' in args else 'N/A'
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "action": function_name,
+        "username": username,
+        "details": {
+            "args": sanitized_args,
+            "result": sanitized_result
+        }
+    }
+    threading.Thread(target=_append_log, args=(entry,), daemon=True).start()
 
     return result
 
