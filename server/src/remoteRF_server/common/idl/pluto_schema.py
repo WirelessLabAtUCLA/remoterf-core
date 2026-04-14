@@ -172,3 +172,51 @@ class PlutoSchema(DeviceSchema):
     @idl_expose(kind="call")
     def call_tx_destroy_buffer(self):
         self.device.tx_destroy_buffer()
+
+    # endregion
+
+    # region ip / repr
+
+    @idl_expose(kind="call")
+    def call_ip(self):
+        """Return a connection identifier for this device (ping / verify)."""
+        try:
+            return str(self.device.uri)
+        except AttributeError:
+            return str(self.device._uri_auto)
+
+    @idl_expose(kind="get")
+    def get_repr(self):
+        """Return repr() of the underlying device object."""
+        return repr(self.device)
+
+    # endregion
+
+    # region _dec_int_fpga_filter
+
+    @idl_expose(kind="get")
+    def get_rx_dec8_filter_en(self):
+        """rx_dec8_filter_en: Enable decimate-by-8 filter in FPGA"""
+        return bool(self.device.rx_dec8_filter_en)
+
+    @idl_expose(kind="set")
+    def set_rx_dec8_filter_en(self, value):
+        """rx_dec8_filter_en: Enable decimate-by-8 filter in FPGA"""
+        self.device.rx_dec8_filter_en = value
+
+    @idl_expose(kind="get")
+    def get_tx_int8_filter_en(self):
+        """tx_int8_filter_en: Enable interpolate-by-8 filter in FPGA"""
+        return bool(self.device.tx_int8_filter_en)
+
+    @idl_expose(kind="set")
+    def set_tx_int8_filter_en(self, value):
+        """tx_int8_filter_en: Enable interpolate-by-8 filter in FPGA"""
+        self.device.tx_int8_filter_en = value
+
+    @idl_expose(kind="get")
+    def get_rates(self):
+        """Get decimation/interpolation rates from the FPGA filter block."""
+        return self.device._get_rates(self.device._rxadc, False)
+
+    # endregion

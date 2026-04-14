@@ -52,7 +52,7 @@
 
 from .reservation import reservation_handler
 from ..common.utils import *
-from .device_manager import acquire_device, VirtualDevice
+from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_schema_by_token
 from ..host import host_tunnel_server as hts
 
 class RpcManager:
@@ -116,9 +116,8 @@ class RpcManager:
             except Exception as e:
                 return {'a': map_arg(str(e))}
 
-        # Future: IDL control-plane endpoints (schema discovery, generic invoke)
-        # if fn_type == "IDL":
-        #     return self._handle_idl(function_name.split(':', 1)[1], args)
+        if fn_type == "IDL":
+            return self._handle_idl(function_name.split(':', 1)[1], args)
 
         if fn_type == "ACC":
             return reservation_handler.handle_call(function_name=function_name.split(':', 1)[1], args=args)
@@ -127,5 +126,61 @@ class RpcManager:
             return args
 
         return {'a': map_arg(f'Unknown RPC: {function_name}')}
+
+    # ── IDL control-plane ────────────────────────────────────────────
+
+    def _handle_idl(self, sub: str, args: dict) -> dict:
+        """
+        IDL:get_drivers  →  schema + driver metadata for a device.
+
+        Args (one required):
+            device_id   int     gid of the device
+            device_name str     human-readable name (case-insensitive match)
+
+        Returns:
+            schema          str   full IDL as compact JSON  (parse with json.loads)
+            driver_version  str   e.g. "0.0.1"
+            schema_hash     str   e.g. "sha256:abcdef..."
+            device_type     str   e.g. "pluto"
+        """
+        if sub == "get_drivers":
+            # Resolve device by token (preferred), device_id, or device_name.
+            schema = None
+
+            if 'token' in args:
+                api_token = str(unmap_arg(args['token']))
+                schema = get_schema_by_token(api_token)
+                if schema is None:
+                    return {'error': map_arg('No schema available for this token (invalid token or host device)')}
+
+            elif 'device_id' in args:
+                try:
+                    gid = int(unmap_arg(args['device_id']))
+                except (ValueError, TypeError):
+                    return {'error': map_arg('device_id must be an integer')}
+                schema = get_device_schema(gid)
+                if schema is None:
+                    return {'error': map_arg(f'No schema available for device {gid} (offline or host device)')}
+
+            elif 'device_name' in args:
+                name = str(unmap_arg(args['device_name']))
+                gid = find_device_id_by_name(name)
+                if gid is None:
+                    return {'error': map_arg(f'No device found with name {name!r}')}
+                schema = get_device_schema(gid)
+                if schema is None:
+                    return {'error': map_arg(f'No schema available for device {name!r} (offline or host device)')}
+
+            else:
+                return {'error': map_arg('IDL:get_drivers requires token, device_id, or device_name')}
+
+            return {
+                'schema':         map_arg(schema.get_idl_json()),
+                'driver_version': map_arg(schema.driver_version),
+                'schema_hash':    map_arg(schema.get_idl_hash()),
+                'device_type':    map_arg(schema.device_type),
+            }
+
+        return {'error': map_arg(f'Unknown IDL call: {sub!r}')}
 
 rpc_manager = RpcManager()

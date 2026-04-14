@@ -490,6 +490,84 @@ def get_device_by_id(device_id: int):
             return None
         return (st.dev, st.salt, st.hsh)
 
+def get_device_schema(device_id: int):
+    """
+    Return a DeviceSchema instance for this device, or None if unavailable.
+
+    For local devices: returns the live bound schema instance.
+    For host devices: instantiates an unbound schema from the driver registry
+    using the device's dtype — sufficient for IDL/hash purposes since the
+    schema structure is defined by the class, not the live device.
+    """
+    with _state_lock:
+        st = _devices.get(int(device_id))
+        if st is None:
+            return None
+
+        if st.origin == "local" and st.dev is not None:
+            return st.dev
+
+        if st.origin == "host" and st.dtype:
+            try:
+                return get_driver_class(st.dtype)()
+            except KeyError:
+                return None
+
+    return None
+
+def get_schema_by_token(api_token: str):
+    """
+    Resolve an API token to its DeviceSchema without acquiring the I/O lock.
+
+    Returns the DeviceSchema for the device this token grants access to,
+    or None if the token is invalid, the device is a host device, or the
+    device has no schema loaded.
+    """
+    if not api_token:
+        return None
+
+    _sync_host_devices()
+    gid: Optional[int] = None
+
+    if api_token == master_token:
+        with _state_lock:
+            for k, st in _devices.items():
+                if st.origin == "local" and _is_connected(st) and st.salt == "" and st.hsh == "":
+                    gid = k
+                    break
+    else:
+        parsed = parse_mastertoken(api_token)
+        if parsed:
+            cand, _ = parsed
+            with _state_lock:
+                st = _devices.get(int(cand))
+                if st and _is_connected(st):
+                    gid = int(cand)
+        else:
+            with _state_lock:
+                snapshot = [
+                    (k, st.salt, st.hsh)
+                    for k, st in _devices.items()
+                    if _is_connected(st)
+                ]
+            for k, salt, hsh in snapshot:
+                if salt and hsh and validate_token(salt, hsh, api_token):
+                    gid = k
+                    break
+
+    if gid is None:
+        return None
+    return get_device_schema(gid)
+
+def find_device_id_by_name(name: str) -> Optional[int]:
+    """Return the gid of the first device whose name matches (case-insensitive), or None."""
+    name_lower = name.strip().lower()
+    with _state_lock:
+        for gid, st in _devices.items():
+            if st.name.strip().lower() == name_lower:
+                return gid
+    return None
+
 def get_device(*, api_token: str):
     if not api_token:
         return None
