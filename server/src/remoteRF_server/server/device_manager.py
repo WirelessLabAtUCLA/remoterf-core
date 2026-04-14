@@ -5,9 +5,7 @@ from __future__ import annotations
 import os
 import re
 import time
-import adi
 import yaml
-import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +13,8 @@ from typing import Dict, Tuple, Optional, Any, List, Iterator
 from contextlib import contextmanager
 
 from ..common.utils import validate_token, get_remoterf_root
-from ..host import host_tunnel_server as hts  
+from ..common.idl.schema import get_driver_class, load_drivers
+from ..host import host_tunnel_server as hts
 
 _state_lock = threading.RLock()
 
@@ -265,9 +264,9 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
             print(f"Skipping device entry with invalid/missing device_id: {item}")
             continue
 
-        dtype = str(item.get("device_type") or "pluto").strip().lower()
-        if dtype != "pluto":
-            print(f"Skipping unsupported device_type={dtype!r} for gid={gid}")
+        dtype = str(item.get("device_type") or "").strip().lower()
+        if not dtype:
+            print(f"Skipping device gid={gid}: missing device_type")
             continue
 
         name = str(item.get("name") or f"device-{gid}").strip()
@@ -276,83 +275,40 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
             init = {}
 
         serial = str(init.get("serial") or "").strip()
-        if not serial:
-            print(f"Skipping Pluto gid={gid}: missing init.serial")
-            continue
 
         recs[gid] = {
-            "TYPE": "pluto",
+            "TYPE": dtype,
             "NAME": name,
-            "IDENT_KIND": "iio_serial",
             "IDENT": serial,
+            "INIT": init,
         }
 
     return recs
 
-# Pluto helpers
-
-def connect_pluto(*, ip: str = "", usb: str = ""):
-    try:
-        if ip == "":
-            dev = adi.Pluto(f"usb:{usb}")
-            print(f"Connected to Pluto usb:{usb}")
-        else:
-            dev = adi.Pluto(f"ip:{ip}")
-            print(f"Connected to Pluto ip:{ip}")
-        return dev
-    except Exception as e:
-        print(f"Pluto {ip}: {e}")
-        return None
-
-def get_usb_port_from_serial(serial: str) -> str | None:
-    serial = (serial or "").strip()
-    if not serial:
-        return None
-
-    try:
-        out = subprocess.check_output(["iio_info", "-s"], text=True, stderr=subprocess.STDOUT)
-    except Exception as e:
-        print(f"Error running iio_info: {e}")
-        return None
-
-    for line in out.splitlines():
-        if (f"serial={serial}" in line) or (f"hw_serial={serial}" in line):
-            m = re.search(r"\[usb:([^\]]+)\]", line)
-            if m:
-                return m.group(1).strip()
-
-    print(f"No device found with serial {serial}")
-    return None
-
-def _connect_from_record(rec: Dict[str, str]):
-    # Returns (device_obj, ident, dtype).
-   
+def _connect_from_record(rec: Dict[str, Any]):
+    """Returns (schema_instance_or_None, ident, dtype)."""
     dtype = (rec.get("TYPE") or "").strip().lower()
-    ident_kind = (rec.get("IDENT_KIND") or "").strip().lower()
     ident = (rec.get("IDENT") or "").strip()
+    init_kwargs = rec.get("INIT") or {}
 
-    if dtype != "pluto":
+    try:
+        schema_cls = get_driver_class(dtype)
+    except KeyError:
+        print(f"No driver registered for device_type={dtype!r} — skipping")
         return (None, ident, dtype)
 
-    if ident_kind in ("iio_serial", "serial", "iio"):
-        if not ident:
-            return (None, ident, dtype)
-        usb_port = get_usb_port_from_serial(ident)
-        if not usb_port:
-            return (None, ident, dtype)
-        return (connect_pluto(usb=usb_port), ident, dtype)
+    try:
+        raw_dev = schema_cls.make_device(**init_kwargs)
+    except Exception as e:
+        print(f"make_device() failed for {dtype}: {e}")
+        return (None, ident, dtype)
 
-    if ident_kind == "usb":
-        if not ident:
-            return (None, ident, dtype)
-        return (connect_pluto(usb=ident), ident, dtype)
+    if raw_dev is None:
+        return (None, ident, dtype)
 
-    if ident_kind == "ip":
-        if not ident:
-            return (None, ident, dtype)
-        return (connect_pluto(ip=ident), ident, dtype)
-
-    return (None, ident, dtype)
+    schema = schema_cls()
+    schema.bind(raw_dev)
+    return (schema, ident, dtype)
 
 # Thread-safe runtime state
 
@@ -406,7 +362,21 @@ def _init_from_env() -> None:
         device_serialization.update(tmp_ser)
 
 
-# initialize on import
+# Load built-in drivers, then any user-supplied drivers from the config dir.
+# Importing the module triggers @idl_register, which adds the class to the registry.
+def _load_all_drivers() -> None:
+    try:
+        from ..common.idl import pluto_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in pluto driver: {e}")
+
+    results = load_drivers()
+    for fname, status in results.items():
+        if status != "ok":
+            print(f"Driver load {fname}: {status}")
+
+
+_load_all_drivers()
 _init_from_env()
 
 # Legacy reservation helpers (master token parsing)

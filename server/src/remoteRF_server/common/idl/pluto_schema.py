@@ -3,7 +3,7 @@
 # Admin-written schema for ADALM-Pluto devices.
 # Drop this file into the drivers folder, restart the server. Done.
 
-from . import *
+from remoteRF_server.common.idl import DeviceSchema, idl_register, idl_expose
 
 import subprocess
 import re
