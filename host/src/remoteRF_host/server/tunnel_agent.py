@@ -155,6 +155,19 @@ try:
 except Exception:
     get_all_devices_str = None
 
+try:
+    from ..drivers.adalm_pluto.pluto_idl import (  # type: ignore
+        idl_for_device_type,
+        capabilities_string,
+    )
+    _IDL_AVAILABLE = True
+except Exception:
+    _IDL_AVAILABLE = False
+    def idl_for_device_type(device_type):   # type: ignore
+        return {}
+    def capabilities_string(idl):            # type: ignore
+        return ""
+
 
 # -------------------------
 # Misc helpers
@@ -524,6 +537,16 @@ class HostTunnelAgent:
         for gid in sorted(self._devices.keys()):
             d = self._devices[gid]
             label = (d.get("label", "").strip() or dyn_labels.get(gid, "") or f"Device {gid}")
+            dtype = (d.get("kind") or d.get("type") or "").lower()
+
+            # Loop through this device's IDL so we can log how many operations
+            # are being advertised — same pattern as the server's device loop.
+            if _IDL_AVAILABLE:
+                idl = idl_for_device_type(dtype)
+                info(
+                    f"Device gid={gid} type={dtype!r}: "
+                    f"IDL has {len(idl)} registered attribute(s)."
+                )
 
             infos.append(
                 host_pb2.DeviceInfo(
@@ -568,9 +591,31 @@ class HostTunnelAgent:
             except Exception:
                 pass
 
+        def _set_kv(key: str, value: str) -> None:
+            try:
+                meta.kv[key] = value
+            except Exception:
+                pass
+
         _set("host_id", self._host_id)
         _set("unix_ms", _now_ms())
         _set("version", self.cfg.version)
+
+        # Loop through every announced device and attach its IDL capability
+        # string so the server knows exactly what GET/SET/CALL operations each
+        # device supports — mirroring how the server loops through host device
+        # definitions when routing RPCs.
+        if _IDL_AVAILABLE and self._devices:
+            for gid in sorted(self._devices.keys()):
+                d = self._devices[gid]
+                dtype = (d.get("kind") or d.get("type") or "").lower()
+                idl = idl_for_device_type(dtype)
+                if idl:
+                    caps = capabilities_string(idl)
+                    _set_kv(f"device.{gid}.type", dtype)
+                    _set_kv(f"device.{gid}.caps", caps)
+                    info(f"IDL caps for gid={gid} type={dtype}: {len(idl)} attributes")
+
         return meta
 
     def _handle_meta_request(self, req: host_pb2.MetaRequest) -> None:

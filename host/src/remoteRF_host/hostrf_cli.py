@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import sys
 import shutil
-import re
+import yaml
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
 from .common.utils import get_remoterf_root
@@ -32,8 +32,8 @@ def _net_env_path() -> Path:
 def _host_env_path() -> Path:
     return _cfg_dir() / "host.env"
 
-def _devices_env_path() -> Path:
-    return _cfg_dir() / "devices.env"
+def _devices_yaml_path() -> Path:
+    return _cfg_dir() / "devices.yml"
 
 
 # -----------------------------
@@ -63,10 +63,10 @@ def print_help() -> None:
         "\n"
         "Device option:\n"
         "  --device --add --pluto <gid:\"name\":serial>  Add device (fails if gid OR serial already used)\n"
-        "  --device --edit-name <gid> \"<new_name>\"     Edit device name (DEVICE_<gid>_NAME)\n"
+        "  --device --edit-name <gid> \"<new_name>\"     Edit device name\n"
         "  --device --remove <gid>                   Remove device\n"
         "  --device --show                           Show all devices\n"
-        "  --device --wipe [-y]                      Wipe ONLY device stuff (devices.env)\n"
+        "  --device --wipe [-y]                      Wipe ONLY device config (devices.yml)\n"
         "\n"
         "Wipe all:\n"
         "  -w, --wipe [-y]                      Wipe ALL config\n"
@@ -135,15 +135,15 @@ def _read_env_kv(path: Path) -> Dict[str, str]:
 
 
 # -----------------------------
-# Device storage (future-friendly)
-#   devices.env keys:
-#     DEVICE_<gid>_TYPE=pluto
-#     DEVICE_<gid>_NAME=pluto_aaa
-#     DEVICE_<gid>_IDENT_KIND=iio_serial
-#     DEVICE_<gid>_IDENT=<serial>
+# Device storage — devices.yml (same schema as server)
+#
+#   devices:
+#     - device_id: 0
+#       device_type: pluto
+#       name: pluto_aaa
+#       init:
+#         serial: 123123
 # -----------------------------
-
-_DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
 
 def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
     # <gid:name:iio_serial>
@@ -160,32 +160,56 @@ def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
         raise ValueError("iio_serial is empty")
     return gid, name, iio_serial
 
-def _read_device_records() -> Dict[int, Dict[str, str]]:
-    kv = _read_env_kv(_devices_env_path())
-    recs: Dict[int, Dict[str, str]] = {}
-    for k, v in kv.items():
-        m = _DEVICE_KEY_RE.match(k.strip())
-        if not m:
+
+def _read_device_records() -> Dict[int, Dict[str, Any]]:
+    """Load devices.yml and return {gid: record_dict}."""
+    path = _devices_yaml_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"ERROR: Failed to read {path}: {e}", file=sys.stderr)
+        return {}
+
+    devices = data.get("devices") or []
+    if not isinstance(devices, list):
+        print(f"ERROR: {path}: 'devices' must be a list", file=sys.stderr)
+        return {}
+
+    recs: Dict[int, Dict[str, Any]] = {}
+    for item in devices:
+        if not isinstance(item, dict):
             continue
-        gid = int(m.group(1))
-        field = m.group(2).upper().strip()
-        recs.setdefault(gid, {})[field] = str(v).strip()
+        try:
+            gid = int(item["device_id"])
+        except Exception:
+            continue
+        recs[gid] = item
     return recs
 
-def _write_device_records(recs: Dict[int, Dict[str, str]]) -> None:
-    out: Dict[str, str] = {}
+
+def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
+    """Write {gid: record_dict} back to devices.yml in server-compatible format."""
+    path = _devices_yaml_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    devices_list = []
     for gid in sorted(recs.keys()):
-        fields = recs[gid]
-        order = ["TYPE", "NAME", "IDENT_KIND", "IDENT"]
-        for f in order:
-            if f in fields and fields[f] != "":
-                out[f"DEVICE_{gid}_{f}"] = fields[f]
-        for f in sorted(fields.keys()):
-            if f in order:
-                continue
-            if fields[f] != "":
-                out[f"DEVICE_{gid}_{f}"] = fields[f]
-    _write_env_kv(_devices_env_path(), out)
+        item = recs[gid]
+        # Normalise to canonical server schema order
+        entry: Dict[str, Any] = {
+            "device_id": int(gid),
+            "device_type": str(item.get("device_type", "pluto")),
+            "name": str(item.get("name", f"device-{gid}")),
+            "init": dict(item.get("init") or {}),
+        }
+        devices_list.append(entry)
+
+    doc: Dict[str, Any] = {"devices": devices_list}
+    with path.open("w", encoding="utf-8") as f:
+        yaml.dump(doc, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
 # -----------------------------
@@ -332,17 +356,18 @@ def _device_add_pluto(spec: str) -> int:
         print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
         return 2
 
-    # Prevent duplicate iio_serial across existing devices that use iio_serial
+    # Prevent duplicate iio_serial across existing devices
     for other_gid, r in recs.items():
-        if r.get("IDENT_KIND", "") == "iio_serial" and r.get("IDENT", "") == iio_serial:
+        existing_serial = str((r.get("init") or {}).get("serial", "")).strip()
+        if existing_serial and existing_serial == iio_serial:
             print(f"ERROR: iio_serial already used by global_id={other_gid}", file=sys.stderr)
             return 2
 
     recs[gid] = {
-        "TYPE": "pluto",
-        "NAME": name,
-        "IDENT_KIND": "iio_serial",
-        "IDENT": iio_serial,
+        "device_id": gid,
+        "device_type": "pluto",
+        "name": name,
+        "init": {"serial": iio_serial},
     }
     _write_device_records(recs)
 
@@ -366,7 +391,7 @@ def _device_edit_name(global_id_str: str, new_name: str) -> int:
         print(f"ERROR: global_id {gid} not present; cannot edit name.", file=sys.stderr)
         return 2
 
-    recs[gid]["NAME"] = new_name
+    recs[gid]["name"] = new_name
     _write_device_records(recs)
 
     print(f"Updated device name: {gid} name={new_name}")
@@ -390,7 +415,7 @@ def _device_remove(global_id_str: str) -> int:
     return 0
 
 def _device_show() -> int:
-    p = _devices_env_path()
+    p = _devices_yaml_path()
     if not p.exists():
         print(f"No devices configured (missing {p}).")
         return 0
@@ -403,11 +428,11 @@ def _device_show() -> int:
 
     for gid in sorted(recs.keys()):
         r = recs[gid]
-        dtype = r.get("TYPE", "")
-        name = r.get("NAME", "")
-        ik = r.get("IDENT_KIND", "")
-        ident = r.get("IDENT", "")
-        print(f"  {gid}: type={dtype} name={name} {ik}={ident}")
+        dtype = r.get("device_type", "")
+        name = r.get("name", "")
+        init = r.get("init") or {}
+        serial = init.get("serial", "")
+        print(f"  {gid}: type={dtype} name={name} iio_serial={serial}")
     return 0
 
 def _wipe_all(*, yes: bool) -> int:
@@ -463,16 +488,17 @@ def _wipe_host_only(*, yes: bool) -> int:
 def _wipe_devices_only(*, yes: bool) -> int:
     if not yes:
         try:
-            if input("This will delete devices.env. Type 'wipe' to confirm: ").strip().lower() != "wipe":
+            if input("This will delete devices.yml. Type 'wipe' to confirm: ").strip().lower() != "wipe":
                 print("Wipe aborted.")
                 return 1
         except KeyboardInterrupt:
             print("\nCancelled.")
             return 1
 
-    if _devices_env_path().exists():
-        _devices_env_path().unlink()
-    print("Wiped device config (devices.env).")
+    p = _devices_yaml_path()
+    if p.exists():
+        p.unlink()
+    print("Wiped device config (devices.yml).")
     return 0
 
 
