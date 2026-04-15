@@ -559,6 +559,63 @@ def get_schema_by_token(api_token: str):
         return None
     return get_device_schema(gid)
 
+def resolve_gid_for_token(api_token: str) -> Optional[int]:
+    """
+    Resolve an API token to its device gid regardless of device origin
+    (local or host/VirtualDevice).
+
+    Unlike get_schema_by_token — which returns None for host devices because
+    they have no salt/hash — this function also covers:
+      • parsed master-tokens  ('{gid}:secret')  → any device by gid
+      • raw master_token                         → first connected device
+      • regular per-device tokens (salt/hsh)     → local devices
+
+    Used by IDL queries that need a schema even for host devices.
+    Does NOT acquire any device I/O lock.
+    """
+    if not api_token:
+        return None
+
+    _sync_host_devices()
+
+    # Parsed master-token: resolves any device directly by gid (local or host).
+    parsed = parse_mastertoken(api_token)
+    if parsed:
+        cand, _ = parsed
+        with _state_lock:
+            st = _devices.get(int(cand))
+            if st and _is_connected(st):
+                return int(cand)
+        return None
+
+    # Raw master token — prefer local, fall back to any connected device.
+    if api_token == master_token:
+        with _state_lock:
+            # local first
+            for k, st in _devices.items():
+                if st.origin == "local" and _is_connected(st) and st.salt == "" and st.hsh == "":
+                    return k
+            # then host
+            for k, st in _devices.items():
+                if _is_connected(st) and st.salt == "" and st.hsh == "":
+                    return k
+        return None
+
+    # Regular per-device token (salt/hsh).  Host devices have empty salt/hsh
+    # so they won't match here — but this covers local devices correctly.
+    with _state_lock:
+        snapshot = [
+            (k, st.salt, st.hsh)
+            for k, st in _devices.items()
+            if _is_connected(st)
+        ]
+    for k, salt, hsh in snapshot:
+        if salt and hsh and validate_token(salt, hsh, api_token):
+            return k
+
+    return None
+
+
 def find_device_id_by_name(name: str) -> Optional[int]:
     """Return the gid of the first device whose name matches (case-insensitive), or None."""
     name_lower = name.strip().lower()

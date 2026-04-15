@@ -259,6 +259,12 @@ class HostTunnelRegistry:
         self._host_status: Dict[str, HostStatus] = {}
         self._device_status: Dict[str, DeviceStatus] = {}
 
+        # IDL capability strings received via HostMeta.kv from each host.
+        # Keyed by device_id (string gid).  Value is the compact caps string
+        # emitted by the host's capabilities_string() helper, e.g.:
+        #   "disable_dds:call0,filter:rw,hardwaregain_chan0:rw,..."
+        self._host_device_caps: Dict[str, str] = {}
+
         # persistence
         cfg = cfg_dir_from_file(__file__)
         cfg.mkdir(parents=True, exist_ok=True)
@@ -530,6 +536,26 @@ class HostTunnelRegistry:
             self._invalidate_caches_locked()
 
         info(f"[registry] heartbeat: host_id={host_id!r} unix_ms={now}")
+
+    # ── IDL capability cache ────────────────────────────────────────
+
+    def store_host_device_caps(self, host_id: str, device_id: str, caps: str) -> None:
+        """
+        Store the IDL capability string for a host device.
+
+        Called when the server receives HostMeta.kv["device.<gid>.caps"] in a
+        MetaResponse.  The caps string is the compact attr:access list emitted
+        by the host's capabilities_string() helper.
+        """
+        with self._lock:
+            self._host_device_caps[str(device_id)] = str(caps)
+
+    def get_host_device_caps(self, device_id: str) -> str:
+        """
+        Return the IDL capability string for *device_id*, or "" if not yet received.
+        """
+        with self._lock:
+            return self._host_device_caps.get(str(device_id), "")
 
     def announce_devices(self, host_id: str, devices: list) -> None:
         info(f"[registry] announce_devices: host_id={host_id!r} n={len(devices)}")
@@ -1147,7 +1173,7 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             warn(f"[inbound] rpc_response has no inflight waiter req_id={rid} stream_sess={stream_uuid}")
 
                     elif which == "meta_response":
-                        # NEW proto: MetaResponse.meta.devices
+                        # NEW proto: MetaResponse.meta.devices + meta.kv (IDL caps)
                         if host_id is None or session is None:
                             warn(f"[inbound] meta_response before hello/session: ignoring peer={peer} stream_sess={stream_uuid}")
                             continue
@@ -1185,6 +1211,24 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                     exception("[inbound] META_RESPONSE announce_devices failed")
                             else:
                                 info("[inbound] META_RESPONSE had no meta.devices (or empty)")
+
+                            # Read per-device IDL capability strings from meta.kv.
+                            # Keys: "device.<gid>.caps"  "device.<gid>.type"
+                            # These are emitted by the host's tunnel_agent._collect_meta().
+                            try:
+                                kv = dict(getattr(meta, "kv", {}) or {})
+                                for k, v in kv.items():
+                                    # e.g. k="device.0.caps", v="disable_dds:call0,filter:rw,..."
+                                    parts = k.split(".")
+                                    if len(parts) == 3 and parts[0] == "device" and parts[2] == "caps":
+                                        device_id = parts[1]
+                                        self.registry.store_host_device_caps(host_id, device_id, str(v))
+                                        info(
+                                            f"[inbound] stored IDL caps device_id={device_id} "
+                                            f"host_id={host_id!r} n_attrs={len(v.split(','))}"
+                                        )
+                            except Exception:
+                                exception("[inbound] META_RESPONSE failed reading meta.kv caps")
 
                     elif which == "heartbeat":
                         if session is not None and host_id is not None:

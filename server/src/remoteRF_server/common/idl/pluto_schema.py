@@ -84,12 +84,14 @@ class PlutoSchema(DeviceSchema):
         self.device.gain_control_mode_chan0 = value
 
     @idl_expose(kind="get")
-    def get_rx_hardwaregain_chan0(self):
-        return self.device.rx_hardwaregain_chan0
+    def get_hardwaregain_chan0(self):
+        """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
+        return self.device.hardwaregain_chan0
 
     @idl_expose(kind="set")
-    def set_rx_hardwaregain_chan0(self, value):
-        self.device.rx_hardwaregain_chan0 = value
+    def set_hardwaregain_chan0(self, value):
+        """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
+        self.device.hardwaregain_chan0 = value
 
     @idl_expose(kind="get")
     def get_tx_hardwaregain_chan0(self):
@@ -172,6 +174,11 @@ class PlutoSchema(DeviceSchema):
     @idl_expose(kind="call")
     def call_tx_destroy_buffer(self):
         self.device.tx_destroy_buffer()
+
+    @idl_expose(kind="call")
+    def call_disable_dds(self):
+        """Disable the internal DDS tone generator."""
+        self.device.disable_dds()
 
     # endregion
 

@@ -52,7 +52,7 @@
 
 from .reservation import reservation_handler
 from ..common.utils import *
-from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_schema_by_token
+from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_schema_by_token, resolve_gid_for_token
 from ..host import host_tunnel_server as hts
 
 class RpcManager:
@@ -151,7 +151,14 @@ class RpcManager:
                 api_token = str(unmap_arg(args['token']))
                 schema = get_schema_by_token(api_token)
                 if schema is None:
-                    return {'error': map_arg('No schema available for this token (invalid token or host device)')}
+                    # get_schema_by_token returns None for host (VirtualDevice) entries
+                    # because they carry no salt/hsh.  Fall through via gid resolution
+                    # which uses get_device_schema and handles host devices correctly.
+                    gid = resolve_gid_for_token(api_token)
+                    if gid is not None:
+                        schema = get_device_schema(gid)
+                if schema is None:
+                    return {'error': map_arg('No schema available for this token (invalid token or device offline)')}
 
             elif 'device_id' in args:
                 try:
