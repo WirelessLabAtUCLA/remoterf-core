@@ -24,6 +24,7 @@ class _DeviceState:
 
 
 _devices: Dict[int, _DeviceState] = {}
+_loaded_signature: tuple | None = None
 
 device_serialization: Dict[int, str] = {}
 devices_info: Dict[int, str] = {}
@@ -40,6 +41,34 @@ def _devices_yaml_path() -> Path:
     if p1.exists():
         return p1
     return _cfg_dir() / "devices.yaml"
+
+
+def _path_signature(path: Path) -> tuple:
+    try:
+        st = path.stat()
+        return (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        return (str(path.resolve()), None, None)
+
+
+def _drivers_signature() -> tuple:
+    drivers_dir = _cfg_dir() / "drivers"
+    try:
+        files = sorted(
+            f for f in drivers_dir.glob("*.py")
+            if not f.name.startswith("_")
+        )
+    except Exception:
+        files = []
+
+    return tuple(_path_signature(f) for f in files)
+
+
+def _reload_signature() -> tuple:
+    return (
+        _path_signature(_devices_yaml_path()),
+        _drivers_signature(),
+    )
 
 
 def _infer_ident(init: Dict[str, Any]) -> str:
@@ -135,7 +164,14 @@ def _load_all_drivers() -> None:
             print(f"Driver load {fname}: {status}")
 
 
-def reload_devices() -> None:
+def reload_devices(*, force: bool = False) -> bool:
+    global _loaded_signature
+
+    sig = _reload_signature()
+    with _state_lock:
+        if not force and _loaded_signature == sig:
+            return False
+
     _load_all_drivers()
     records = _load_device_records()
 
@@ -170,9 +206,12 @@ def reload_devices() -> None:
 
         device_serialization.clear()
         device_serialization.update(tmp_ser)
+        _loaded_signature = sig
+
+    return True
 
 
-reload_devices()
+reload_devices(force=True)
 
 
 def get_all_devices() -> Dict[int, object]:
