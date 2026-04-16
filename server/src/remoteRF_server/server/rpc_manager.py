@@ -55,66 +55,17 @@ from ..common.utils import *
 from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_schema_by_token, resolve_gid_for_token
 from ..host import host_tunnel_server as hts
 
+
+def _normalize_device_rpc_type(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
 class RpcManager:
     def __init__(self):
         self.debug = False
 
     def run_rpc(self, *, function_name, args) -> map:
         fn_type = function_name.split(':', 1)[0]
-
-        if fn_type == "Pluto":
-            if 'a' not in args:
-                return {'a': map_arg('No token provided')}
-
-            api_token = unmap_arg(args['a'])
-
-            try:
-                with acquire_device(api_token) as (gid, dev):
-
-                    if isinstance(dev, VirtualDevice):
-                        fwd_args = dict(args)
-                        fwd_args.pop('a', None)
-                        fwd_args['g'] = map_arg(int(gid))
-                        return hts.handle_host_device(
-                            hts.get_tunnel_registry(create=False),
-                            host_id=dev.host_id,
-                            device_id=dev.device_id,
-                            function_name=function_name,
-                            args=fwd_args,
-                            timeout_sec=10.0,
-                        )
-
-                    # Schema-based local dispatch.
-                    # Wire format: "Pluto:{prop}:{verb}"  verb = GET | SET | CALL0 | CALL1
-                    parts = function_name.split(':')
-                    prop = parts[1]
-                    verb = parts[2] if len(parts) > 2 else ""
-
-                    if verb == "GET":
-                        result = dev.dispatch(f"get_{prop}", {})
-                        return {prop: map_arg(result)}
-
-                    elif verb == "SET":
-                        value = unmap_arg(args[prop])
-                        dev.dispatch(f"set_{prop}", {"value": value})
-                        return {}
-
-                    elif verb == "CALL0":
-                        result = dev.dispatch(f"call_{prop}", {})
-                        return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
-
-                    elif verb == "CALL1":
-                        if 'arg1' not in args:
-                            raise ValueError("CALL1 requires 'arg1' in args")
-                        value = unmap_arg(args['arg1'])
-                        result = dev.dispatch(f"call_{prop}", {"value": value})
-                        return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
-
-                    else:
-                        raise ValueError(f"Unknown verb {verb!r} in {function_name!r}")
-
-            except Exception as e:
-                return {'a': map_arg(str(e))}
 
         if fn_type == "IDL":
             return self._handle_idl(function_name.split(':', 1)[1], args)
@@ -125,9 +76,110 @@ class RpcManager:
         if function_name == "echo":
             return args
 
+        if self._looks_like_device_rpc(function_name):
+            return self._handle_device_rpc(function_name=function_name, args=args)
+
         return {'a': map_arg(f'Unknown RPC: {function_name}')}
 
     # ── IDL control-plane ────────────────────────────────────────────
+
+    def _looks_like_device_rpc(self, function_name: str) -> bool:
+        parts = function_name.split(':', 2)
+        return len(parts) == 3 and all(parts)
+
+    def _handle_device_rpc(self, *, function_name: str, args: dict) -> dict:
+        if 'a' not in args:
+            return {'a': map_arg('No token provided')}
+
+        api_token = unmap_arg(args['a'])
+
+        try:
+            with acquire_device(api_token) as (gid, dev):
+                self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
+
+                if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
+                    return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
+
+                if isinstance(dev, VirtualDevice):
+                    fwd_args = dict(args)
+                    fwd_args.pop('a', None)
+                    fwd_args['g'] = map_arg(int(gid))
+                    return hts.handle_host_device(
+                        hts.get_tunnel_registry(create=False),
+                        host_id=dev.host_id,
+                        device_id=dev.device_id,
+                        function_name=function_name,
+                        args=fwd_args,
+                        timeout_sec=10.0,
+                    )
+
+                return self._dispatch_local_schema(function_name=function_name, args=args, dev=dev)
+
+        except Exception as e:
+            return {'a': map_arg(str(e))}
+
+    def _validate_device_rpc_type(self, *, function_name: str, gid: int, dev: object) -> None:
+        requested_type = function_name.split(':', 1)[0]
+        actual_type = self._resolve_device_type(gid=gid, dev=dev)
+
+        if not actual_type:
+            return
+
+        if _normalize_device_rpc_type(requested_type) != _normalize_device_rpc_type(actual_type):
+            raise ValueError(
+                f"RPC device type {requested_type!r} does not match reserved device type {actual_type!r}"
+            )
+
+    def _should_use_builtin_ip_fallback(self, *, function_name: str, gid: int, dev: object) -> bool:
+        _, prop, verb = function_name.split(':', 2)
+        if prop != "ip" or verb != "CALL0":
+            return False
+
+        schema = dev if hasattr(dev, "list_exposed") else get_device_schema(gid)
+        if schema is None or not hasattr(schema, "list_exposed"):
+            return True
+
+        calls = schema.list_exposed().get("calls", [])
+        return "call_ip" not in calls
+
+    def _builtin_ip_fallback(self, *, gid: int, dev: object) -> str:
+        actual_type = self._resolve_device_type(gid=gid, dev=dev) or "device"
+        return f"{actual_type}:{int(gid)}"
+
+    def _resolve_device_type(self, *, gid: int, dev: object) -> str:
+        for candidate in (getattr(dev, "device_type", None), getattr(dev, "kind", None)):
+            if candidate:
+                return str(candidate)
+
+        schema = get_device_schema(gid)
+        if schema is None:
+            return ""
+        return str(getattr(schema, "device_type", "") or "")
+
+    def _dispatch_local_schema(self, *, function_name: str, args: dict, dev: object) -> dict:
+        _, prop, verb = function_name.split(':', 2)
+
+        if verb == "GET":
+            result = dev.dispatch(f"get_{prop}", {})
+            return {prop: map_arg(result)}
+
+        if verb == "SET":
+            value = unmap_arg(args[prop])
+            dev.dispatch(f"set_{prop}", {"value": value})
+            return {}
+
+        if verb == "CALL0":
+            result = dev.dispatch(f"call_{prop}", {})
+            return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
+
+        if verb == "CALL1":
+            if 'arg1' not in args:
+                raise ValueError("CALL1 requires 'arg1' in args")
+            value = unmap_arg(args['arg1'])
+            result = dev.dispatch(f"call_{prop}", {"value": value})
+            return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
+
+        raise ValueError(f"Unknown verb {verb!r} in {function_name!r}")
 
     def _handle_idl(self, sub: str, args: dict) -> dict:
         """

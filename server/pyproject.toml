@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoteRF-server-testing"
-version = "0.0.5"
+version = "0.0.8"
 description = "RemoteRF server-side control package"
 requires-python = ">=3.8"
 dependencies = [

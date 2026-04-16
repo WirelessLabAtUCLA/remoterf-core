@@ -8,7 +8,7 @@ import sys
 import time
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -34,7 +34,7 @@ def _read_env_kv(path: Path) -> Dict[str, str]:
     return out
 
 
-def _load_gist_env() -> tuple[str, str, str]:
+def _load_gist_env() -> Optional[Tuple[str, str, str]]:
     p = _cfg_dir() / "gist.env"
     kv = _read_env_kv(p)
 
@@ -42,25 +42,10 @@ def _load_gist_env() -> tuple[str, str, str]:
     token = kv.get("GITHUB_TOKEN", "").strip()
     filename = kv.get("STATUS_GIST_FILENAME", "").strip()
 
-    missing = []
-    if not gist_id:
-        missing.append("STATUS_GIST_ID")
-    if not token:
-        missing.append("GITHUB_TOKEN")
-    if not filename:
-        missing.append("STATUS_GIST_FILENAME")
+    if not gist_id or not token or not filename:
+        return None
 
-    if missing:
-        print(f"[gist_status] Missing {', '.join(missing)} in {p}", file=sys.stderr)
-        print(
-            "[gist_status] Fix: run:\n"
-            "  serverrf --gist --set --id <gist_id> --file <filename>\n"
-            "Or manually create gist.env with those keys.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-    return gist_id, token, filename
+    return (gist_id, token, filename)
 
 
 def build_status() -> dict:
@@ -96,7 +81,10 @@ def push_gist(*, gist_id: str, gh_token: str, filename: str, payload: dict) -> N
 
 
 def _publisher_loop(period_sec: int) -> None:
-    gist_id, gh_token, filename = _load_gist_env()
+    cfg = _load_gist_env()
+    if cfg is None:
+        return
+    gist_id, gh_token, filename = cfg
 
     try:
         push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
@@ -120,6 +108,10 @@ def start_status_publisher() -> None:
     global _publisher_thread
     with _publisher_lock:
         if _publisher_thread is not None and _publisher_thread.is_alive():
+            return
+
+        if _load_gist_env() is None:
+            print("[gist_status] off (not configured; see README gist docs)", file=sys.stderr)
             return
 
         t = threading.Thread(
