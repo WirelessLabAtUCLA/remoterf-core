@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import sys
+import types
 from pathlib import Path
 from typing import Any, Dict
 
@@ -60,7 +61,47 @@ def list_registered_drivers() -> Dict[str, str]:
     }
 
 
+def install_server_import_compat() -> None:
+    """
+    Make server-authored schema imports resolve to the host IDL implementation.
+
+    This lets host driver files reuse the exact same import lines as server
+    driver files, e.g.:
+
+        from remoteRF_server.common.idl import DeviceSchema, idl_register, idl_expose
+    """
+    schema_mod = sys.modules[__name__]
+    idl_pkg = sys.modules.get(__package__)
+    if idl_pkg is None:
+        return
+
+    server_pkg_name = "remoteRF_server"
+    common_pkg_name = "remoteRF_server.common"
+    idl_pkg_name = "remoteRF_server.common.idl"
+    schema_pkg_name = "remoteRF_server.common.idl.schema"
+
+    server_pkg = sys.modules.get(server_pkg_name)
+    if server_pkg is None:
+        server_pkg = types.ModuleType(server_pkg_name)
+        server_pkg.__path__ = []
+        sys.modules[server_pkg_name] = server_pkg
+
+    common_pkg = sys.modules.get(common_pkg_name)
+    if common_pkg is None:
+        common_pkg = types.ModuleType(common_pkg_name)
+        common_pkg.__path__ = []
+        sys.modules[common_pkg_name] = common_pkg
+
+    sys.modules[idl_pkg_name] = idl_pkg
+    sys.modules[schema_pkg_name] = schema_mod
+
+    setattr(server_pkg, "common", common_pkg)
+    setattr(common_pkg, "idl", idl_pkg)
+    setattr(idl_pkg, "schema", schema_mod)
+
+
 def load_drivers() -> Dict[str, str]:
+    install_server_import_compat()
     drivers_dir = get_drivers_dir()
     drivers_dir.mkdir(parents=True, exist_ok=True)
 

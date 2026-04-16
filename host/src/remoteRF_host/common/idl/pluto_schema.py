@@ -1,4 +1,4 @@
-from remoteRF_host.common.idl import DeviceSchema, idl_expose, idl_register
+from remoteRF_server.common.idl import DeviceSchema, idl_expose, idl_register
 
 import re
 import subprocess
