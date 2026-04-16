@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-APP_NAME = "remoterf"
+APP_NAME = "remoterf-host"
 
 def get_remoterf_root() -> Path:
     # Linux-only: XDG_CONFIG_HOME or ~/.config
@@ -21,4 +21,6 @@ def get_db_dir() -> Path:
     return get_remoterf_root() / "db"
 
 def get_drivers_dir() -> Path:
-    return get_remoterf_root() / "drivers"
+    p = get_remoterf_root() / "drivers"
+    p.mkdir(parents=True, exist_ok=True)
+    return p

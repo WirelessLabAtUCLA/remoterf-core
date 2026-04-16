@@ -114,7 +114,7 @@ To get hostrf up and running:
 
 HostRF requires a RemoteRF Server already setup. See RemoteRF-Server for additional details.
 
-`hostrf` stores its config **repo-locally** under: `./.config/`
+`hostrf` stores its config under: `~/.config/remoterf-host/`
 
 ```bash
 hostrf --config --addr <host:port>

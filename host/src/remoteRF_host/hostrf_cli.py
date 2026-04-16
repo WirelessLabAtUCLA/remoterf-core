@@ -12,7 +12,7 @@ from .config.cert_fetcher import fetch_and_save_ca_cert
 from .common.utils import get_remoterf_root
 
 # -----------------------------
-# Repo-local host config locations
+# Host config locations (~/.config/remoterf-host by default)
 # -----------------------------
 
 import os

@@ -28,7 +28,6 @@ import grpc
 import random
 import threading
 import traceback
-import yaml
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -151,22 +150,11 @@ except Exception:
 from .rpc_manager import rpc_manager  # type: ignore
 
 try:
-    from .device_manager import get_all_devices_str  # type: ignore
+    from .device_manager import get_configured_devices, get_device_schema, reload_devices  # type: ignore
 except Exception:
-    get_all_devices_str = None
-
-try:
-    from ..drivers.adalm_pluto.pluto_idl import (  # type: ignore
-        idl_for_device_type,
-        capabilities_string,
-    )
-    _IDL_AVAILABLE = True
-except Exception:
-    _IDL_AVAILABLE = False
-    def idl_for_device_type(device_type):   # type: ignore
-        return {}
-    def capabilities_string(idl):            # type: ignore
-        return ""
+    get_configured_devices = None
+    get_device_schema = None
+    reload_devices = None
 
 
 # -------------------------
@@ -240,79 +228,6 @@ def load_env_file(path: str) -> Dict[str, str]:
             k = m.group(1).strip()
             v = _strip_quotes(m.group(2))
             out[k] = v
-    return out
-
-
-# -------------------------
-# YAML device parsing
-# -------------------------
-
-def _load_devices_from_yaml(path: Path) -> Dict[int, Dict[str, str]]:
-    if not path.exists():
-        return {}
-
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception as e:
-        _die_devices_config(path, f"Failed to parse YAML: {e}")
-
-    if not isinstance(data, dict):
-        _die_devices_config(path, "Top-level YAML must be a mapping containing 'devices'.")
-
-    raw_devices = data.get("devices") or []
-    if not isinstance(raw_devices, list):
-        _die_devices_config(path, "'devices' must be a list.")
-
-    out: Dict[int, Dict[str, str]] = {}
-    seen_physical: set[tuple[str, str, str]] = set()
-
-    for item in raw_devices:
-        if not isinstance(item, dict):
-            warn(f"Skipping non-mapping device entry in {path}: {item!r}")
-            continue
-
-        try:
-            gid = int(item["device_id"])
-        except Exception:
-            warn(f"Skipping device entry with invalid/missing device_id in {path}: {item!r}")
-            continue
-
-        dtype = str(item.get("device_type") or "pluto").strip()
-        dt = dtype.lower()
-        if dt != "pluto":
-            warn(f"Skipping unsupported device_type={dtype!r} for gid={gid}")
-            continue
-
-        name = str(item.get("name") or f"device-{gid}").strip()
-
-        init = item.get("init") or {}
-        if not isinstance(init, dict):
-            init = {}
-
-        serial = str(init.get("serial") or "").strip()
-        if not serial:
-            warn(f"Skipping Pluto gid={gid}: missing init.serial")
-            continue
-
-        phys_key = (dt, "iio_serial", serial)
-        if phys_key in seen_physical:
-            _die_devices_config(
-                path,
-                f"Duplicate physical identity within this host: type={dt!r} ident_kind='iio_serial' ident={serial!r}",
-            )
-        seen_physical.add(phys_key)
-
-        out[int(gid)] = {
-            "type": dtype,
-            "name": name,
-            "ident_kind": "iio_serial",
-            "ident": serial,
-            "serial": serial,
-            "kind": dtype,
-            "label": name or f"Device {gid}",
-        }
-
     return out
 
 
@@ -473,6 +388,15 @@ class HostTunnelAgent:
         if ev is not None:
             ev.set()
 
+    def _schema_for_gid(self, gid: int):
+        if not callable(get_device_schema):
+            return None
+        try:
+            return get_device_schema(gid)  # type: ignore[misc]
+        except Exception:
+            exception(f"get_device_schema({gid}) failed.")
+            return None
+
     # -------- inventory --------
 
     def _reload_from_env(self) -> None:
@@ -499,7 +423,15 @@ class HostTunnelAgent:
             self._master_token = mt
             token_state = "set"
 
-        self._devices = _load_devices_from_yaml(Path(self.cfg.devices_yaml_path))
+        try:
+            if callable(reload_devices):
+                reload_devices()  # type: ignore[misc]
+            if callable(get_configured_devices):
+                self._devices = dict(get_configured_devices())  # type: ignore[misc]
+            else:
+                self._devices = {}
+        except Exception as e:
+            _die_devices_config(Path(self.cfg.devices_yaml_path), f"Failed to load schema-backed inventory: {e}")
 
         if not self._devices:
             warn(f"No devices found in {self.cfg.devices_yaml_path}; announcing zero devices.")
@@ -525,27 +457,23 @@ class HostTunnelAgent:
         )
 
     def _device_announce_frame(self) -> host_pb2.HostFrame:
-        dyn_labels: Dict[int, str] = {}
-        if callable(get_all_devices_str):
-            try:
-                dyn_labels = dict(get_all_devices_str())  # type: ignore
-            except Exception:
-                exception("get_all_devices_str() failed; continuing without dynamic labels.")
-                dyn_labels = {}
-
         infos: List[host_pb2.DeviceInfo] = []
         for gid in sorted(self._devices.keys()):
             d = self._devices[gid]
-            label = (d.get("label", "").strip() or dyn_labels.get(gid, "") or f"Device {gid}")
-            dtype = (d.get("kind") or d.get("type") or "").lower()
+            label = (str(d.get("label", "")).strip() or f"Device {gid}")
+            dtype = str(d.get("kind") or d.get("type") or "").lower()
 
-            # Loop through this device's IDL so we can log how many operations
-            # are being advertised — same pattern as the server's device loop.
-            if _IDL_AVAILABLE:
-                idl = idl_for_device_type(dtype)
+            schema = self._schema_for_gid(gid)
+            if schema is not None and hasattr(schema, "list_exposed"):
+                exposed = schema.list_exposed()
+                n_ops = (
+                    len(exposed.get("getters", []))
+                    + len(exposed.get("setters", []))
+                    + len(exposed.get("calls", []))
+                )
                 info(
                     f"Device gid={gid} type={dtype!r}: "
-                    f"IDL has {len(idl)} registered attribute(s)."
+                    f"schema exposes {n_ops} operation(s)."
                 )
 
             infos.append(
@@ -601,20 +529,39 @@ class HostTunnelAgent:
         _set("unix_ms", _now_ms())
         _set("version", self.cfg.version)
 
-        # Loop through every announced device and attach its IDL capability
-        # string so the server knows exactly what GET/SET/CALL operations each
-        # device supports — mirroring how the server loops through host device
-        # definitions when routing RPCs.
-        if _IDL_AVAILABLE and self._devices:
+        if self._devices:
             for gid in sorted(self._devices.keys()):
                 d = self._devices[gid]
-                dtype = (d.get("kind") or d.get("type") or "").lower()
-                idl = idl_for_device_type(dtype)
-                if idl:
-                    caps = capabilities_string(idl)
+                dtype = str(d.get("kind") or d.get("type") or "").lower()
+                if dtype:
                     _set_kv(f"device.{gid}.type", dtype)
+
+                schema = self._schema_for_gid(gid)
+                if schema is None or not hasattr(schema, "get_capabilities_string"):
+                    continue
+
+                caps = schema.get_capabilities_string()
+
+                schema_type = str(getattr(schema, "device_type", "") or dtype)
+                driver_version = str(getattr(schema, "driver_version", "") or "")
+                schema_hash = ""
+                if hasattr(schema, "get_idl_hash"):
+                    try:
+                        schema_hash = str(schema.get_idl_hash() or "")
+                    except Exception:
+                        exception(f"Failed computing schema hash for gid={gid}")
+
+                _set_kv(f"device.{gid}.type", schema_type)
+                if caps:
                     _set_kv(f"device.{gid}.caps", caps)
-                    info(f"IDL caps for gid={gid} type={dtype}: {len(idl)} attributes")
+                if driver_version:
+                    _set_kv(f"device.{gid}.driver_version", driver_version)
+                if schema_hash:
+                    _set_kv(f"device.{gid}.schema_hash", schema_hash)
+                info(
+                    f"IDL meta for gid={gid} type={dtype}: "
+                    f"{len(caps.split(',')) if caps else 0} attribute(s)"
+                )
 
         return meta
 
@@ -748,6 +695,10 @@ class HostTunnelAgent:
 
             try:
                 args_map["gid"].CopyFrom(_argument_string(gid_s))
+            except Exception:
+                pass
+            try:
+                args_map["device_id"].CopyFrom(_coerce_argument(gid_i))
             except Exception:
                 pass
 

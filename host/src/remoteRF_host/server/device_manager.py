@@ -1,65 +1,39 @@
 from __future__ import annotations
 
-import adi
 import os
-import re
-import yaml
-import subprocess
 import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Any
+from typing import Any, Dict
 
-# Use the same helper the other device manager uses.
-# Adjust this import path only if your host package layout differs.
+import yaml
+
+from ..common.idl.schema import get_driver_class, load_drivers
 from ..common.utils import get_remoterf_root
 
-
-# -----------------------------
-# Pluto helpers
-# -----------------------------
-
-def connect_pluto(*, ip: str = "", usb: str = ""):
-    try:
-        if ip:
-            dev = adi.Pluto(f"ip:{ip}")
-            print(f"Connected to Pluto ip:{ip}")
-        else:
-            dev = adi.Pluto(f"usb:{usb}")
-            print(f"Connected to Pluto usb:{usb}")
-        return dev
-    except Exception as e:
-        print(f"Pluto {ip or usb}: {e}")
-        return None
+_state_lock = threading.RLock()
 
 
-def get_usb_port_from_serial(serial: str) -> Optional[str]:
-    serial = (serial or "").strip()
-    if not serial:
-        return None
-    try:
-        out = subprocess.check_output(["iio_info", "-s"], text=True, stderr=subprocess.STDOUT)
-    except Exception as e:
-        print(f"Error running iio_info: {e}")
-        return None
-
-    for line in out.splitlines():
-        if (f"serial={serial}" in line) or (f"hw_serial={serial}" in line):
-            m = re.search(r"\[usb:([^\]]+)\]", line)
-            if m:
-                return m.group(1).strip()
-
-    print(f"No device found with serial {serial}")
-    return None
+@dataclass
+class _DeviceState:
+    schema: object | None
+    name: str
+    ident: str
+    dtype: str
+    init: Dict[str, Any]
 
 
-# -----------------------------
-# same YAML config loading as server device_manager
-# -----------------------------
+_devices: Dict[int, _DeviceState] = {}
+
+device_serialization: Dict[int, str] = {}
+devices_info: Dict[int, str] = {}
+
 
 def _cfg_dir() -> Path:
     p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
     p.mkdir(parents=True, exist_ok=True)
     return p
+
 
 def _devices_yaml_path() -> Path:
     p1 = _cfg_dir() / "devices.yml"
@@ -68,7 +42,15 @@ def _devices_yaml_path() -> Path:
     return _cfg_dir() / "devices.yaml"
 
 
-def _load_device_records() -> Dict[int, Dict[str, str]]:
+def _infer_ident(init: Dict[str, Any]) -> str:
+    for key in ("serial", "usb", "ip", "uri", "address"):
+        value = str(init.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _load_device_records() -> Dict[int, Dict[str, Any]]:
     path = _devices_yaml_path()
     if not path.exists():
         return {}
@@ -85,8 +67,7 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
         print(f"Invalid YAML config {path}: 'devices' must be a list")
         return {}
 
-    recs: Dict[int, Dict[str, str]] = {}
-
+    recs: Dict[int, Dict[str, Any]] = {}
     for item in devices:
         if not isinstance(item, dict):
             continue
@@ -97,9 +78,9 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
             print(f"Skipping device entry with invalid/missing device_id: {item}")
             continue
 
-        dtype = str(item.get("device_type") or "pluto").strip().lower()
-        if dtype != "pluto":
-            print(f"Skipping unsupported device_type={dtype!r} for gid={gid}")
+        dtype = str(item.get("device_type") or "").strip().lower()
+        if not dtype:
+            print(f"Skipping device gid={gid}: missing device_type")
             continue
 
         name = str(item.get("name") or f"device-{gid}").strip()
@@ -107,100 +88,100 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
         if not isinstance(init, dict):
             init = {}
 
-        serial = str(init.get("serial") or "").strip()
-        if not serial:
-            print(f"Skipping Pluto gid={gid}: missing init.serial")
-            continue
-
         recs[gid] = {
-            "TYPE": "pluto",
+            "TYPE": dtype,
             "NAME": name,
-            "IDENT_KIND": "iio_serial",
-            "IDENT": serial,
+            "IDENT": _infer_ident(init),
+            "INIT": dict(init),
         }
 
     return recs
 
 
-def _connect_from_record(rec: Dict[str, str]) -> Tuple[object | None, str, str]:
-    """
-    Returns (device_obj, ident, dtype).
-    """
+def _connect_from_record(rec: Dict[str, Any]):
     dtype = (rec.get("TYPE") or "").strip().lower()
-    ident_kind = (rec.get("IDENT_KIND") or "").strip().lower()
     ident = (rec.get("IDENT") or "").strip()
+    init_kwargs = rec.get("INIT") or {}
 
-    if dtype != "pluto":
+    try:
+        schema_cls = get_driver_class(dtype)
+    except KeyError:
+        print(f"No driver registered for device_type={dtype!r} - skipping")
         return (None, ident, dtype)
 
-    if ident_kind in ("iio_serial", "serial", "iio"):
-        if not ident:
-            return (None, ident, dtype)
-        usb_port = get_usb_port_from_serial(ident)
-        if not usb_port:
-            return (None, ident, dtype)
-        return (connect_pluto(usb=usb_port), ident, dtype)
+    try:
+        raw_dev = schema_cls.make_device(**init_kwargs)
+    except Exception as e:
+        print(f"make_device() failed for {dtype}: {e}")
+        return (None, ident, dtype)
 
-    if ident_kind == "usb":
-        if not ident:
-            return (None, ident, dtype)
-        return (connect_pluto(usb=ident), ident, dtype)
+    if raw_dev is None:
+        return (None, ident, dtype)
 
-    if ident_kind == "ip":
-        if not ident:
-            return (None, ident, dtype)
-        return (connect_pluto(ip=ident), ident, dtype)
-
-    return (None, ident, dtype)
+    schema = schema_cls()
+    schema.bind(raw_dev)
+    return (schema, ident, dtype)
 
 
-# -----------------------------
-# Runtime state + API
-# -----------------------------
+def _load_all_drivers() -> None:
+    try:
+        from ..common.idl import pluto_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in pluto driver: {e}")
 
-_state_lock = threading.RLock()
+    results = load_drivers()
+    for fname, status in results.items():
+        if status != "ok":
+            print(f"Driver load {fname}: {status}")
 
-device_serialization: Dict[int, str] = {}
-devices_info: Dict[int, str] = {}
-devices: Dict[int, Tuple[object | None, str, str]] = {}
-
-master_token = os.getenv("REMOTERF_MASTER_TOKEN", "***REMOVED***")
 
 def reload_devices() -> None:
-    """
-    Reload devices.yaml/devices.yml and reconnect devices.
-    """
-    global devices, devices_info, device_serialization
-
+    _load_all_drivers()
     records = _load_device_records()
 
-    tmp_devices: Dict[int, Tuple[object | None, str, str]] = {}
+    tmp_devices: Dict[int, _DeviceState] = {}
     tmp_info: Dict[int, str] = {}
     tmp_ser: Dict[int, str] = {}
 
     for gid, rec in sorted(records.items()):
         name = (rec.get("NAME") or f"device-{gid}").strip()
         ident = (rec.get("IDENT") or "").strip()
+        dtype = (rec.get("TYPE") or "").strip().lower()
 
-        dev, ident2, dtype2 = _connect_from_record(rec)
+        schema, ident2, dtype2 = _connect_from_record(rec)
 
-        tmp_devices[int(gid)] = (dev, ident2, dtype2)
+        tmp_devices[int(gid)] = _DeviceState(
+            schema=schema,
+            name=name,
+            ident=ident2 or ident,
+            dtype=dtype2 or dtype,
+            init=dict(rec.get("INIT") or {}),
+        )
         tmp_info[int(gid)] = name
         if ident:
             tmp_ser[int(gid)] = ident
 
     with _state_lock:
-        devices = tmp_devices
-        devices_info = tmp_info
-        device_serialization = tmp_ser
+        _devices.clear()
+        _devices.update(tmp_devices)
+
+        devices_info.clear()
+        devices_info.update(tmp_info)
+
+        device_serialization.clear()
+        device_serialization.update(tmp_ser)
 
 
 reload_devices()
 
 
-def get_all_devices() -> Dict[int, Tuple[object | None, str, str]]:
+def get_all_devices() -> Dict[int, object]:
     with _state_lock:
-        return {k: v for k, v in devices.items() if v and v[0] is not None}
+        return {
+            gid: st.schema
+            for gid, st in _devices.items()
+            if st.schema is not None
+        }
 
 
 def get_all_devices_str() -> Dict[int, str]:
@@ -208,16 +189,33 @@ def get_all_devices_str() -> Dict[int, str]:
         return dict(devices_info)
 
 
+def get_configured_devices() -> Dict[int, Dict[str, Any]]:
+    with _state_lock:
+        return {
+            gid: {
+                "device_id": int(gid),
+                "type": st.dtype,
+                "kind": st.dtype,
+                "name": st.name,
+                "label": st.name or f"Device {gid}",
+                "serial": str(st.init.get("serial") or st.ident or ""),
+                "ident": st.ident,
+                "init": dict(st.init),
+                "connected": st.schema is not None,
+            }
+            for gid, st in _devices.items()
+        }
+
+
 def device_exists(device_id: int | str) -> bool:
     try:
         did = int(device_id)
     except Exception:
         return False
+
     with _state_lock:
-        if did not in devices:
-            return False
-        dev, _, _ = devices[did]
-        return dev is not None
+        st = _devices.get(did)
+        return bool(st and st.schema is not None)
 
 
 def get_device(*, id: int | str):
@@ -225,8 +223,44 @@ def get_device(*, id: int | str):
         did = int(id)
     except Exception:
         return None
+
     with _state_lock:
-        tup = devices.get(did)
-        if not tup:
+        st = _devices.get(did)
+        if not st:
             return None
-        return tup[0]
+        return st.schema
+
+
+def get_device_schema(device_id: int | str):
+    try:
+        did = int(device_id)
+    except Exception:
+        return None
+
+    with _state_lock:
+        st = _devices.get(did)
+        if st is None:
+            return None
+        if st.schema is not None:
+            return st.schema
+        dtype = st.dtype
+
+    if not dtype:
+        return None
+
+    try:
+        return get_driver_class(dtype)()
+    except KeyError:
+        return None
+
+
+def find_device_id_by_name(name: str):
+    name_lower = str(name or "").strip().lower()
+    if not name_lower:
+        return None
+
+    with _state_lock:
+        for gid, st in _devices.items():
+            if str(st.name or "").strip().lower() == name_lower:
+                return int(gid)
+    return None
