@@ -52,7 +52,8 @@
 
 from .reservation import reservation_handler
 from ..common.utils import *
-from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_schema_by_token, resolve_gid_for_token
+from ..common.grpc import grpc_pb2 as generic_pb2
+from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_device_by_id, resolve_gid_for_token
 from ..host import host_tunnel_server as hts
 
 
@@ -181,6 +182,71 @@ class RpcManager:
 
         raise ValueError(f"Unknown verb {verb!r} in {function_name!r}")
 
+    def _resolve_idl_target(self, args: dict) -> tuple[int | None, str | None]:
+        if 'token' in args:
+            api_token = str(unmap_arg(args['token']))
+            gid = resolve_gid_for_token(api_token)
+            if gid is None:
+                return None, 'No schema available for this token (invalid token or device offline)'
+            return gid, None
+
+        if 'device_id' in args:
+            try:
+                return int(unmap_arg(args['device_id'])), None
+            except (ValueError, TypeError):
+                return None, 'device_id must be an integer'
+
+        if 'device_name' in args:
+            name = str(unmap_arg(args['device_name']))
+            gid = find_device_id_by_name(name)
+            if gid is None:
+                return None, f'No device found with name {name!r}'
+            return gid, None
+
+        return None, 'IDL:get_drivers requires token, device_id, or device_name'
+
+    def _fetch_host_idl(self, *, gid: int, dev: VirtualDevice, args: dict) -> dict:
+        registry = hts.get_tunnel_registry(create=False)
+        if registry is None:
+            return {'error': map_arg('Host tunnel registry unavailable')}
+
+        req = generic_pb2.GenericRPCRequest(function_name="IDL:get_drivers")
+        for key, value in dict(args).items():
+            if str(key) == "token":
+                continue
+            req.args[str(key)].CopyFrom(value)
+        req.args["device_id"].CopyFrom(map_arg(int(gid)))
+        req.args["g"].CopyFrom(map_arg(int(gid)))
+
+        try:
+            resp = hts.handle_host_device_request(
+                registry,
+                host_id=dev.host_id,
+                device_id=dev.device_id,
+                request=req,
+                timeout_sec=10.0,
+            )
+        except Exception as e:
+            return {'error': map_arg(str(e))}
+
+        results = dict(resp.results)
+        if 'error' in results:
+            return results
+
+        err = results.get('Error')
+        if err is not None:
+            return {'error': map_arg(str(unmap_arg(err)))}
+
+        ok = results.get('Ok')
+        if ok is not None:
+            try:
+                if not bool(unmap_arg(ok)):
+                    return {'error': map_arg('Host schema fetch failed')}
+            except Exception:
+                return {'error': map_arg('Host schema fetch failed')}
+
+        return results
+
     def _handle_idl(self, sub: str, args: dict) -> dict:
         """
         IDL:get_drivers  →  schema + driver metadata for a device.
@@ -196,42 +262,19 @@ class RpcManager:
             device_type     str   e.g. "pluto"
         """
         if sub == "get_drivers":
-            # Resolve device by token (preferred), device_id, or device_name.
-            schema = None
+            gid, err = self._resolve_idl_target(args)
+            if err is not None or gid is None:
+                return {'error': map_arg(err or 'Unable to resolve device')}
 
-            if 'token' in args:
-                api_token = str(unmap_arg(args['token']))
-                schema = get_schema_by_token(api_token)
-                if schema is None:
-                    # get_schema_by_token returns None for host (VirtualDevice) entries
-                    # because they carry no salt/hsh.  Fall through via gid resolution
-                    # which uses get_device_schema and handles host devices correctly.
-                    gid = resolve_gid_for_token(api_token)
-                    if gid is not None:
-                        schema = get_device_schema(gid)
-                if schema is None:
-                    return {'error': map_arg('No schema available for this token (invalid token or device offline)')}
+            resolved = get_device_by_id(gid)
+            dev = resolved[0] if resolved is not None else None
 
-            elif 'device_id' in args:
-                try:
-                    gid = int(unmap_arg(args['device_id']))
-                except (ValueError, TypeError):
-                    return {'error': map_arg('device_id must be an integer')}
-                schema = get_device_schema(gid)
-                if schema is None:
-                    return {'error': map_arg(f'No schema available for device {gid} (offline or host device)')}
+            if isinstance(dev, VirtualDevice):
+                return self._fetch_host_idl(gid=gid, dev=dev, args=args)
 
-            elif 'device_name' in args:
-                name = str(unmap_arg(args['device_name']))
-                gid = find_device_id_by_name(name)
-                if gid is None:
-                    return {'error': map_arg(f'No device found with name {name!r}')}
-                schema = get_device_schema(gid)
-                if schema is None:
-                    return {'error': map_arg(f'No schema available for device {name!r} (offline or host device)')}
-
-            else:
-                return {'error': map_arg('IDL:get_drivers requires token, device_id, or device_name')}
+            schema = get_device_schema(gid)
+            if schema is None:
+                return {'error': map_arg(f'No schema available for device {gid} (offline)')}
 
             return {
                 'schema':         map_arg(schema.get_idl_json()),
