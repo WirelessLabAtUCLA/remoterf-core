@@ -229,6 +229,21 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 def _cfg_dir() -> Path:
     return Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
 
+def _super_token_path() -> Path:
+    path = _cfg_dir() / "super_token.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    return path
+
+def _get_master_token() -> str:
+    """Read the configured super token; blank file means the override is disabled."""
+    path = _super_token_path()
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        print(f"Warning: could not read super token file {path}: {e}")
+        return ""
+
 def _devices_yaml_path() -> Path:
     p1 = _cfg_dir() / "devices.yml"
     if p1.exists():
@@ -316,9 +331,6 @@ def _connect_from_record(rec: Dict[str, Any]):
 devices_info: Dict[int, str] = {}
 device_serialization: Dict[int, str] = {}
 
-# master token (overrideable)
-master_token = os.getenv("REMOTERF_MASTER_TOKEN", "***REMOVED***")
-
 def _init_from_env() -> None:
     records = _load_device_records()
 
@@ -378,13 +390,15 @@ def _load_all_drivers() -> None:
 
 _load_all_drivers()
 _init_from_env()
+_super_token_path()
 
 # Legacy reservation helpers (master token parsing)
 
-def parse_mastertoken(token: str):
-    if not token:
+def parse_mastertoken(token: str, configured_token: Optional[str] = None):
+    configured_token = _get_master_token() if configured_token is None else configured_token
+    if not token or not configured_token:
         return None
-    prefix = re.escape(master_token)
+    prefix = re.escape(configured_token)
     pattern = re.compile(rf"^{prefix}[_-](\d+)(?:_force)?$")
     m = pattern.match(token)
     if not m:
@@ -528,15 +542,16 @@ def get_schema_by_token(api_token: str):
 
     _sync_host_devices()
     gid: Optional[int] = None
+    configured_token = _get_master_token()
 
-    if api_token == master_token:
+    if configured_token and api_token == configured_token:
         with _state_lock:
             for k, st in _devices.items():
                 if st.origin == "local" and _is_connected(st) and st.salt == "" and st.hsh == "":
                     gid = k
                     break
     else:
-        parsed = parse_mastertoken(api_token)
+        parsed = parse_mastertoken(api_token, configured_token=configured_token)
         if parsed:
             cand, _ = parsed
             with _state_lock:
@@ -577,9 +592,10 @@ def resolve_gid_for_token(api_token: str) -> Optional[int]:
         return None
 
     _sync_host_devices()
+    configured_token = _get_master_token()
 
     # Parsed master-token: resolves any device directly by gid (local or host).
-    parsed = parse_mastertoken(api_token)
+    parsed = parse_mastertoken(api_token, configured_token=configured_token)
     if parsed:
         cand, _ = parsed
         with _state_lock:
@@ -589,7 +605,7 @@ def resolve_gid_for_token(api_token: str) -> Optional[int]:
         return None
 
     # Raw master token — prefer local, fall back to any connected device.
-    if api_token == master_token:
+    if configured_token and api_token == configured_token:
         with _state_lock:
             # local first
             for k, st in _devices.items():
@@ -630,6 +646,7 @@ def get_device(*, api_token: str):
         return None
 
     _sync_host_devices()
+    configured_token = _get_master_token()
 
     with _state_lock:
         snapshot: List[Tuple[int, object, str, str, str]] = [
@@ -639,7 +656,7 @@ def get_device(*, api_token: str):
         ]
 
     # Preserve "master prefers local" behavior
-    if api_token == master_token:
+    if configured_token and api_token == configured_token:
         # local first
         for _, dev, salt, hsh, origin in snapshot:
             if origin == "local" and dev is not None and salt == "" and hsh == "":
@@ -650,7 +667,7 @@ def get_device(*, api_token: str):
                 return dev
         return None
 
-    parsed = parse_mastertoken(api_token)
+    parsed = parse_mastertoken(api_token, configured_token=configured_token)
     if parsed:
         device_id, force = parsed
         with _state_lock:
@@ -679,8 +696,9 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
     _sync_host_devices()
 
     gid: Optional[int] = None
+    configured_token = _get_master_token()
 
-    if api_token == master_token:
+    if configured_token and api_token == configured_token:
         with _state_lock:
             # prefer local first
             for k, st in _devices.items():
@@ -693,7 +711,7 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
                         gid = k
                         break
     else:
-        parsed = parse_mastertoken(api_token)
+        parsed = parse_mastertoken(api_token, configured_token=configured_token)
         if parsed:
             cand, force = parsed
             with _state_lock:
