@@ -114,7 +114,9 @@ To get hostrf up and running:
 
 HostRF requires a RemoteRF Server already setup. See RemoteRF-Server for additional details.
 
-`hostrf` stores its config under: `~/.config/remoterf-host/`
+`hostrf` stores its host config under: `~/.config/remoterf/host/`
+
+Custom device drivers are loaded from: `~/.config/remoterf/drivers/`
 
 ```bash
 hostrf --config --addr <host:port>

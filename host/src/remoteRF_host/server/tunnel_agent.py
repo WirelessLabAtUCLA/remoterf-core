@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # tunnel_agent.py
 #
-# Host-side agent (shared remoterf config):
-#   Reads config from:
-#     <remoterf-config>/net.env        (REMOTERF_ADDR, REMOTERF_CA_CERT, optional mTLS)
-#     <remoterf-config>/host.env       (HOST_ID, HOST_TOKEN, optional HOST_MASTER_TOKEN)
-#     <remoterf-config>/devices.yml    (or devices.yaml)
+# Host-side agent:
+#   Reads host config from:
+#     ~/.config/remoterf/host/net.env        (REMOTERF_ADDR, REMOTERF_CA_CERT, optional mTLS)
+#     ~/.config/remoterf/host/host.env       (HOST_ID, HOST_TOKEN, optional HOST_MASTER_TOKEN)
+#     ~/.config/remoterf/host/devices.yml    (or devices.yaml)
 #
 # Connects to main server via HostTunnel bidi stream, announces devices, executes RPC locally.
 #
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 import time
 import queue
 import grpc
@@ -33,64 +32,10 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Iterable, List, Tuple, NoReturn
 
-from ..common.utils import get_remoterf_root
+from ..common.utils import get_host_config_dir
+from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
-
-
-# -------------------------
-# Logging mode
-# -------------------------
-
-LOG_MODE = "WARN"
-LOG_MODE = (LOG_MODE or "WARN").strip().upper()
-
-_LOG_PRI: Dict[str, int] = {"INFO": 10, "WARN": 20, "ERROR": 30}
-_MODE_MIN_PRI: Dict[str, int] = {"ALL": 10, "WARN": 20, "OFF": 10**9}
-
-if LOG_MODE not in _MODE_MIN_PRI:
-    LOG_MODE = "WARN"
-
-
-def _should_log(level: str) -> bool:
-    return _LOG_PRI.get(level, 30) >= _MODE_MIN_PRI[LOG_MODE]
-
-
-# -------------------------
-# Always-on printing logger
-# -------------------------
-
-def _ts() -> str:
-    t = time.time()
-    sec = int(t)
-    ms = int((t - sec) * 1000)
-    lt = time.localtime(sec)
-    return time.strftime("%H:%M:%S", lt) + f".{ms:03d}"
-
-
-def _log(level: str, msg: str) -> None:
-    if not _should_log(level):
-        return
-    tn = threading.current_thread().name
-    print(f"{_ts()} {level:<5} [{tn}] hostrf.tunnel_agent: {msg}", file=sys.stderr, flush=True)
-
-
-def info(msg: str) -> None:
-    _log("INFO", msg)
-
-
-def warn(msg: str) -> None:
-    _log("WARN", msg)
-
-
-def error(msg: str) -> None:
-    _log("ERROR", msg)
-
-
-def exception(msg: str) -> None:
-    _log("ERROR", msg)
-    if _should_log("ERROR"):
-        traceback.print_exc(limit=50, file=sys.stderr)
 
 
 # -------------------------
@@ -98,38 +43,38 @@ def exception(msg: str) -> None:
 # -------------------------
 
 def _die_config(net_env: Path, msg: str, *, code: int = 2) -> NoReturn:
-    error(f"Config error: {msg}")
-    error(f"Config file: {net_env}")
-    error("Fix:")
-    error("  hostrf -c -a <host:port>")
-    error("  hostrf -c -a --show")
+    error(f"Config error: {msg}", component="hostrf.tunnel_agent")
+    error(f"Config file: {net_env}", component="hostrf.tunnel_agent")
+    error("Fix:", component="hostrf.tunnel_agent")
+    error("  hostrf -c -a <host:port>", component="hostrf.tunnel_agent")
+    error("  hostrf -c -a --show", component="hostrf.tunnel_agent")
     raise SystemExit(code)
 
 
 def _die_host_config(host_env: Path, msg: str, *, code: int = 2) -> NoReturn:
-    error(f"Host config error: {msg}")
-    error(f"Config file: {host_env}")
-    error("Fix:")
-    error(f"  Edit {host_env} and set a unique HOST_ID, e.g.")
-    error("    HOST_ID=my-host-1")
-    error("    HOST_TOKEN=my-host-token")
-    error("  Ensure only one agent uses a given HOST_ID at a time.")
+    error(f"Host config error: {msg}", component="hostrf.tunnel_agent")
+    error(f"Config file: {host_env}", component="hostrf.tunnel_agent")
+    error("Fix:", component="hostrf.tunnel_agent")
+    error(f"  Edit {host_env} and set a unique HOST_ID, e.g.", component="hostrf.tunnel_agent")
+    error("    HOST_ID=my-host-1", component="hostrf.tunnel_agent")
+    error("    HOST_TOKEN=my-host-token", component="hostrf.tunnel_agent")
+    error("  Ensure only one agent uses a given HOST_ID at a time.", component="hostrf.tunnel_agent")
     raise SystemExit(code)
 
 
 def _die_devices_config(dev_yaml: Path, msg: str, *, code: int = 2) -> NoReturn:
-    error(f"Devices config error: {msg}")
-    error(f"Config file: {dev_yaml}")
-    error("Fix:")
-    error("  Ensure devices.yml/devices.yaml contains a top-level 'devices:' list.")
-    error("  Ensure each device_id (gid) is unique across ALL hosts.")
-    error("  Example:")
-    error("    devices:")
-    error("      - device_id: 10")
-    error("        device_type: pluto")
-    error("        name: pluto-10")
-    error("        init:")
-    error("          serial: 104473b...")
+    error(f"Devices config error: {msg}", component="hostrf.tunnel_agent")
+    error(f"Config file: {dev_yaml}", component="hostrf.tunnel_agent")
+    error("Fix:", component="hostrf.tunnel_agent")
+    error("  Ensure devices.yml/devices.yaml contains a top-level 'devices:' list.", component="hostrf.tunnel_agent")
+    error("  Ensure each device_id (gid) is unique across ALL hosts.", component="hostrf.tunnel_agent")
+    error("  Example:", component="hostrf.tunnel_agent")
+    error("    devices:", component="hostrf.tunnel_agent")
+    error("      - device_id: 10", component="hostrf.tunnel_agent")
+    error("        device_type: pluto", component="hostrf.tunnel_agent")
+    error("        name: pluto-10", component="hostrf.tunnel_agent")
+    error("        init:", component="hostrf.tunnel_agent")
+    error("          serial: 104473b...", component="hostrf.tunnel_agent")
     raise SystemExit(code)
 
 
@@ -165,14 +110,31 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _device_count_label(count: int) -> str:
+    return f"{count} device" if count == 1 else f"{count} devices"
+
+
+def _single_line(text: str, *, max_len: int = 120) -> str:
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= max_len:
+        return flat
+    return flat[: max_len - 3] + "..."
+
+
+def _grpc_reason(code: Optional[grpc.StatusCode], details: str) -> str:
+    name = getattr(code, "name", None) or str(code or "UNKNOWN")
+    detail = _single_line(details)
+    if detail:
+        return f"{name}: {detail}"
+    return name
+
+
 # -------------------------
-# Shared remoterf config paths
+# Host config paths
 # -------------------------
 
 def _cfg_dir() -> Path:
-    p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    return get_host_config_dir()
 
 
 def _net_env_path() -> Path:
@@ -336,20 +298,23 @@ class HostTunnelAgent:
         try:
             self._out_q.put_nowait(None)
         except Exception:
-            exception("Failed to enqueue stop sentinel.")
+            exception("Failed to enqueue stop sentinel.", component="hostrf.tunnel_agent")
 
     def _enqueue(self, frame: host_pb2.HostFrame, *, timeout: float = 2.0) -> bool:
         try:
             which = frame.WhichOneof("msg")
             self._out_q.put(frame, timeout=timeout)
-            info(f"Enqueued outbound frame type={which}")
+            info(f"Enqueued outbound frame type={which}", component="hostrf.tunnel_agent")
             return True
         except queue.Full:
             which = frame.WhichOneof("msg")
-            warn(f"Outbound queue full (max={self.cfg.outbound_max}). Dropping frame type={which}")
+            warn(
+                f"Outbound queue full (max={self.cfg.outbound_max}). Dropping frame type={which}",
+                component="hostrf.tunnel_agent",
+            )
             return False
         except Exception:
-            exception("Outbound enqueue failed.")
+            exception("Outbound enqueue failed.", component="hostrf.tunnel_agent")
             return False
 
     # -------------------------
@@ -367,10 +332,13 @@ class HostTunnelAgent:
             except queue.Empty:
                 break
             except Exception:
-                exception("Failed draining outbound queue.")
+                exception("Failed draining outbound queue.", component="hostrf.tunnel_agent")
                 break
         if drained:
-            warn(f"Drained {drained} stale outbound frame(s) before starting a new stream.")
+            warn(
+                f"Drained {drained} stale outbound frame(s) before starting a new stream.",
+                component="hostrf.tunnel_agent",
+            )
 
     def _register_cancel(self, req_id: str) -> threading.Event:
         ev = threading.Event()
@@ -394,7 +362,7 @@ class HostTunnelAgent:
         try:
             return get_device_schema(gid)  # type: ignore[misc]
         except Exception:
-            exception(f"get_device_schema({gid}) failed.")
+            exception(f"get_device_schema({gid}) failed.", component="hostrf.tunnel_agent")
             return None
 
     # -------- inventory --------
@@ -434,11 +402,15 @@ class HostTunnelAgent:
             _die_devices_config(Path(self.cfg.devices_yaml_path), f"Failed to load schema-backed inventory: {e}")
 
         if not self._devices:
-            warn(f"No devices found in {self.cfg.devices_yaml_path}; announcing zero devices.")
+            info(
+                f"No devices found in {self.cfg.devices_yaml_path}; announcing zero devices.",
+                component="hostrf.tunnel_agent",
+            )
 
         info(
             f"Inventory reloaded: host_id={self._host_id} devices={len(self._devices)} "
-            f"master_token={token_state} host_env={self.cfg.host_env_path} devices_yaml={self.cfg.devices_yaml_path}"
+            f"master_token={token_state} host_env={self.cfg.host_env_path} devices_yaml={self.cfg.devices_yaml_path}",
+            component="hostrf.tunnel_agent",
         )
 
     # -------- frames --------
@@ -473,7 +445,8 @@ class HostTunnelAgent:
                 )
                 info(
                     f"Device gid={gid} type={dtype!r}: "
-                    f"schema exposes {n_ops} operation(s)."
+                    f"schema exposes {n_ops} operation(s).",
+                    component="hostrf.tunnel_agent",
                 )
 
             infos.append(
@@ -486,7 +459,7 @@ class HostTunnelAgent:
                 )
             )
 
-        info(f"Prepared DeviceAnnounce with {len(infos)} device(s).")
+        info(f"Prepared DeviceAnnounce with {len(infos)} device(s).", component="hostrf.tunnel_agent")
         return host_pb2.HostFrame(
             device_announce=host_pb2.DeviceAnnounce(
                 devices=infos,
@@ -510,7 +483,10 @@ class HostTunnelAgent:
     def _collect_meta(self, req: host_pb2.MetaRequest):
         meta = self._new_meta_message()
         if meta is None:
-            warn("MetaRequest received but no compatible meta message type found in host_pb2.")
+            warn(
+                "MetaRequest received but no compatible meta message type found in host_pb2.",
+                component="hostrf.tunnel_agent",
+            )
             return None
 
         def _set(field: str, value: Any) -> None:
@@ -549,7 +525,7 @@ class HostTunnelAgent:
                     try:
                         schema_hash = str(schema.get_idl_hash() or "")
                     except Exception:
-                        exception(f"Failed computing schema hash for gid={gid}")
+                        exception(f"Failed computing schema hash for gid={gid}", component="hostrf.tunnel_agent")
 
                 _set_kv(f"device.{gid}.type", schema_type)
                 if caps:
@@ -560,7 +536,8 @@ class HostTunnelAgent:
                     _set_kv(f"device.{gid}.schema_hash", schema_hash)
                 info(
                     f"IDL meta for gid={gid} type={dtype}: "
-                    f"{len(caps.split(',')) if caps else 0} attribute(s)"
+                    f"{len(caps.split(',')) if caps else 0} attribute(s)",
+                    component="hostrf.tunnel_agent",
                 )
 
         return meta
@@ -569,10 +546,10 @@ class HostTunnelAgent:
         req_id = str(req.req_id)
         cancel_ev = self._register_cancel(req_id)
         try:
-            info(f"MetaRequest req_id={req_id}")
+            info(f"MetaRequest req_id={req_id}", component="hostrf.tunnel_agent")
 
             if cancel_ev.is_set():
-                warn(f"MetaRequest req_id={req_id} canceled before handling.")
+                warn(f"MetaRequest req_id={req_id} canceled before handling.", component="hostrf.tunnel_agent")
                 return
 
             self._reload_from_env()
@@ -583,13 +560,16 @@ class HostTunnelAgent:
                 try:
                     resp.meta.CopyFrom(meta)
                 except Exception:
-                    exception("Failed to attach meta payload; sending ok response without meta.")
+                    exception(
+                        "Failed to attach meta payload; sending ok response without meta.",
+                        component="hostrf.tunnel_agent",
+                    )
 
             frame = host_pb2.HostFrame(meta_response=resp)
             self._enqueue(frame)
 
         except Exception:
-            exception(f"MetaRequest req_id={req_id} failed.")
+            exception(f"MetaRequest req_id={req_id} failed.", component="hostrf.tunnel_agent")
             frame = host_pb2.HostFrame(
                 meta_response=host_pb2.MetaResponse(
                     req_id=req_id,
@@ -616,7 +596,7 @@ class HostTunnelAgent:
         ]
 
         if not self.cfg.ca_pem_path:
-            info(f"Opening INSECURE channel to {addr}")
+            info(f"Opening INSECURE channel to {addr}", component="hostrf.tunnel_agent")
             return grpc.insecure_channel(addr, options=options)
 
         ca_path = Path(self.cfg.ca_pem_path).expanduser().resolve()
@@ -649,7 +629,10 @@ class HostTunnelAgent:
         else:
             credentials = grpc.ssl_channel_credentials(root_certificates=trusted_certs)
 
-        info(f"Opening TLS channel to {addr} (CA={ca_path}, mTLS={'yes' if mtls else 'no'})")
+        info(
+            f"Opening TLS channel to {addr} (CA={ca_path}, mTLS={'yes' if mtls else 'no'})",
+            component="hostrf.tunnel_agent",
+        )
         return grpc.secure_channel(addr, credentials, options=options)
 
     # -------- rpc execution --------
@@ -659,7 +642,7 @@ class HostTunnelAgent:
             forced = f"{self._master_token}_{gid_s}_force"
             args_map["a"].CopyFrom(_argument_string(forced))
         except Exception:
-            exception(f"Failed to override token for gid={gid_s!r}")
+            exception(f"Failed to override token for gid={gid_s!r}", component="hostrf.tunnel_agent")
 
     def _resolve_request_gid(self, req: host_pb2.RpcRequest) -> Tuple[str, int]:
         gid_s = (getattr(req, "device_id", "") or "").strip()
@@ -689,7 +672,10 @@ class HostTunnelAgent:
 
             gid_s, gid_i = self._resolve_request_gid(req)
 
-            info(f"RpcRequest req_id={req_id} gid={gid_i} fn={str(greq.function_name)}")
+            info(
+                f"RpcRequest req_id={req_id} gid={gid_i} fn={str(greq.function_name)}",
+                component="hostrf.tunnel_agent",
+            )
 
             # self._override_token_for_gid(args_map, gid_s)
 
@@ -720,10 +706,10 @@ class HostTunnelAgent:
             self._enqueue(out)
 
             dt_ms = int((time.time() - t0) * 1000.0)
-            info(f"RpcResponse req_id={req_id} ok=true dt_ms={dt_ms}")
+            info(f"RpcResponse req_id={req_id} ok=true dt_ms={dt_ms}", component="hostrf.tunnel_agent")
 
         except Exception:
-            exception(f"RpcRequest req_id={req_id} FAILED")
+            exception(f"RpcRequest req_id={req_id} FAILED", component="hostrf.tunnel_agent")
             tb = traceback.format_exc(limit=20)
 
             gresp = generic_pb2.GenericRPCResponse()
@@ -746,11 +732,11 @@ class HostTunnelAgent:
     # -------- outbound stream --------
 
     def _outbound_generator(self, *, initial: List[host_pb2.HostFrame]) -> Iterable[host_pb2.HostFrame]:
-        info("Outbound generator started.")
+        info("Outbound generator started.", component="hostrf.tunnel_agent")
 
         for f in initial:
             which = f.WhichOneof("msg")
-            info(f"Outbound initial -> type={which}")
+            info(f"Outbound initial -> type={which}", component="hostrf.tunnel_agent")
             yield f
 
         while not self._stop.is_set():
@@ -759,133 +745,176 @@ class HostTunnelAgent:
             except queue.Empty:
                 continue
             except Exception:
-                exception("Outbound queue get failed.")
+                exception("Outbound queue get failed.", component="hostrf.tunnel_agent")
                 continue
 
             if item is None:
-                info("Outbound generator got stop sentinel; exiting.")
+                info("Outbound generator got stop sentinel; exiting.", component="hostrf.tunnel_agent")
                 return
 
             which = item.WhichOneof("msg")
-            info(f"Outbound -> type={which}")
+            info(f"Outbound -> type={which}", component="hostrf.tunnel_agent")
             yield item
 
-        info("Outbound generator exiting due to stop flag.")
+        info("Outbound generator exiting due to stop flag.", component="hostrf.tunnel_agent")
 
     # -------- main loop --------
 
     def run_forever(self) -> None:
         delay = self.cfg.reconnect_min_delay_sec
         attempt = 0
+        status_started = False
 
-        info(f"HostTunnelAgent starting: target={self.cfg.server_host}:{int(self.cfg.server_port)} version={self.cfg.version}")
-        info("Press Ctrl+C to stop.")
+        info(
+            f"HostTunnelAgent starting: target={self.cfg.server_host}:{int(self.cfg.server_port)} version={self.cfg.version}",
+            component="hostrf.tunnel_agent",
+        )
+        info("Press Ctrl+C to stop.", component="hostrf.tunnel_agent")
 
-        while not self._stop.is_set():
-            hb_stop: Optional[threading.Event] = None
-            channel: Optional[grpc.Channel] = None
-            attempt += 1
-
-            try:
-                self._reload_from_env()
-                self._drain_outbound_queue()
-
+        try:
+            while not self._stop.is_set():
+                hb_stop: Optional[threading.Event] = None
+                channel: Optional[grpc.Channel] = None
                 addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
-                tls = "yes" if self.cfg.ca_pem_path else "no"
-                info(f"Connect attempt #{attempt} to {addr} (tls={tls})")
+                retry_reason = ""
+                stream_established = False
+                attempt += 1
 
-                channel = self._make_channel()
-                stub = host_pb2_grpc.HostTunnelStub(channel)
-
-                initial = [self._hello_frame(), self._device_announce_frame()]
-
-                stream = stub.Connect(self._outbound_generator(initial=initial))
-                delay = self.cfg.reconnect_min_delay_sec
-                info("HostTunnel stream established. Waiting for server frames...")
-
-                hb_stop = threading.Event()
-
-                def hb_loop() -> None:
-                    try:
-                        info(f"Heartbeat loop started (interval={self.cfg.heartbeat_interval_sec:.1f}s).")
-                        while not hb_stop.is_set() and not self._stop.is_set():
-                            self._enqueue(self._heartbeat_frame())
-                            time.sleep(self.cfg.heartbeat_interval_sec)
-                    except Exception:
-                        exception("Heartbeat loop crashed.")
-                    finally:
-                        info("Heartbeat loop exiting.")
-
-                threading.Thread(target=hb_loop, daemon=True, name="hb_loop").start()
-
-                for frame in stream:
-                    which = frame.WhichOneof("msg")
-                    if which == "rpc_request":
-                        threading.Thread(
-                            target=self._handle_rpc_request,
-                            args=(frame.rpc_request,),
-                            daemon=True,
-                            name=f"rpc_{frame.rpc_request.req_id}",
-                        ).start()
-                    elif which == "meta_request":
-                        threading.Thread(
-                            target=self._handle_meta_request,
-                            args=(frame.meta_request,),
-                            daemon=True,
-                            name=f"meta_{frame.meta_request.req_id}",
-                        ).start()
-                    elif which == "cancel":
-                        rid = str(frame.cancel.req_id)
-                        warn(f"Cancel req_id={rid}")
-                        self._set_cancel(rid)
-                    elif which == "heartbeat":
-                        pass
-                    else:
-                        warn(f"Received unknown frame type={which}")
-
-                warn("HostTunnel stream ended (server closed or connection dropped).")
-
-            except grpc.RpcError as e:
-                code = None
-                details = ""
                 try:
-                    code = e.code()
-                except Exception:
+                    self._reload_from_env()
+                    self._drain_outbound_queue()
+
+                    tls = "yes" if self.cfg.ca_pem_path else "no"
+                    info(f"Connect attempt #{attempt} to {addr} (tls={tls})", component="hostrf.tunnel_agent")
+
+                    if attempt == 1:
+                        status(
+                            f"Starting host '{self._host_id}' -> {addr} ({_device_count_label(len(self._devices))}).",
+                            component="hostrf",
+                        )
+                        status_started = True
+
+                    channel = self._make_channel()
+                    stub = host_pb2_grpc.HostTunnelStub(channel)
+
+                    initial = [self._hello_frame(), self._device_announce_frame()]
+
+                    stream = stub.Connect(self._outbound_generator(initial=initial))
+                    delay = self.cfg.reconnect_min_delay_sec
+                    stream_established = True
+                    status(
+                        f"Connected to {addr} as '{self._host_id}' ({_device_count_label(len(self._devices))}).",
+                        component="hostrf",
+                    )
+                    info("HostTunnel stream established. Waiting for server frames...", component="hostrf.tunnel_agent")
+
+                    hb_stop = threading.Event()
+
+                    def hb_loop() -> None:
+                        try:
+                            info(
+                                f"Heartbeat loop started (interval={self.cfg.heartbeat_interval_sec:.1f}s).",
+                                component="hostrf.tunnel_agent",
+                            )
+                            while not hb_stop.is_set() and not self._stop.is_set():
+                                self._enqueue(self._heartbeat_frame())
+                                time.sleep(self.cfg.heartbeat_interval_sec)
+                        except Exception:
+                            exception("Heartbeat loop crashed.", component="hostrf.tunnel_agent")
+                        finally:
+                            info("Heartbeat loop exiting.", component="hostrf.tunnel_agent")
+
+                    threading.Thread(target=hb_loop, daemon=True, name="hb_loop").start()
+
+                    for frame in stream:
+                        which = frame.WhichOneof("msg")
+                        if which == "rpc_request":
+                            threading.Thread(
+                                target=self._handle_rpc_request,
+                                args=(frame.rpc_request,),
+                                daemon=True,
+                                name=f"rpc_{frame.rpc_request.req_id}",
+                            ).start()
+                        elif which == "meta_request":
+                            threading.Thread(
+                                target=self._handle_meta_request,
+                                args=(frame.meta_request,),
+                                daemon=True,
+                                name=f"meta_{frame.meta_request.req_id}",
+                            ).start()
+                        elif which == "cancel":
+                            rid = str(frame.cancel.req_id)
+                            warn(f"Cancel req_id={rid}", component="hostrf.tunnel_agent")
+                            self._set_cancel(rid)
+                        elif which == "heartbeat":
+                            pass
+                        else:
+                            warn(f"Received unknown frame type={which}", component="hostrf.tunnel_agent")
+
+                    retry_reason = "server closed the stream"
+
+                except grpc.RpcError as e:
                     code = None
-                try:
-                    details = e.details() or ""
-                except Exception:
                     details = ""
-
-                warn(f"gRPC error: code={code} details={details}")
-
-                if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.INVALID_ARGUMENT):
-                    dlow = (details or "").lower()
-                    if "device" in dlow and "conflict" in dlow:
-                        _die_devices_config(Path(self.cfg.devices_yaml_path), f"Server rejected device inventory: {details or code}")
-                    _die_host_config(Path(self.cfg.host_env_path), f"Server rejected this host: {details or code}")
-
-            except Exception:
-                exception("Unexpected error in run loop.")
-
-            finally:
-                if hb_stop is not None:
-                    hb_stop.set()
-                if channel is not None:
                     try:
-                        channel.close()
+                        code = e.code()
                     except Exception:
-                        exception("Channel close failed.")
+                        code = None
+                    try:
+                        details = e.details() or ""
+                    except Exception:
+                        details = ""
 
-            if self._stop.is_set():
-                break
+                    if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.INVALID_ARGUMENT):
+                        dlow = (details or "").lower()
+                        if "device" in dlow and "conflict" in dlow:
+                            _die_devices_config(
+                                Path(self.cfg.devices_yaml_path),
+                                f"Server rejected device inventory: {details or code}",
+                            )
+                        _die_host_config(Path(self.cfg.host_env_path), f"Server rejected this host: {details or code}")
 
-            sleep_s = delay + random.uniform(0.0, min(0.5, delay * 0.2))
-            info(f"Reconnecting in {sleep_s:.2f}s ...")
-            time.sleep(sleep_s)
-            delay = min(delay * 1.7, self.cfg.reconnect_max_delay_sec)
+                    retry_reason = _grpc_reason(code, details)
+                    if code not in (
+                        grpc.StatusCode.UNAVAILABLE,
+                        grpc.StatusCode.CANCELLED,
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                    ):
+                        warn(f"gRPC error: code={code} details={details}", component="hostrf.tunnel_agent")
 
-        info("HostTunnelAgent exiting.")
+                except Exception:
+                    exception("Unexpected error in run loop.", component="hostrf.tunnel_agent")
+                    retry_reason = "unexpected local error"
+
+                finally:
+                    if hb_stop is not None:
+                        hb_stop.set()
+                    if channel is not None:
+                        try:
+                            channel.close()
+                        except Exception:
+                            warn("Channel close failed during reconnect cleanup.", component="hostrf.tunnel_agent")
+
+                if self._stop.is_set():
+                    break
+
+                sleep_s = delay + random.uniform(0.0, min(0.5, delay * 0.2))
+                if stream_established:
+                    status(
+                        f"Connection to {addr} lost ({retry_reason or 'disconnected'}). Retrying in {sleep_s:.1f}s.",
+                        component="hostrf",
+                    )
+                else:
+                    status(
+                        f"Unable to connect to {addr} ({retry_reason or 'connection failed'}). Retrying in {sleep_s:.1f}s.",
+                        component="hostrf",
+                    )
+                time.sleep(sleep_s)
+                delay = min(delay * 1.7, self.cfg.reconnect_max_delay_sec)
+        finally:
+            info("HostTunnelAgent exiting.", component="hostrf.tunnel_agent")
+            if status_started:
+                status("Stopped.", component="hostrf")
 
 
 # -------------------------
@@ -916,7 +945,7 @@ def _parse_addr(addr: str) -> Tuple[str, int]:
 # -------------------------
 
 def main() -> None:
-    info("tunnel_agent main() starting.")
+    info("tunnel_agent main() starting.", component="hostrf.tunnel_agent")
 
     net_env = _net_env_path()
     host_env = _host_env_path()
@@ -948,17 +977,23 @@ def main() -> None:
         client_key_pem_path=client_key or None,
     )
 
-    info(f"Config loaded: addr={cfg.server_host}:{int(cfg.server_port)} tls={'yes' if cfg.ca_pem_path else 'no'}")
-    info(f"Paths: net_env={cfg.net_env_path} host_env={cfg.host_env_path} devices_yaml={cfg.devices_yaml_path}")
+    info(
+        f"Config loaded: addr={cfg.server_host}:{int(cfg.server_port)} tls={'yes' if cfg.ca_pem_path else 'no'}",
+        component="hostrf.tunnel_agent",
+    )
+    info(
+        f"Paths: net_env={cfg.net_env_path} host_env={cfg.host_env_path} devices_yaml={cfg.devices_yaml_path}",
+        component="hostrf.tunnel_agent",
+    )
 
     agent = HostTunnelAgent(cfg)
     try:
         agent.run_forever()
     except KeyboardInterrupt:
-        warn("KeyboardInterrupt; stopping agent.")
+        status("Stopping...", component="hostrf")
         agent.stop()
     except Exception:
-        exception("Fatal error in main().")
+        exception("Fatal error in main().", component="hostrf.tunnel_agent")
         raise
 
 

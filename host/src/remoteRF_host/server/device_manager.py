@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +8,8 @@ from typing import Any, Dict
 import yaml
 
 from ..common.idl.schema import get_driver_class, load_drivers
-from ..common.utils import get_remoterf_root
+from ..common.utils import get_drivers_dir, get_host_config_dir
+from ..common.utils.host_logging import error, warn
 
 _state_lock = threading.RLock()
 
@@ -31,9 +31,7 @@ devices_info: Dict[int, str] = {}
 
 
 def _cfg_dir() -> Path:
-    p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    return get_host_config_dir()
 
 
 def _devices_yaml_path() -> Path:
@@ -52,7 +50,7 @@ def _path_signature(path: Path) -> tuple:
 
 
 def _drivers_signature() -> tuple:
-    drivers_dir = _cfg_dir() / "drivers"
+    drivers_dir = get_drivers_dir()
     try:
         files = sorted(
             f for f in drivers_dir.glob("*.py")
@@ -88,12 +86,12 @@ def _load_device_records() -> Dict[int, Dict[str, Any]]:
         with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except Exception as e:
-        print(f"Error reading YAML config {path}: {e}")
+        error(f"Error reading YAML config {path}: {e}", component="hostrf.device_manager")
         return {}
 
     devices = data.get("devices") or []
     if not isinstance(devices, list):
-        print(f"Invalid YAML config {path}: 'devices' must be a list")
+        error(f"Invalid YAML config {path}: 'devices' must be a list", component="hostrf.device_manager")
         return {}
 
     recs: Dict[int, Dict[str, Any]] = {}
@@ -104,12 +102,12 @@ def _load_device_records() -> Dict[int, Dict[str, Any]]:
         try:
             gid = int(item["device_id"])
         except Exception:
-            print(f"Skipping device entry with invalid/missing device_id: {item}")
+            warn(f"Skipping device entry with invalid/missing device_id: {item}", component="hostrf.device_manager")
             continue
 
         dtype = str(item.get("device_type") or "").strip().lower()
         if not dtype:
-            print(f"Skipping device gid={gid}: missing device_type")
+            warn(f"Skipping device gid={gid}: missing device_type", component="hostrf.device_manager")
             continue
 
         name = str(item.get("name") or f"device-{gid}").strip()
@@ -135,13 +133,13 @@ def _connect_from_record(rec: Dict[str, Any]):
     try:
         schema_cls = get_driver_class(dtype)
     except KeyError:
-        print(f"No driver registered for device_type={dtype!r} - skipping")
+        warn(f"No driver registered for device_type={dtype!r} - skipping", component="hostrf.device_manager")
         return (None, ident, dtype)
 
     try:
         raw_dev = schema_cls.make_device(**init_kwargs)
     except Exception as e:
-        print(f"make_device() failed for {dtype}: {e}")
+        warn(f"make_device() failed for {dtype}: {e}", component="hostrf.device_manager")
         return (None, ident, dtype)
 
     if raw_dev is None:
@@ -152,16 +150,17 @@ def _connect_from_record(rec: Dict[str, Any]):
     return (schema, ident, dtype)
 
 
-def _load_all_drivers() -> None:
-    try:
-        from ..common.idl import pluto_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in pluto driver: {e}")
+def _load_all_drivers(required_types: set[str]) -> None:
+    if "pluto" in required_types:
+        try:
+            from ..common.idl import pluto_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in pluto driver: {e}", component="hostrf.device_manager")
 
     results = load_drivers()
     for fname, status in results.items():
         if status != "ok":
-            print(f"Driver load {fname}: {status}")
+            warn(f"Driver load {fname}: {status}", component="hostrf.device_manager")
 
 
 def reload_devices(*, force: bool = False) -> bool:
@@ -172,8 +171,9 @@ def reload_devices(*, force: bool = False) -> bool:
         if not force and _loaded_signature == sig:
             return False
 
-    _load_all_drivers()
     records = _load_device_records()
+    required_types = {str(rec.get("TYPE") or "").strip().lower() for rec in records.values()}
+    _load_all_drivers(required_types)
 
     tmp_devices: Dict[int, _DeviceState] = {}
     tmp_info: Dict[int, str] = {}

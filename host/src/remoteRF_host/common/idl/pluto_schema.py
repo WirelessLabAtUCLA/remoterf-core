@@ -5,11 +5,13 @@ import subprocess
 
 import adi
 
+from ..utils.host_logging import error, info, warn
+
 
 def connect_pluto(*, serial: str):
     serial = (serial or "").strip()
     if not serial:
-        print("A Pluto serial must be provided")
+        error("A Pluto serial must be provided", component="hostrf.pluto")
         return None
 
     try:
@@ -28,15 +30,15 @@ def connect_pluto(*, serial: str):
                     break
 
         if not usb:
-            print(f"No device found with serial {serial}")
+            warn(f"No device found with serial {serial}", component="hostrf.pluto")
             return None
 
         dev = adi.Pluto(f"usb:{usb}")
-        print(f"Connected to Pluto serial={serial} via usb:{usb}")
+        info(f"Connected to Pluto serial={serial} via usb:{usb}", component="hostrf.pluto")
         return dev
 
     except Exception as e:
-        print(f"Failed to connect to Pluto serial={serial}: {e}")
+        warn(f"Failed to connect to Pluto serial={serial}: {e}", component="hostrf.pluto")
         return None
 
 

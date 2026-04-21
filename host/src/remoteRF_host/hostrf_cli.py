@@ -4,24 +4,20 @@ from __future__ import annotations
 
 import sys
 import shutil
+import os
 import yaml
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
-from .common.utils import get_remoterf_root
+from .common.utils import get_host_config_dir, get_remoterf_root
 
 # -----------------------------
-# Host config locations (~/.config/remoterf-host by default)
+# Host config locations (~/.config/remoterf/host by default)
 # -----------------------------
-
-import os
-from pathlib import Path
 
 def _cfg_dir() -> Path:
-    p = Path(os.getenv("REMOTERF_CONFIG_DIR", get_remoterf_root()))
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    return get_host_config_dir()
 
 def _ca_path() -> Path:
     return _cfg_dir() / "ca.crt"
@@ -436,20 +432,38 @@ def _device_show() -> int:
     return 0
 
 def _wipe_all(*, yes: bool) -> int:
-    root = _cfg_dir()
-    if not root.exists():
-        print(f"No config found at: {root}")
+    root = get_remoterf_root()
+    host_dir = Path(os.getenv("REMOTERF_CONFIG_DIR", str(root / "host"))).expanduser()
+    drivers_dir = Path(os.getenv("REMOTERF_DRIVERS_DIR", str(root / "drivers"))).expanduser()
+    targets = [host_dir, drivers_dir]
+
+    if not any(path.exists() for path in targets):
+        print("No config found:")
+        for path in targets:
+            print(f"  {path}")
         return 0
     if not yes:
         try:
-            if input(f"This will delete ALL hostrf config at:\n  {root}\nType 'wipe' to confirm: ").strip().lower() != "wipe":
+            prompt = "This will delete ALL hostrf config at:\n" + "\n".join(f"  {path}" for path in targets)
+            if input(f"{prompt}\nType 'wipe' to confirm: ").strip().lower() != "wipe":
                 print("Wipe aborted.")
                 return 1
         except KeyboardInterrupt:
             print("\nCancelled.")
             return 1
-    shutil.rmtree(root)
-    print(f"Wiped ALL config: {root}")
+
+    removed: List[Path] = []
+    for path in targets:
+        if path.exists():
+            shutil.rmtree(path)
+            removed.append(path)
+
+    if root.exists() and not any(root.iterdir()):
+        root.rmdir()
+
+    print("Wiped ALL config:")
+    for path in removed:
+        print(f"  {path}")
     return 0
 
 def _wipe_addr_only(*, yes: bool) -> int:
