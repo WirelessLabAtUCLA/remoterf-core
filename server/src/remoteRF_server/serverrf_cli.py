@@ -5,6 +5,8 @@ import os
 import subprocess
 import shutil
 import re
+import ssl
+import ipaddress
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timezone
@@ -51,6 +53,59 @@ def _fmt_remaining(na_utc: datetime) -> str:
     mins = secs // 60
 
     return f"{days}d {hours}h {mins}m"
+
+
+_STATIC_IP_ENV_KEYS: Tuple[str, ...] = ("STATIC_IP", "SERVER_IP")
+
+
+def _is_ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address((value or "").strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _x509_static_ip(cert_path: Path) -> str:
+    if not cert_path.exists():
+        raise FileNotFoundError(f"server cert not found: {cert_path}")
+
+    try:
+        cert = ssl._ssl._test_decode_cert(str(cert_path))
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        raise ValueError(f"could not parse server cert {cert_path}: {e}") from e
+
+    for name, value in cert.get("subjectAltName", []):
+        if name.lower() == "ip address":
+            ip = (value or "").strip()
+            if ip:
+                return ip
+
+    for group in cert.get("subject", []):
+        for name, value in group:
+            if name.lower() != "commonname":
+                continue
+            cn = (value or "").strip()
+            if _is_ip_address(cn):
+                return cn
+
+    raise ValueError(f"server cert does not contain an IP SAN or IP common name: {cert_path}")
+
+
+def _resolve_static_ip(kv: Dict[str, str]) -> Tuple[Optional[str], str, Optional[str]]:
+    env_path = _server_env_path()
+    for key in _STATIC_IP_ENV_KEYS:
+        value = (kv.get(key, "") or "").strip()
+        if value:
+            return value, f"{env_path} ({key})", None
+
+    cert_path = _certs_dir() / "server.crt"
+    try:
+        return _x509_static_ip(cert_path), str(cert_path), None
+    except (FileNotFoundError, ValueError) as e:
+        return None, str(cert_path), str(e)
 
 
 # -----------------------------
@@ -126,7 +181,7 @@ def print_help() -> None:
         "Port options:\n"
         "  --main-port <int>                  Set GRPC_PORT\n"
         "  --cert-port <int>                  Set CERT_PORT\n"
-        "  --show | -s                        Show current ports\n"
+        "  --show | -s                        Show current ports and static IP\n"
         "  -w | --wipe [-y]                   Wipe ONLY port config (server.env)\n"
         "\n"
         "Hosts:\n"
@@ -525,20 +580,27 @@ def _gen_certs(
 
 def _config_show_ports() -> int:
     p = _server_env_path()
-    if not p.exists():
-        print(f"No port config found (missing {p}).")
-        return 0
-
     kv = _read_env_kv(p)
-    if not kv:
-        print("Port config is empty.")
-        return 0
 
     print(f"Port config: {p}")
+    if not p.exists():
+        print("  (missing)")
+    elif not kv:
+        print("  (empty)")
+
     if "GRPC_PORT" in kv:
         print(f"  GRPC_PORT={kv['GRPC_PORT']}")
     if "CERT_PORT" in kv:
         print(f"  CERT_PORT={kv['CERT_PORT']}")
+
+    static_ip, source, err = _resolve_static_ip(kv)
+    if static_ip:
+        print(f"  STATIC_IP={static_ip}")
+        if source != f"{p} (STATIC_IP)":
+            print(f"  STATIC_IP_SOURCE={source}")
+    else:
+        print("  STATIC_IP=(not set)")
+        print(f"  STATIC_IP_ERROR={err or f'could not resolve from {source}'}")
     return 0
 
 
