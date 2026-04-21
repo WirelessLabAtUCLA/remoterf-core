@@ -828,8 +828,12 @@ def _wipe_devices_only(*, yes: bool) -> int:
 def main() -> int:
     argv = list(sys.argv[1:])
 
+    if len(argv) == 0:
+        print("invalid args, expect serverrf <args>, run serverrf --help for more info", file=sys.stderr)
+        return 2
+
     # help
-    if len(argv) == 0 or argv[0] in ("--help", "-h", "-help", "--h"):
+    if argv[0] in ("--help", "-h", "-help", "--h"):
         print_help()
         return 0
 
