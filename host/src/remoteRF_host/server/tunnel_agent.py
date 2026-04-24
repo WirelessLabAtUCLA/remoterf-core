@@ -46,8 +46,8 @@ def _die_config(net_env: Path, msg: str, *, code: int = 2) -> NoReturn:
     error(f"Config error: {msg}", component="hostrf.tunnel_agent")
     error(f"Config file: {net_env}", component="hostrf.tunnel_agent")
     error("Fix:", component="hostrf.tunnel_agent")
-    error("  hostrf -c -a <host:port>", component="hostrf.tunnel_agent")
-    error("  hostrf -c -a --show", component="hostrf.tunnel_agent")
+    error("  hostrf --config --addr <host:port>", component="hostrf.tunnel_agent")
+    error("  hostrf --config --show", component="hostrf.tunnel_agent")
     raise SystemExit(code)
 
 

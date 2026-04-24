@@ -121,8 +121,8 @@ Custom device drivers are loaded from: `~/.config/remoterf/drivers/`
 ```bash
 hostrf --config --addr <host:port>
 # example:
-hostrf -c -a 164.97.201.67:5000
-hostrf -c -a --show
+hostrf --config --addr 164.97.201.67:5000
+hostrf --config --show
 ```
 
 ### 2) Set host parameters
@@ -139,9 +139,9 @@ serverrf --host --token-create lab-host-01 --length 8
 Given the parameters/tokens returned, run the below:
 
 ```bash
-hostrf --config --host <hostname> \"TOKEN\"
+hostrf --host --set <hostname> \"TOKEN\"
 #example:
-hostrf -c -h lab-host-01 "UTzhag"
+hostrf --host --set lab-host-01 "UTzhag"
 ```
 
 <!-- 164.67.195.207:61005 -->
@@ -185,26 +185,26 @@ Add pluto to device list. Understand that the device_id (int) needs to be GLOBAL
 hostrf --device --add --pluto <id>:<device_name>:<hw_serial>
 
 #Example
-hostrf -d -a --pluto 10:"hostrf pluto 0":104473
+hostrf --device --add --pluto 10:"hostrf pluto 0":104473
 ```
 
 Remove device:
 
 ```bash
-hostrf -d -remove <id>
+hostrf --device --remove <id>
 ```
 
 Show devices:
 ```bash
-hostrf -d --show
+hostrf --device --show
 ```
 
 Clear all device config:
 ```bash
-hostrf -d --wipe
+hostrf --device --wipe
 ```
 
 Run to start the host. You should be able to see host on the server if setup properly.
 ```bash
-hostrf -s
+hostrf --serve
 ```

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
-
-import yaml
 
 from ..common.idl.schema import get_driver_class, load_drivers
 from ..common.utils import get_drivers_dir, get_host_config_dir
@@ -83,15 +82,26 @@ def _load_device_records() -> Dict[int, Dict[str, Any]]:
         return {}
 
     try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        text = path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(text) or {}
+        except json.JSONDecodeError:
+            try:
+                import yaml  # type: ignore
+            except ImportError:
+                error(
+                    f"Error reading device config {path}: install PyYAML or rewrite devices.yml as JSON.",
+                    component="hostrf.device_manager",
+                )
+                return {}
+            data = yaml.safe_load(text) or {}
     except Exception as e:
-        error(f"Error reading YAML config {path}: {e}", component="hostrf.device_manager")
+        error(f"Error reading device config {path}: {e}", component="hostrf.device_manager")
         return {}
 
     devices = data.get("devices") or []
     if not isinstance(devices, list):
-        error(f"Invalid YAML config {path}: 'devices' must be a list", component="hostrf.device_manager")
+        error(f"Invalid device config {path}: 'devices' must be a list", component="hostrf.device_manager")
         return {}
 
     recs: Dict[int, Dict[str, Any]] = {}

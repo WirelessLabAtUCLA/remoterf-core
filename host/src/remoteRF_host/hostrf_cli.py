@@ -5,12 +5,12 @@ from __future__ import annotations
 import sys
 import shutil
 import os
-import yaml
+import json
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
-from .common.utils import get_host_config_dir, get_remoterf_root
+from .common.utils.db_location import get_host_config_dir, get_remoterf_root
 
 # -----------------------------
 # Host config locations (~/.config/remoterf/host by default)
@@ -33,7 +33,7 @@ def _devices_yaml_path() -> Path:
 
 
 # -----------------------------
-# Help (exact commands only)
+# Help (serverrf-style, host subset)
 # -----------------------------
 
 def print_help() -> None:
@@ -41,47 +41,57 @@ def print_help() -> None:
         "RemoteRF Host CLI Help\n"
         "\n"
         "Usage:\n"
-        "  hostrf -h | --help                   Show this help\n"
+        "  hostrf -h | --help\n"
         "\n"
-        "  hostrf -s | --server                 Run hostrf server\n"
+        "Serve:\n"
+        "  hostrf -s | --serve              Run host tunnel agent (NOTE: only when -s/--serve is the FIRST arg)\n"
         "\n"
+        "Network:\n"
         "  hostrf -c | --config [options]\n"
         "\n"
-        "Network option:\n"
-        "  -a, --addr <host:port>               Set target server\n"
-        "  -a --show                            Show current target\n"
-        "  -a -w [-y]                           Wipe ONLY address stuff (net.env + ca.crt)\n"
+        "Network options:\n"
+        "  --addr <host:port>               Set REMOTERF_ADDR and fetch CA cert\n"
+        "  --show | -s                      Show current network config\n"
+        "  -w | --wipe [-y]                 Wipe ONLY network config (net.env + ca.crt)\n"
         "\n"
-        "Host option:\n"
-        "  --host <host_id> \"<token>\"       Set HOST_ID + HOST_TOKEN (both required)\n"
-        "  --host --show                      Show host config (host.env)\n"
-        "  --host --wipe [-y]                 Wipe ONLY host config (host.env)\n"
+        "Host:\n"
+        "  hostrf --host --set <host_id> <token>      Set HOST_ID + HOST_TOKEN\n"
+        "  hostrf --host --show [--secrets]           Show host config\n"
+        "  hostrf --host --wipe [-y]                  Wipe ONLY host config (host.env)\n"
         "\n"
-        # "Device option:\n"
-        # "  --device --add --pluto <gid:\"name\":serial>  Add device (fails if gid OR serial already used)\n"
-        # "  --device --edit-name <gid> \"<new_name>\"     Edit device name\n"
-        # "  --device --remove <gid>                   Remove device\n"
-        # "  --device --show                           Show all devices\n"
-        # "  --device --wipe [-y]                      Wipe ONLY device config (devices.yml)\n"
-        # "\n"
+        "Devices:\n"
+        "  hostrf -d | --device [options]\n"
+        "\n"
+        "Device options:\n"
+        "  --add --pluto <id:name:iio_serial>  Add device (fails if gid OR serial already used)\n"
+        "  --remove <id>                       Remove device\n"
+        "  --edit-name <id> <name>             Override device NAME for existing device\n"
+        "  --show | -s                         Show all devices\n"
+        "  -w | --wipe [-y]                    Wipe ONLY device config (devices.yml)\n"
+        "\n"
+        "Global:\n"
+        "  -y, --yes                           Skip wipe confirmation prompts\n"
+        "\n"
         "Wipe all:\n"
-        "  -w, --wipe [-y]                      Wipe ALL config\n"
+        "  hostrf --wipe [-y]                  Wipe ALL host config\n"
         "\n"
         "Examples:\n"
-        "  hostrf -c -a 1.2.3.4:61007\n"
-        "  hostrf -c -a --show\n"
-        "  hostrf -c -a -w -y\n"
+        "  hostrf --config --addr 1.2.3.4:61007\n"
+        "  hostrf --config --show\n"
+        "  hostrf --config --wipe -y\n"
         "\n"
-        "  hostrf -c -h lab-host-01 \"my-host-token\"\n"
-        "  hostrf -c -h --show\n"
-        "  hostrf -c -h --wipe -y\n"
+        "  hostrf --host --set lab-host-01 \"my-host-token\"\n"
+        "  hostrf --host --show\n"
+        "  hostrf --host --show --secrets\n"
+        "  hostrf --host --wipe -y\n"
         "\n"
-        # "  hostrf -d --add --pluto 0:pluto_aaa:123123\n"
-        # "  hostrf -d --remove 0\n"
-        # "  hostrf -d --show\n"
-        # "  hostrf -d --wipe -y\n"
-        # "\n"
-        "  hostrf -c -w -y\n"
+        "  hostrf --device --add --pluto 0:pluto_aaa:123123\n"
+        "  hostrf --device --edit-name 0 \"New Pluto Name\"\n"
+        "  hostrf --device --remove 0\n"
+        "  hostrf --device --show\n"
+        "  hostrf --device --wipe -y\n"
+        "\n"
+        "  hostrf --serve\n"
         "\n"
     )
 
@@ -130,6 +140,13 @@ def _read_env_kv(path: Path) -> Dict[str, str]:
     return out
 
 
+def _redact(s: str) -> str:
+    s = (s or "").strip()
+    if len(s) <= 8:
+        return "****"
+    return f"{s[:4]}...{s[-4:]}"
+
+
 # -----------------------------
 # Device storage — devices.yml (same schema as server)
 #
@@ -163,8 +180,19 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
     if not path.exists():
         return {}
     try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        text = path.read_text(encoding="utf-8")
+        try:
+            data = json.loads(text) or {}
+        except json.JSONDecodeError:
+            try:
+                import yaml  # type: ignore
+            except ImportError:
+                print(
+                    f"ERROR: Failed to read {path}: install PyYAML or rewrite devices.yml as JSON.",
+                    file=sys.stderr,
+                )
+                return {}
+            data = yaml.safe_load(text) or {}
     except Exception as e:
         print(f"ERROR: Failed to read {path}: {e}", file=sys.stderr)
         return {}
@@ -187,7 +215,7 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
 
 
 def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
-    """Write {gid: record_dict} back to devices.yml in server-compatible format."""
+    """Write {gid: record_dict} back to devices.yml as JSON (valid YAML)."""
     path = _devices_yaml_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -204,8 +232,7 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
         devices_list.append(entry)
 
     doc: Dict[str, Any] = {"devices": devices_list}
-    with path.open("w", encoding="utf-8") as f:
-        yaml.dump(doc, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
 # -----------------------------
@@ -325,7 +352,7 @@ def _set_token(token: str) -> int:
     print(f"  {p}")
     return 0
 
-def _show_host() -> int:
+def _show_host(*, show_secrets: bool = False) -> int:
     p = _host_env_path()
     if not p.exists():
         print(f"No host config found (missing {p}).")
@@ -338,6 +365,12 @@ def _show_host() -> int:
 
     print(f"Host config: {p}")
     print(f"  HOST_ID={kv.get('HOST_ID','')}")
+    tok = kv.get("HOST_TOKEN", "")
+    if tok:
+        if show_secrets:
+            print(f"  HOST_TOKEN={tok}")
+        else:
+            print(f"  HOST_TOKEN={_redact(tok)}  (use --secrets to show)")
     return 0
 
 def _device_add_pluto(spec: str) -> int:
@@ -516,48 +549,67 @@ def _wipe_devices_only(*, yes: bool) -> int:
     return 0
 
 
+def _normalize_legacy_mode_aliases(argv: List[str]) -> List[str]:
+    if not argv or argv[0] not in ("--config", "-c", "-config"):
+        return argv
+
+    i = 1
+    prefix: List[str] = []
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-y", "--yes", "-yes"):
+            prefix.append(tok)
+            i += 1
+            continue
+        if tok in ("--host", "-host", "-h"):
+            return prefix + ["--host"] + argv[i + 1 :]
+        return argv
+
+    return argv
+
+
 # -----------------------------
-# CLI parser (ONLY commands in help)
+# CLI parser (serverrf-style, host subset)
 # -----------------------------
 
 def main() -> int:
-    argv = list(sys.argv[1:])
-    
-    if len(argv) > 0 and argv[0] in ("--device", "-device", "-d"):
-        argv = ["-c", "--device"] + argv[1:]
+    argv = _normalize_legacy_mode_aliases(list(sys.argv[1:]))
 
-    # help
-    if len(argv) == 0 or argv[0] in ("--help", "-help", "-h"):
-        print_help()
-        return 0
-    
-    if argv[0] in ("-s", "--server"):
-        from .server.tunnel_agent import main as tunnel_main
-        tunnel_main()          # blocks until Ctrl+C
-        return 0
-
-    # config
-    if argv[0] not in ("--config", "-config", "-c"):
-        print(f"ERROR: unknown command: {argv[0]!r}", file=sys.stderr)
+    if len(argv) == 0:
+        print("invalid args, expect hostrf <args>, run hostrf --help for more info", file=sys.stderr)
         return 2
 
+    # help
+    if argv[0] in ("--help", "-h", "-help", "--h"):
+        print_help()
+        return 0
+
+    if argv[0] in ("-s", "--serve", "--server"):
+        if len(argv) != 1:
+            print("ERROR: -s/--serve cannot be combined with other commands. Run it alone.", file=sys.stderr)
+            return 2
+        from .server.tunnel_agent import main as tunnel_main
+        tunnel_main()
+        return 0
+
     yes = False
+    show_secrets = False
 
-    # addr scope/actions
-    addr_selected = False
+    # config commands
+    config_mode = False
     addr_value: Optional[str] = None
-    addr_show = False
-    addr_wipe = False
+    config_show = False
+    config_wipe = False
 
-    # host scope/actions
-    host_selected = False
-    host_value: Optional[str] = None
-    host_token_value: Optional[str] = None
+    # host commands
+    host_mode = False
+    host_set_id: Optional[str] = None
+    host_set_token: Optional[str] = None
     host_show = False
     host_wipe = False
 
-    # device scope/actions
-    device_selected = False
+    # device commands
+    device_mode = False
     device_show = False
     device_wipe = False
     device_add_type: Optional[str] = None
@@ -566,10 +618,10 @@ def main() -> int:
     device_edit_gid: Optional[str] = None
     device_edit_name: Optional[str] = None
 
-    # wipe-all (only when no scope is selected at wipe time)
+    # wipe-all
     wipe_all = False
 
-    i = 1
+    i = 0
     while i < len(argv):
         tok = argv[i]
 
@@ -578,77 +630,88 @@ def main() -> int:
             i += 1
             continue
 
-        # addr scope
-        if tok in ("-a", "--addr", "-addr"):
-            addr_selected = True
-            # optional value
-            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                addr_value = argv[i + 1].strip()
-                i += 2
-            else:
-                i += 1
+        if tok in ("--config", "-c", "-config"):
+            config_mode = True
+            i += 1
             continue
 
-        # host scope (NOTE: -h means host ONLY inside -c mode)
-        if tok in ("--host", "-host", "-h"):
-            host_selected = True
-
-            # If next token is missing or is another flag, we don't set values here.
-            # That allows: -h --show  /  -h --wipe
-            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
-                i += 1
+        if tok in ("--host", "-host"):
+            host_mode = True
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                if i + 2 >= len(argv) or argv[i + 2].startswith("-"):
+                    print("ERROR: --host requires BOTH <host_id> and <token> when setting host config.", file=sys.stderr)
+                    print("Example: hostrf --host lab-host-01 \"snofeogs\"", file=sys.stderr)
+                    return 2
+                host_set_id = argv[i + 1].strip()
+                host_set_token = argv[i + 2].strip()
+                i += 3
                 continue
+            i += 1
+            continue
 
-            # Otherwise we got a host_id, and we REQUIRE a token right after it.
-            host_value = argv[i + 1].strip()
+        if tok in ("--device", "-device", "-d"):
+            device_mode = True
+            i += 1
+            continue
 
-            if i + 2 >= len(argv) or argv[i + 2].startswith("-"):
-                print("ERROR: --host requires BOTH <host_id> and <token> when setting host config.", file=sys.stderr)
-                print("Example: hostrf --host lab-host-01 \"snofeogs\"", file=sys.stderr)
+        if host_mode and tok == "--set":
+            if i + 2 >= len(argv):
+                print("ERROR: --host --set expects <host_id> <token>", file=sys.stderr)
                 return 2
-
-            host_token_value = argv[i + 2].strip()
+            host_set_id = argv[i + 1].strip()
+            host_set_token = argv[i + 2].strip()
             i += 3
             continue
 
-        # device scope
-        if tok in ("--device", "-device", "-d"):
-            device_selected = True
+        if config_mode and tok in ("-a", "--addr", "-addr"):
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                print("ERROR: --addr expects <host:port>", file=sys.stderr)
+                return 2
+            addr_value = argv[i + 1].strip()
+            i += 2
+            continue
+
+        if config_mode and tok in ("--show", "-show", "-s"):
+            config_show = True
             i += 1
             continue
 
-        # show (scope-dependent)
-        if tok in ("--show", "-show", "-s"):
-            if device_selected:
-                device_show = True
-                i += 1
-                continue
-            if host_selected:
-                host_show = True
-                i += 1
-                continue
-            if addr_selected:
-                addr_show = True
-                i += 1
-                continue
-            print("ERROR: --show must be used with -a/--addr, -h/--host, or --device", file=sys.stderr)
-            return 2
-
-        # wipe (scope-dependent OR wipe-all)
-        if tok in ("-w", "--wipe", "-wipe"):
-            if device_selected:
-                device_wipe = True
-            elif host_selected:
-                host_wipe = True
-            elif addr_selected:
-                addr_wipe = True
-            else:
-                wipe_all = True
+        if host_mode and tok in ("--list", "-list", "--show", "-show"):
+            host_show = True
             i += 1
             continue
 
-        # device add/remove
-        if device_selected and tok in ("--add", "-add", "-a"):
+        if host_mode and tok in ("--secrets", "-secrets"):
+            show_secrets = True
+            i += 1
+            continue
+
+        if device_mode and tok in ("--show", "-show", "-s"):
+            device_show = True
+            i += 1
+            continue
+
+        if config_mode and tok in ("-w", "--wipe", "-wipe"):
+            config_wipe = True
+            i += 1
+            continue
+
+        if host_mode and tok in ("--wipe", "-wipe", "-w"):
+            host_wipe = True
+            i += 1
+            continue
+
+        if device_mode and tok in ("-w", "--wipe", "-wipe"):
+            device_wipe = True
+            i += 1
+            continue
+
+        if not config_mode and not host_mode and not device_mode and tok in ("-w", "--wipe", "-wipe"):
+            wipe_all = True
+            i += 1
+            continue
+
+        if device_mode and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
                 print("ERROR: missing device type after --device --add (expected --pluto)", file=sys.stderr)
                 return 2
@@ -663,8 +726,8 @@ def main() -> int:
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
-        
-        if device_selected and tok in ("--edit-name", "-edit-name", "--rename", "-rename"):
+
+        if device_mode and tok in ("--edit-name", "-edit-name", "--rename", "-rename"):
             if i + 2 >= len(argv):
                 print("ERROR: --device --edit-name expects <gid> <new_name>", file=sys.stderr)
                 return 2
@@ -673,7 +736,7 @@ def main() -> int:
             i += 3
             continue
 
-        if device_selected and tok in ("--remove", "-remove", "-r"):
+        if device_mode and tok in ("--remove", "-remove", "-r"):
             if i + 1 >= len(argv):
                 print("ERROR: missing value after --device --remove <gid>", file=sys.stderr)
                 return 2
@@ -684,101 +747,123 @@ def main() -> int:
         print(f"ERROR: unknown option: {tok!r}", file=sys.stderr)
         return 2
 
-    # ---- conflict checks (keep it strict) ----
-    if (addr_wipe or host_wipe or device_wipe or wipe_all) and (addr_show or host_show or device_show):
-        print("ERROR: cannot combine --show with --wipe", file=sys.stderr)
+    if device_mode and (config_mode or host_mode):
+        print("ERROR: --device cannot be combined with config/host commands. Run them separately.", file=sys.stderr)
         return 2
 
-    if addr_wipe and addr_value is not None:
-        print("ERROR: cannot use '--addr <host:port>' with wipe. Use '-a -w' to wipe address config.", file=sys.stderr)
+    if host_mode and config_mode:
+        print("ERROR: --host cannot be combined with config commands. Run them separately.", file=sys.stderr)
         return 2
 
-    if host_wipe and host_value is not None:
-        print("ERROR: cannot use '--host <name>' with wipe. Use '-h --wipe' to wipe host config.", file=sys.stderr)
+    if wipe_all and (config_mode or host_mode or device_mode):
+        print("ERROR: --wipe cannot be combined with config/host/device commands. Run it alone.", file=sys.stderr)
         return 2
 
-    if device_wipe and (device_add_spec is not None or device_remove_gid is not None):
-        print("ERROR: cannot combine device add/remove with device wipe. Use '--device --wipe' only.", file=sys.stderr)
-        return 2
-    
-    if host_selected and (host_value is not None or host_token_value is not None):
-        if not host_value or not host_token_value:
-            print("ERROR: --host set requires <host_id> and <token>", file=sys.stderr)
+    if wipe_all:
+        return int(_wipe_all(yes=yes))
+
+    if host_mode:
+        actions = int(host_show) + int(host_wipe) + int(host_set_id is not None or host_set_token is not None)
+        if actions == 0:
+            print_help()
+            return 2
+        if actions > 1:
+            print("ERROR: host commands are mutually exclusive. Use exactly one of: --set, --show/--list, --wipe", file=sys.stderr)
             return 2
 
-        # Optional: enforce minimum token length (recommended)
-        if len(host_token_value) < 4:
-            print("ERROR: host token too short (min length = 4).", file=sys.stderr)
-            return 2
+        if host_set_id is not None or host_set_token is not None:
+            if not host_set_id or not host_set_token:
+                print("ERROR: --host set requires <host_id> and <token>", file=sys.stderr)
+                return 2
+            if len(host_set_token) < 4:
+                print("ERROR: host token too short (min length = 4).", file=sys.stderr)
+                return 2
+            return int(_configure_host_pair(host_set_id, host_set_token))
 
-    # ---- wipe execution ----
-    if wipe_all or addr_wipe or host_wipe or device_wipe:
-        if wipe_all:
-            return int(_wipe_all(yes=yes))
-        if addr_wipe:
-            return int(_wipe_addr_only(yes=yes))
+        if host_show:
+            return int(_show_host(show_secrets=show_secrets))
+
         if host_wipe:
             return int(_wipe_host_only(yes=yes))
-        if device_wipe:
-            return int(_wipe_devices_only(yes=yes))
-        return 2
 
-    # ---- non-wipe actions ----
-    did_any = False
-
-    if addr_show:
-        rc = _show_addr()
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if host_show:
-        rc = _show_host()
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if device_show:
-        rc = _device_show()
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if addr_value is not None:
-        rc = _configure_addr(addr_value)
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if host_value is not None:
-        rc = _configure_host_pair(host_value, host_token_value or "")
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if device_add_type == "pluto" and device_add_spec is not None:
-        rc = _device_add_pluto(device_add_spec)
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if device_remove_gid is not None:
-        rc = _device_remove(device_remove_gid)
-        if rc != 0:
-            return rc
-        did_any = True
-
-    if device_edit_gid is not None:
-        rc = _device_edit_name(device_edit_gid, device_edit_name or "")
-        if rc != 0:
-            return rc
-        did_any = True
-        
-    if not did_any:
         print_help()
         return 2
 
-    return 0
+    if device_mode:
+        if device_wipe and (
+            device_show
+            or device_add_spec is not None
+            or device_remove_gid is not None
+            or device_edit_gid is not None
+        ):
+            print("ERROR: cannot combine device add/remove/show/edit with device wipe. Use '-d -w' only.", file=sys.stderr)
+            return 2
+
+        if device_wipe:
+            return int(_wipe_devices_only(yes=yes))
+
+        did_any = False
+
+        if device_show:
+            rc = _device_show()
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "pluto" and device_add_spec is not None:
+            rc = _device_add_pluto(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_edit_gid is not None:
+            rc = _device_edit_name(device_edit_gid, device_edit_name or "")
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_remove_gid is not None:
+            rc = _device_remove(device_remove_gid)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if not did_any:
+            print_help()
+            return 2
+
+        return 0
+
+    if config_mode:
+        if config_wipe and (config_show or addr_value is not None):
+            print("ERROR: cannot combine --wipe with --show or --addr. Use '-c -w' only.", file=sys.stderr)
+            return 2
+
+        if config_wipe:
+            return int(_wipe_addr_only(yes=yes))
+
+        did_any = False
+
+        if config_show:
+            rc = _show_addr()
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if addr_value is not None:
+            rc = _configure_addr(addr_value)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if not did_any:
+            print_help()
+            return 2
+
+        return 0
+
+    print_help()
+    return 2
 
 
 if __name__ == "__main__":
