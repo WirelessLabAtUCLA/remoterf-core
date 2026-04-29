@@ -1322,7 +1322,7 @@ def main() -> int:
             return 2
 
         print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
-        print(f'To config host:\n  hostrf --config --host {host_token_create_id} "{token}"')
+        print(f'On the host you want to setup, run the following:\n  hostrf --config --host {host_token_create_id} "{token}"')
         return 0
 
     # ----------------
