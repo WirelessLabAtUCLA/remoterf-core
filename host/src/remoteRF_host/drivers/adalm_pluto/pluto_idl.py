@@ -197,7 +197,7 @@ def capabilities_string(idl: Dict[str, Dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 DEVICE_IDL_REGISTRY: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "pluto": PLUTO_IDL,
+    "adalm_pluto": PLUTO_IDL,
 }
 
 

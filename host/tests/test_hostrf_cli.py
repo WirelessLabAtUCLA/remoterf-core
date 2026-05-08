@@ -80,7 +80,7 @@ class HostRfCliTests(unittest.TestCase):
         rc, out, err = self.run_cli("--device", "--show")
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
-        self.assertIn("10: type=pluto name=pluto_0 iio_serial=104473", out)
+        self.assertIn("10: type=adalm_pluto name=pluto_0 iio_serial=104473", out)
 
         devices_yml = self.host_dir / "devices.yml"
         self.assertTrue(devices_yml.exists())

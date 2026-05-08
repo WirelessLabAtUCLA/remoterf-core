@@ -1,22 +1,26 @@
-from remoteRF_server.common.idl import DeviceSchema, idl_expose, idl_register
+# SAMPLE schema for ADI Pluto SDR.
+# Place into -> ~/.config/remoterf/drivers and restart server to utilize!
 
-import re
+
+from remoteRF_server.common.idl import DeviceSchema, idl_register, idl_expose
+
 import subprocess
+import re
+import adi
 
-from remoteRF_host.common.utils.host_logging import error, info, warn
-
+# == PLUTO Connection Logic ==
 
 def connect_pluto(*, serial: str):
     serial = (serial or "").strip()
     if not serial:
-        error("A Pluto serial must be provided", component="hostrf.pluto")
+        print("A Pluto serial must be provided")
         return None
 
     try:
         out = subprocess.check_output(
             ["iio_info", "-s"],
             text=True,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT
         )
 
         usb = None
@@ -28,33 +32,31 @@ def connect_pluto(*, serial: str):
                     break
 
         if not usb:
-            warn(f"No device found with serial {serial}", component="hostrf.pluto")
-            return None
-
-        try:
-            import adi
-        except Exception as e:
-            warn(f"Failed to import pyadi-iio for Pluto: {e}", component="hostrf.pluto")
+            print(f"No device found with serial {serial}")
             return None
 
         dev = adi.Pluto(f"usb:{usb}")
-        info(f"Connected to Pluto serial={serial} via usb:{usb}", component="hostrf.pluto")
+        print(f"Connected to Pluto serial={serial} via usb:{usb}")
         return dev
 
     except Exception as e:
-        warn(f"Failed to connect to Pluto serial={serial}: {e}", component="hostrf.pluto")
+        print(f"Failed to connect to Pluto serial={serial}: {e}")
         return None
 
+# ========================= PLUTO Schema =========================
 
-@idl_register("pluto")
+@idl_register("adalm_pluto")
 class PlutoSchema(DeviceSchema):
-    device_type = "pluto"
+
+    device_type = "adalm_pluto"
     driver_version = "0.0.1"
 
     @staticmethod
     def make_device(**kwargs):
         serial = kwargs.get("serial")
         return connect_pluto(serial=serial)
+
+    # region ad9364
 
     @idl_expose(kind="get")
     def get_filter(self):
@@ -81,11 +83,13 @@ class PlutoSchema(DeviceSchema):
         self.device.gain_control_mode_chan0 = value
 
     @idl_expose(kind="get")
-    def get_hardwaregain_chan0(self):
+    def get_rx_hardwaregain_chan0(self):
+        """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
         return self.device.hardwaregain_chan0
 
     @idl_expose(kind="set")
-    def set_hardwaregain_chan0(self, value):
+    def set_rx_hardwaregain_chan0(self, value):
+        """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
         self.device.hardwaregain_chan0 = value
 
     @idl_expose(kind="get")
@@ -144,6 +148,8 @@ class PlutoSchema(DeviceSchema):
     def set_tx_cyclic_buffer(self, value):
         self.device.tx_cyclic_buffer = value
 
+    # region RX/TX
+
     @idl_expose(kind="call")
     def call_rx(self):
         return self.device.rx()
@@ -170,10 +176,16 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="call")
     def call_disable_dds(self):
+        """Disable the internal DDS tone generator."""
         self.device.disable_dds()
+
+    # endregion
+
+    # region ip / repr
 
     @idl_expose(kind="call")
     def call_ip(self):
+        """Return a connection identifier for this device (ping / verify)."""
         try:
             return str(self.device.uri)
         except AttributeError:
@@ -181,24 +193,36 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="get")
     def get_repr(self):
+        """Return repr() of the underlying device object."""
         return repr(self.device)
+
+    # endregion
+
+    # region _dec_int_fpga_filter
 
     @idl_expose(kind="get")
     def get_rx_dec8_filter_en(self):
+        """rx_dec8_filter_en: Enable decimate-by-8 filter in FPGA"""
         return bool(self.device.rx_dec8_filter_en)
 
     @idl_expose(kind="set")
     def set_rx_dec8_filter_en(self, value):
+        """rx_dec8_filter_en: Enable decimate-by-8 filter in FPGA"""
         self.device.rx_dec8_filter_en = value
 
     @idl_expose(kind="get")
     def get_tx_int8_filter_en(self):
+        """tx_int8_filter_en: Enable interpolate-by-8 filter in FPGA"""
         return bool(self.device.tx_int8_filter_en)
 
     @idl_expose(kind="set")
     def set_tx_int8_filter_en(self, value):
+        """tx_int8_filter_en: Enable interpolate-by-8 filter in FPGA"""
         self.device.tx_int8_filter_en = value
 
     @idl_expose(kind="get")
     def get_rates(self):
+        """Get decimation/interpolation rates from the FPGA filter block."""
         return self.device._get_rates(self.device._rxadc, False)
+
+    # endregion

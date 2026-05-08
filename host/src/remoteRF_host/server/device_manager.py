@@ -155,7 +155,7 @@ def _connect_from_record(rec: Dict[str, Any]):
 
 
 def _load_all_drivers(required_types: set[str]) -> None:
-    if "pluto" in required_types:
+    if {"adalm_pluto", "pluto"} & required_types:
         try:
             from ..common.idl import pluto_schema as _  # noqa: F401
         except Exception as e:

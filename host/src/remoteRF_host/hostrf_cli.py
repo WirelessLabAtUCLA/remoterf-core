@@ -153,7 +153,7 @@ def _redact(s: str) -> str:
 #
 #   devices:
 #     - device_id: 0
-#       device_type: pluto
+#       device_type: adalm_pluto
 #       name: pluto_aaa
 #       init:
 #         serial: 123123
@@ -226,7 +226,7 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
         # Normalise to canonical server schema order
         entry: Dict[str, Any] = {
             "device_id": int(gid),
-            "device_type": str(item.get("device_type", "pluto")),
+            "device_type": str(item.get("device_type", "adalm_pluto")),
             "name": str(item.get("name", f"device-{gid}")),
             "init": dict(item.get("init") or {}),
         }
@@ -395,13 +395,13 @@ def _device_add_pluto(spec: str) -> int:
 
     recs[gid] = {
         "device_id": gid,
-        "device_type": "pluto",
+        "device_type": "adalm_pluto",
         "name": name,
         "init": {"serial": iio_serial},
     }
     _write_device_records(recs)
 
-    print(f"Added device: {gid} type=pluto name={name} iio_serial={iio_serial}")
+    print(f"Added device: {gid} type=adalm_pluto name={name} iio_serial={iio_serial}")
     return 0
 
 def _device_edit_name(global_id_str: str, new_name: str) -> int:
