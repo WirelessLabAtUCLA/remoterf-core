@@ -15,8 +15,6 @@ import secrets
 import hashlib
 import getpass
 
-from .host.host_auth_token import create_host_token, delete_host_token, wipe_all_host_tokens, show_host_tokens
-
 def _x509_notafter_utc(cert_path: Path) -> Optional[datetime]:
     # openssl output: notAfter=Feb 16 23:12:02 2027 GMT
     rc, out = _run_capture(["openssl", "x509", "-in", str(cert_path), "-noout", "-enddate"])
@@ -156,6 +154,69 @@ def _gist_env_path() -> Path:
     # Stored alongside server.env/devices.env under ~/.config/remoterf by default
     return _cfg_dir() / "gist.env"
 
+def _tos_ack_path() -> Path:
+    # Stored alongside server.env/devices.env under ~/.config/remoterf by default
+    return _cfg_dir() / "tos.env"
+
+
+_TOS_VERSION = "2026"
+_TOS_URL = "https://remoterf.net/tos"
+
+
+def _tos_acknowledged() -> bool:
+    kv = _read_env_kv(_tos_ack_path())
+    accepted = kv.get("REMOTERF_TOS_ACKNOWLEDGED", "").strip().lower()
+    version = kv.get("REMOTERF_TOS_VERSION", "").strip()
+    return accepted in {"1", "true", "yes", "y"} and version == _TOS_VERSION
+
+
+def _print_tos_acknowledgement() -> None:
+    print(
+        "\n"
+        "RemoteRF 2026\n"
+        "Terms of Service Acknowledgement\n"
+        "\n"
+        "By continuing, you confirm that you have reviewed and agree to the\n"
+        "RemoteRF Terms of Service and understand that use of the client and\n"
+        "service is at your own risk. RemoteRF is not liable for losses or\n"
+        "damages arising from use of the platform.\n"
+        "\n"
+        f"Terms of Service: {_TOS_URL}\n"
+    )
+
+
+def _ensure_tos_acknowledged() -> bool:
+    if _tos_acknowledged():
+        return True
+
+    _print_tos_acknowledgement()
+    while True:
+        try:
+            answer = input("Do you agree to the RemoteRF Terms of Service? (yes/no): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nTerms of Service acknowledgement is required before starting the server.")
+            return False
+
+        if answer in {"y", "yes"}:
+            break
+        if answer in {"n", "no"}:
+            print("Terms of Service not accepted. Server startup cancelled.")
+            return False
+        print("Please answer yes or no.")
+
+    _write_env_kv(
+        _tos_ack_path(),
+        {
+            "REMOTERF_TOS_ACKNOWLEDGED": "true",
+            "REMOTERF_TOS_VERSION": _TOS_VERSION,
+            "REMOTERF_TOS_URL": _TOS_URL,
+            "REMOTERF_TOS_ACKNOWLEDGED_AT": datetime.now(timezone.utc).isoformat(),
+            "REMOTERF_TOS_ACKNOWLEDGED_BY": getpass.getuser(),
+        },
+    )
+    print(f"Terms of Service acknowledgement saved to: {_tos_ack_path()}")
+    return True
+
 # -----------------------------
 # Help (exact commands only)
 # -----------------------------
@@ -194,12 +255,12 @@ def print_help() -> None:
         "Devices:\n"
         "  serverrf -d | --device [options]\n"
         "\n"
-        "Device options:\n"
-        "  --add --pluto <id:name:iio_serial>  Add device (fails if gid OR serial already used)\n"
-        "  --remove <id>                       Remove device\n"
-        "  --edit-name <id> <name>             Override device NAME for existing device\n"
-        "  --show | -s                          Show all devices\n"
-        "  -w | --wipe [-y]                     Wipe ONLY device config (devices.env)\n"
+        # "Device options:\n"
+        # "  --add --pluto <id:name:iio_serial>  Add device (fails if gid OR serial already used)\n"
+        # "  --remove <id>                       Remove device\n"
+        # "  --edit-name <id> <name>             Override device NAME for existing device\n"
+        # "  --show | -s                         Show all devices\n"
+        # "  -w | --wipe [-y]                    Wipe ONLY device config (devices.env)\n"
 
         "\n"
         "Cert options (for --gen-certs):\n"
@@ -263,6 +324,9 @@ def _serve() -> int:
     Alias for the RRRFserver entrypoint.
     Equivalent to running the RRRFserver console_script.
     """
+    if not _ensure_tos_acknowledged():
+        return 1
+
     from remoteRF_server.server.grpc_server import main as grpc_main
     grpc_main()
     return 0
@@ -589,7 +653,7 @@ def _config_show_ports() -> int:
         print("  (empty)")
 
     if "GRPC_PORT" in kv:
-        print(f"  GRPC_PORT={kv['GRPC_PORT']}")
+        print(f"  MAIN_PORT={kv['GRPC_PORT']}")
     if "CERT_PORT" in kv:
         print(f"  CERT_PORT={kv['CERT_PORT']}")
 
@@ -1279,6 +1343,8 @@ def main() -> int:
     # Host mode execution
     # ----------------
     if host_mode:
+        from .host.host_auth_token import create_host_token, delete_host_token, wipe_all_host_tokens, show_host_tokens
+
         # 1) list
         if host_list:
             show_host_tokens(include_secrets=host_show_secrets, file=sys.stdout)
@@ -1322,7 +1388,8 @@ def main() -> int:
             return 2
 
         print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
-        print(f'On the host you want to setup, run the following:\n  hostrf --config --host {host_token_create_id} "{token}"')
+        print("First start the server with 'serverrf -s'.")
+        print(f'Then, on the host you want to set up, run the following:\n  hostrf --config --host {host_token_create_id} "{token}"')
         return 0
 
     # ----------------

@@ -1019,5 +1019,5 @@ def server_input(inpu: str) -> bool:
 welcome()
 
 def main():
-    while server_input(session.prompt(stylize('server@remote_rf: ', Sty.BOLD))):
+    while server_input(session.prompt(stylize('server@remoterf: ', Sty.BOLD))):
         pass

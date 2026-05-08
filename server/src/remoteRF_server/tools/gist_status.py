@@ -111,7 +111,7 @@ def start_status_publisher() -> None:
             return
 
         if _load_gist_env() is None:
-            print("[gist_status] off (not configured; see README gist docs)", file=sys.stderr)
+            # print("[gist_status] off (not configured; see README gist docs)", file=sys.stderr)
             return
 
         t = threading.Thread(

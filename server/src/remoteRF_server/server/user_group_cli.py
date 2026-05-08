@@ -122,7 +122,7 @@ def make_user_group_local(session) -> None:
         return
 
     # ---- Create ----
-    ok = user_group_handler.create_user_group(
+    group_id = user_group_handler.create_user_group(
         group_name=group_name,
         devices_whitelist=devices_whitelist,
         max_reservation_time_sec=max_reservation_time_sec,
@@ -130,8 +130,8 @@ def make_user_group_local(session) -> None:
         lifetime_sec=lifetime_sec,
     )
 
-    if ok:
-        print("User group created.")
+    if group_id is not None:
+        print(f"User group created with group_id={group_id}.")
     else:
         print("Failed to create user group.")
 

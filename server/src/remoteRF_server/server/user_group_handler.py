@@ -16,7 +16,7 @@ import sys
 class UserGroupHandler:
     '''
     Handles user groups and enrollment codes.
-        create_user_group -> bool
+        create_user_group -> Optional[int]
         delete_user_group -> bool
         edit_user_group -> bool
         get_all_user_groups -> list[dict]
@@ -86,34 +86,34 @@ class UserGroupHandler:
         max_reservation_time_sec: int,
         max_reservations: int,
         lifetime_sec: int,
-    ) -> bool:
+    ) -> Optional[int]:
         try:
             if not isinstance(group_name, str) or not group_name.strip():
-                return False
+                return None
 
             if devices_whitelist is None:
                 devices_whitelist = []
             if not isinstance(devices_whitelist, (list, tuple)):
-                return False
+                return None
 
             try:
                 devices_whitelist = sorted({int(d) for d in devices_whitelist})
             except Exception:
-                return False
+                return None
 
             try:
                 max_reservation_time_sec = int(max_reservation_time_sec)
                 max_reservations = int(max_reservations)
                 lifetime_sec = int(lifetime_sec)
             except Exception:
-                return False
+                return None
 
             if max_reservation_time_sec <= 0:
-                return False
+                return None
             if max_reservations < 0:
-                return False
+                return None
             if lifetime_sec < 0:
-                return False
+                return None
 
             devices_json = json.dumps(devices_whitelist)
 
@@ -133,10 +133,11 @@ class UserGroupHandler:
                     datetime.now(),
                 ),
             )
-            return True
+            group_id = self.cursor.lastrowid
+            return int(group_id) if group_id is not None else None
 
         except Exception:
-            return False
+            return None
 
     @db_connection
     def get_groups_user_in(self, *, uid: int) -> list[str]:

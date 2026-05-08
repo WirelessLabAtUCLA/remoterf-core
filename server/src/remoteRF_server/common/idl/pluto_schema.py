@@ -1,7 +1,6 @@
-# ~/.config/remoterf/drivers/pluto_schema.py
-#
-# Admin-written schema for ADALM-Pluto devices.
-# Drop this file into the drivers folder, restart the server. Done.
+# SAMPLE schema for ADI Pluto SDR.
+# Place into -> ~/.config/remoterf/drivers and restart server to utilize!
+
 
 from remoteRF_server.common.idl import DeviceSchema, idl_register, idl_expose
 
@@ -9,7 +8,7 @@ import subprocess
 import re
 import adi
 
-# ========================= PLUTO Connection Logic =========================
+# == PLUTO Connection Logic ==
 
 def connect_pluto(*, serial: str):
     serial = (serial or "").strip()
@@ -46,10 +45,10 @@ def connect_pluto(*, serial: str):
 
 # ========================= PLUTO Schema =========================
 
-@idl_register("pluto")
+@idl_register("adalm_pluto")
 class PlutoSchema(DeviceSchema):
 
-    device_type = "pluto"
+    device_type = "adalm_pluto"
     driver_version = "0.0.1"
 
     @staticmethod
@@ -84,12 +83,12 @@ class PlutoSchema(DeviceSchema):
         self.device.gain_control_mode_chan0 = value
 
     @idl_expose(kind="get")
-    def get_hardwaregain_chan0(self):
+    def get_rx_hardwaregain_chan0(self):
         """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
         return self.device.hardwaregain_chan0
 
     @idl_expose(kind="set")
-    def set_hardwaregain_chan0(self, value):
+    def set_rx_hardwaregain_chan0(self, value):
         """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
         self.device.hardwaregain_chan0 = value
 

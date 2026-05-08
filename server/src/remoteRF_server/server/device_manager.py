@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import time
 import yaml
 import threading
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Any, List, Iterator
 from contextlib import contextmanager
 
-from ..common.utils import validate_token, get_remoterf_root
+from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir
 from ..common.idl.schema import get_driver_class, load_drivers
 from ..host import host_tunnel_server as hts
 
@@ -245,10 +246,19 @@ def _get_master_token() -> str:
         return ""
 
 def _devices_yaml_path() -> Path:
-    p1 = _cfg_dir() / "devices.yml"
+    cfg_dir = _cfg_dir()
+    p1 = cfg_dir / "devices.yml"
     if p1.exists():
         return p1
-    return _cfg_dir() / "devices.yaml"
+    p2 = cfg_dir / "devices.yaml"
+    if p2.exists():
+        return p2
+    try:
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        p1.touch(exist_ok=True)
+    except OSError as e:
+        print(f"Warning: could not create empty devices config {p1}: {e}")
+    return p1
 
 def _load_device_records() -> Dict[int, Dict[str, str]]:
     path = _devices_yaml_path()
@@ -376,7 +386,48 @@ def _init_from_env() -> None:
 
 # Load built-in drivers, then any user-supplied drivers from the config dir.
 # Importing the module triggers @idl_register, which adds the class to the registry.
+def _packaged_pluto_schema_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "drivers" / "adalm_pluto" / "pluto_schema.py"
+
+def _driver_registers_pluto(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"(?:idl_register|register_driver)\(\s*['\"]adalm_pluto['\"]\s*\)", text) is not None
+
+def _seed_default_pluto_driver() -> None:
+    drivers_dir = get_drivers_dir()
+    target = drivers_dir / "pluto_schema.py"
+    if target.exists() or target.is_symlink():
+        return
+
+    try:
+        drivers_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"Warning: could not create drivers directory {drivers_dir}: {e}")
+        return
+
+    for driver_file in drivers_dir.glob("*.py"):
+        if driver_file.name.startswith("_"):
+            continue
+        if _driver_registers_pluto(driver_file):
+            return
+
+    source = _packaged_pluto_schema_path()
+    if not source.exists():
+        print(f"Warning: default Pluto schema source is missing: {source}")
+        return
+
+    try:
+        shutil.copy2(source, target)
+        print(f"Created default Pluto driver config at {target}")
+    except OSError as e:
+        print(f"Warning: could not create default Pluto driver config {target}: {e}")
+
 def _load_all_drivers() -> None:
+    _seed_default_pluto_driver()
+
     try:
         from ..common.idl import pluto_schema as _  # noqa: F401
     except Exception as e:
