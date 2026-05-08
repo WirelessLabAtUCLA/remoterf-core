@@ -61,6 +61,31 @@ def list_registered_drivers() -> Dict[str, str]:
     }
 
 
+def ensure_default_driver_files() -> Dict[str, str]:
+    drivers_dir = get_drivers_dir()
+    drivers_dir.mkdir(parents=True, exist_ok=True)
+
+    results: Dict[str, str] = {}
+    for filename in ("pluto_schema.py",):
+        target = drivers_dir / filename
+        if target.exists():
+            results[filename] = "exists"
+            continue
+
+        source = Path(__file__).with_name(filename)
+        try:
+            text = source.read_text(encoding="utf-8")
+            with target.open("x", encoding="utf-8") as f:
+                f.write(text)
+            results[filename] = "created"
+        except FileExistsError:
+            results[filename] = "exists"
+        except Exception as e:
+            results[filename] = f"error: {e}"
+
+    return results
+
+
 def install_server_import_compat() -> None:
     """
     Make server-authored schema imports resolve to the host IDL implementation.
@@ -102,6 +127,7 @@ def install_server_import_compat() -> None:
 
 def load_drivers() -> Dict[str, str]:
     install_server_import_compat()
+    ensure_default_driver_files()
     drivers_dir = get_drivers_dir()
     drivers_dir.mkdir(parents=True, exist_ok=True)
 

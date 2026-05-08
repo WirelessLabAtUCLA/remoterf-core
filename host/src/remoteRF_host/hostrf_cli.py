@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
-from .common.utils.db_location import get_host_config_dir, get_remoterf_root
+from .common.idl.schema import ensure_default_driver_files
+from .common.utils.db_location import get_devices_config_path, get_host_config_dir, get_remoterf_root
 
 # -----------------------------
 # Host config locations (~/.config/remoterf/host by default)
@@ -29,7 +30,7 @@ def _host_env_path() -> Path:
     return _cfg_dir() / "host.env"
 
 def _devices_yaml_path() -> Path:
-    return _cfg_dir() / "devices.yml"
+    return get_devices_config_path(create=True)
 
 
 # -----------------------------
@@ -802,6 +803,7 @@ def main() -> int:
         if device_wipe:
             return int(_wipe_devices_only(yes=yes))
 
+        ensure_default_driver_files()
         did_any = False
 
         if device_show:

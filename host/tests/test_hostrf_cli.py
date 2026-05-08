@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -90,6 +91,32 @@ class HostRfCliTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("Wiped device config", out)
         self.assertFalse(devices_yml.exists())
+
+    def test_device_show_creates_empty_devices_config_on_first_run(self) -> None:
+        devices_yml = self.host_dir / "devices.yml"
+        pluto_schema = self.drivers_dir / "pluto_schema.py"
+        self.assertFalse(devices_yml.exists())
+        self.assertFalse(pluto_schema.exists())
+
+        rc, out, err = self.run_cli("--device", "--show")
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertTrue(devices_yml.exists())
+        self.assertTrue(pluto_schema.exists())
+        self.assertEqual(json.loads(devices_yml.read_text(encoding="utf-8")), {"devices": []})
+        self.assertIn("class PlutoSchema", pluto_schema.read_text(encoding="utf-8"))
+        self.assertIn("Devices:", out)
+        self.assertIn("  (none)", out)
+
+    def test_device_show_does_not_overwrite_existing_pluto_schema(self) -> None:
+        self.drivers_dir.mkdir(parents=True, exist_ok=True)
+        pluto_schema = self.drivers_dir / "pluto_schema.py"
+        pluto_schema.write_text("# custom pluto driver\n", encoding="utf-8")
+
+        rc, out, err = self.run_cli("--device", "--show")
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertEqual(pluto_schema.read_text(encoding="utf-8"), "# custom pluto driver\n")
 
     def test_legacy_config_device_alias_is_rejected(self) -> None:
         self.host_dir.mkdir(parents=True, exist_ok=True)

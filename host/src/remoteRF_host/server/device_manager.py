@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-from ..common.idl.schema import get_driver_class, load_drivers
-from ..common.utils import get_drivers_dir, get_host_config_dir
+from ..common.idl.schema import ensure_default_driver_files, get_driver_class, load_drivers
+from ..common.utils import get_devices_config_path, get_drivers_dir
 from ..common.utils.host_logging import error, warn
 
 _state_lock = threading.RLock()
@@ -29,15 +29,8 @@ device_serialization: Dict[int, str] = {}
 devices_info: Dict[int, str] = {}
 
 
-def _cfg_dir() -> Path:
-    return get_host_config_dir()
-
-
 def _devices_yaml_path() -> Path:
-    p1 = _cfg_dir() / "devices.yml"
-    if p1.exists():
-        return p1
-    return _cfg_dir() / "devices.yaml"
+    return get_devices_config_path(create=True)
 
 
 def _path_signature(path: Path) -> tuple:
@@ -49,6 +42,7 @@ def _path_signature(path: Path) -> tuple:
 
 
 def _drivers_signature() -> tuple:
+    ensure_default_driver_files()
     drivers_dir = get_drivers_dir()
     try:
         files = sorted(

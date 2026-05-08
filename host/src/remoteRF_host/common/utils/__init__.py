@@ -1,7 +1,7 @@
 from .api_token import validate_token, generate_token, hash_token
 from .list_string import list_to_str, str_to_list
 from .db_connection import db_connection
-from .db_location import get_drivers_dir, get_host_config_dir, get_remoterf_root
+from .db_location import get_devices_config_path, get_drivers_dir, get_host_config_dir, get_remoterf_root
 
 
 def _missing_dependency(name: str, exc: Exception):

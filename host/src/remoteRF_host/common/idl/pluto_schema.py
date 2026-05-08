@@ -3,9 +3,7 @@ from remoteRF_server.common.idl import DeviceSchema, idl_expose, idl_register
 import re
 import subprocess
 
-import adi
-
-from ..utils.host_logging import error, info, warn
+from remoteRF_host.common.utils.host_logging import error, info, warn
 
 
 def connect_pluto(*, serial: str):
@@ -31,6 +29,12 @@ def connect_pluto(*, serial: str):
 
         if not usb:
             warn(f"No device found with serial {serial}", component="hostrf.pluto")
+            return None
+
+        try:
+            import adi
+        except Exception as e:
+            warn(f"Failed to import pyadi-iio for Pluto: {e}", component="hostrf.pluto")
             return None
 
         dev = adi.Pluto(f"usb:{usb}")

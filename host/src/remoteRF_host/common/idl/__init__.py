@@ -1,5 +1,6 @@
 from .schema import (
     DeviceSchema,
+    ensure_default_driver_files,
     get_driver_class,
     idl_expose,
     idl_register,

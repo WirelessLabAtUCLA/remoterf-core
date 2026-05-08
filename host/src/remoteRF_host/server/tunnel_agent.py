@@ -32,7 +32,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Iterable, List, Tuple, NoReturn
 
-from ..common.utils import get_host_config_dir
+from ..common.utils import get_devices_config_path, get_host_config_dir
 from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
@@ -146,10 +146,7 @@ def _host_env_path() -> Path:
 
 
 def _devices_yaml_path() -> Path:
-    p1 = _cfg_dir() / "devices.yml"
-    if p1.exists():
-        return p1
-    return _cfg_dir() / "devices.yaml"
+    return get_devices_config_path(create=True)
 
 
 def _resolve_path(base_env_path: Path, p: str) -> str:
