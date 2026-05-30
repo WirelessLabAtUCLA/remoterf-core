@@ -263,7 +263,7 @@ class DeviceSchema:
             elif ex.kind == "call":
                 calls[name] = entry
 
-        return {
+        body = {
             "schema_version": "1.0",
             "device_type": self.device_type,
             "driver_version": self.driver_version,
@@ -271,6 +271,12 @@ class DeviceSchema:
             "setters": setters,
             "calls": calls,
         }
+
+        client_class = getattr(self, "client_class", "")
+        if client_class:
+            body["client_class"] = str(client_class)
+
+        return body
 
     # ── Dispatch (server RPC layer calls this) ────────────────────
 

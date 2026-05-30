@@ -386,19 +386,20 @@ def _init_from_env() -> None:
 
 # Load built-in drivers, then any user-supplied drivers from the config dir.
 # Importing the module triggers @idl_register, which adds the class to the registry.
-def _packaged_pluto_schema_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "drivers" / "adalm_pluto" / "pluto_schema.py"
+def _packaged_driver_schema_path(filename: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "drivers" / "adalm_pluto" / filename
 
-def _driver_registers_pluto(path: Path) -> bool:
+def _driver_registers_type(path: Path, device_type: str) -> bool:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return False
-    return re.search(r"(?:idl_register|register_driver)\(\s*['\"]adalm_pluto['\"]\s*\)", text) is not None
+    pattern = rf"(?:idl_register|register_driver)\(\s*['\"]{re.escape(device_type)}['\"]\s*\)"
+    return re.search(pattern, text) is not None
 
-def _seed_default_pluto_driver() -> None:
+def _seed_default_driver(filename: str, *device_types: str) -> None:
     drivers_dir = get_drivers_dir()
-    target = drivers_dir / "pluto_schema.py"
+    target = drivers_dir / filename
     if target.exists() or target.is_symlink():
         return
 
@@ -411,27 +412,36 @@ def _seed_default_pluto_driver() -> None:
     for driver_file in drivers_dir.glob("*.py"):
         if driver_file.name.startswith("_"):
             continue
-        if _driver_registers_pluto(driver_file):
+        if any(_driver_registers_type(driver_file, device_type) for device_type in device_types):
             return
 
-    source = _packaged_pluto_schema_path()
+    source = _packaged_driver_schema_path(filename)
     if not source.exists():
-        print(f"Warning: default Pluto schema source is missing: {source}")
+        print(f"Warning: default driver schema source is missing: {source}")
         return
 
     try:
         shutil.copy2(source, target)
-        print(f"Created default Pluto driver config at {target}")
+        print(f"Created default driver config at {target}")
     except OSError as e:
-        print(f"Warning: could not create default Pluto driver config {target}: {e}")
+        print(f"Warning: could not create default driver config {target}: {e}")
+
+def _seed_default_pluto_drivers() -> None:
+    _seed_default_driver("pluto_schema.py", "adalm_pluto")
+    _seed_default_driver("pluto_mimo_schema.py", "adalm_pluto_mimo")
 
 def _load_all_drivers() -> None:
-    _seed_default_pluto_driver()
+    _seed_default_pluto_drivers()
 
     try:
         from ..common.idl import pluto_schema as _  # noqa: F401
     except Exception as e:
         print(f"Warning: could not load built-in pluto driver: {e}")
+
+    try:
+        from ..common.idl import pluto_mimo_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in pluto mimo driver: {e}")
 
     results = load_drivers()
     for fname, status in results.items():
