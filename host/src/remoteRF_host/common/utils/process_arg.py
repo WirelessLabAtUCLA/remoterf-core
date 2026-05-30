@@ -23,26 +23,36 @@ def unmap_arg(arg):
 def map_arg(value):
     arg = grpc_pb2.Argument()
     
-    if isinstance(value, int):
-        arg.int64_value = value
-    elif isinstance(value, float):
-        arg.float_value = value
+    if isinstance(value, (bool, np.bool_)):
+        arg.bool_value = bool(value)
+    elif isinstance(value, (int, np.integer)):
+        arg.int64_value = int(value)
+    elif isinstance(value, (float, np.floating)):
+        arg.float_value = float(value)
     elif isinstance(value, str):
         arg.string_value = value
-    elif isinstance(value, bool):
-        arg.bool_value = value
+    elif isinstance(value, (list, tuple)):
+        array = np.asarray(value)
+        if array.dtype == object:
+            try:
+                array = np.stack(value)
+            except Exception as exc:
+                raise ValueError(f"Cannot map ragged/object array value: {value}") from exc
+        return map_arg(array)
     elif isinstance(value, np.ndarray):
+        if value.dtype == object:
+            raise ValueError(f"Cannot map object-dtype array: {value!r}")
         if np.iscomplexobj(value):
             complex_array = arg.complex_array
             complex_array.shape.dim.extend(value.shape)
-            for num in value.ravel():
+            for num in np.asarray(value, dtype=np.complex64).ravel():
                 complex_num = complex_array.data.add()
-                complex_num.real = num.real
-                complex_num.imag = num.imag
+                complex_num.real = float(num.real)
+                complex_num.imag = float(num.imag)
         else:
             float_array = arg.real_array
             float_array.shape.dim.extend(value.shape)
-            float_array.data.extend(value.ravel())
+            float_array.data.extend(np.asarray(value, dtype=np.float32).ravel())
     else:
         raise ValueError(f"Unknown argument type during mapping: {value}")
     return arg
@@ -77,4 +87,3 @@ def unmap_array_proto(arg):
         return np.array(arg.float_array.data, dtype=np.float32)
     else:
         raise ValueError("Argument does not contain a recognizable array.")
-
