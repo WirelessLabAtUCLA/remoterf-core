@@ -161,6 +161,12 @@ def _load_all_drivers(required_types: set[str]) -> None:
         except Exception as e:
             warn(f"Could not load built-in pluto driver: {e}", component="hostrf.device_manager")
 
+    if {"adalm_pluto_mimo"} & required_types:
+        try:
+            from ..common.idl import pluto_mimo_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in pluto mimo driver: {e}", component="hostrf.device_manager")
+
     results = load_drivers()
     for fname, status in results.items():
         if status != "ok":

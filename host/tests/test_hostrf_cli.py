@@ -95,16 +95,20 @@ class HostRfCliTests(unittest.TestCase):
     def test_device_show_creates_empty_devices_config_on_first_run(self) -> None:
         devices_yml = self.host_dir / "devices.yml"
         pluto_schema = self.drivers_dir / "pluto_schema.py"
+        pluto_mimo_schema = self.drivers_dir / "pluto_mimo_schema.py"
         self.assertFalse(devices_yml.exists())
         self.assertFalse(pluto_schema.exists())
+        self.assertFalse(pluto_mimo_schema.exists())
 
         rc, out, err = self.run_cli("--device", "--show")
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
         self.assertTrue(devices_yml.exists())
         self.assertTrue(pluto_schema.exists())
+        self.assertTrue(pluto_mimo_schema.exists())
         self.assertEqual(json.loads(devices_yml.read_text(encoding="utf-8")), {"devices": []})
         self.assertIn("class PlutoSchema", pluto_schema.read_text(encoding="utf-8"))
+        self.assertIn("class PlutoMIMOSchema", pluto_mimo_schema.read_text(encoding="utf-8"))
         self.assertIn("Devices:", out)
         self.assertIn("  (none)", out)
 

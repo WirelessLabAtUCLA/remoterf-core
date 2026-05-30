@@ -49,6 +49,7 @@ def connect_pluto(*, serial: str):
 class PlutoSchema(DeviceSchema):
 
     device_type = "adalm_pluto"
+    client_class = "Pluto"
     driver_version = "0.0.1"
 
     @staticmethod

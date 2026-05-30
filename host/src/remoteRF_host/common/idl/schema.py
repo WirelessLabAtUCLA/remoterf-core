@@ -66,7 +66,7 @@ def ensure_default_driver_files() -> Dict[str, str]:
     drivers_dir.mkdir(parents=True, exist_ok=True)
 
     results: Dict[str, str] = {}
-    for filename in ("pluto_schema.py",):
+    for filename in ("pluto_schema.py", "pluto_mimo_schema.py"):
         target = drivers_dir / filename
         if target.exists():
             results[filename] = "exists"
@@ -228,7 +228,7 @@ class DeviceSchema:
             elif ex.kind == "call":
                 calls[name] = entry
 
-        return {
+        body = {
             "schema_version": "1.0",
             "device_type": self.device_type,
             "driver_version": self.driver_version,
@@ -236,6 +236,12 @@ class DeviceSchema:
             "setters": setters,
             "calls": calls,
         }
+
+        client_class = getattr(self, "client_class", "")
+        if client_class:
+            body["client_class"] = str(client_class)
+
+        return body
 
     def dispatch(self, method_name: str, args: dict) -> Any:
         ex = self._exposed.get(method_name)

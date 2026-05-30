@@ -188,6 +188,17 @@ hostrf --device --add --pluto <id>:<device_name>:<hw_serial>
 hostrf --device --add --pluto 10:"hostrf pluto 0":104473
 ```
 
+For a Pluto running the MIMO schema, configure `devices.yml` with the schema device type:
+
+```yaml
+devices:
+  - device_id: 11
+    device_type: adalm_pluto_mimo
+    name: hostrf pluto mimo 0
+    init:
+      serial: "104474"
+```
+
 Remove device:
 
 ```bash
