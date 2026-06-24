@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "remoterf-host-testing" 
-version = "0.0.7" 
+name = "remoterf-host" 
+version = "1.0.0" 
 description = "RemoteRF host-side control package"
 readme = "README.md"
 requires-python = ">=3.9"
