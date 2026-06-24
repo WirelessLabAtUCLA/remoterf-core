@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "remoteRF-server-testing"
-version = "0.0.15"
+name = "remoteRF-server"
+version = "1.0.0"
 description = "RemoteRF server-side control package"
 requires-python = ">=3.8"
 dependencies = [
