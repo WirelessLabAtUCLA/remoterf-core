@@ -37,6 +37,8 @@ from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
 
+BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
+
 
 # -------------------------
 # Fatal config helpers
@@ -766,6 +768,7 @@ class HostTunnelAgent:
             f"HostTunnelAgent starting: target={self.cfg.server_host}:{int(self.cfg.server_port)} version={self.cfg.version}",
             component="hostrf.tunnel_agent",
         )
+        info(BANNER_CREDIT, component="hostrf.tunnel_agent")
         info("Press Ctrl+C to stop.", component="hostrf.tunnel_agent")
 
         try:

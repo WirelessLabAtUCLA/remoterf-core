@@ -4,7 +4,7 @@
 #
 # Each entry:
 #   attr_name -> {
-#       "access": "r" | "w" | "rw" | "call0" | "call1",
+#       "access": "r" | "w" | "rw" | "call0" | "call1" | "calln",
 #       "type":   Python type name for the return / property value,
 #       "arg_type": (call1 only) Python type name for the single argument,
 #       "desc":   human-readable description,
@@ -16,6 +16,7 @@
 #   "rw"    -> GET + SET
 #   "call0" -> CALL0 (no argument)
 #   "call1" -> CALL1 (one argument)
+#   "calln" -> CALLN (named arguments)
 #
 # This table is the single source of truth that PlutoServer uses to validate
 # every incoming RPC before touching the device.  The tunnel agent also loops
@@ -162,6 +163,7 @@ _ACCESS_TO_VALID_FTYPES: Dict[str, Set[str]] = {
     "rw":    {"GET", "SET"},
     "call0": {"CALL0"},
     "call1": {"CALL1"},
+    "calln": {"CALLN"},
 }
 
 

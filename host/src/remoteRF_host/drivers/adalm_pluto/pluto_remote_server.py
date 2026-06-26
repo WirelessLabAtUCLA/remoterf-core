@@ -9,7 +9,7 @@
 # routing RPCs.
 #
 # Call routing (function_name format):  "Pluto:<attr>:<ftype>"
-#   ftype ∈ { GET, SET, CALL0, CALL1 }
+#   ftype in { GET, SET, CALL0, CALL1, CALLN }
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ class PlutoServer:
         1. Parse   function_name → (attr, ftype)
         2. Resolve gid → device object
         3. Validate  (attr, ftype) against PLUTO_IDL          ← IDL gate
-        4. Execute  GET / SET / CALL0 / CALL1
+        4. Execute  GET / SET / CALL0 / CALL1 / CALLN
         """
         try:
             parts = function_name.split(":")
@@ -106,7 +106,7 @@ class PlutoServer:
                 PlutoServer._set(fn, args[fn], device)
                 return {fn: map_arg("None")}
 
-            if ftype in ("CALL0", "CALL1"):
+            if ftype in ("CALL0", "CALL1", "CALLN"):
                 return PlutoServer._call(fn, ftype, args, device)
 
             # Should be unreachable given IDL gate above
@@ -154,11 +154,21 @@ class PlutoServer:
                 raise ValueError(f"Device attribute '{fn}' not found or not callable.")
             result = method()
 
-        else:  # CALL1
+        elif ftype == "CALL1":
             if not callable(method):
                 raise ValueError(f"Device attribute '{fn}' is not callable.")
             if "arg1" not in args:
                 raise ValueError("CALL1 requires 'arg1' in args.")
             result = method(unmap_arg(args["arg1"]))
+        else:  # CALLN
+            if not callable(method):
+                raise ValueError(f"Device attribute '{fn}' is not callable.")
+            reserved = {"a", "g", "token", "device_id", "device_name"}
+            call_args = {
+                str(key): unmap_arg(value)
+                for key, value in dict(args).items()
+                if str(key) not in reserved
+            }
+            result = method(**call_args)
 
         return {fn: PlutoServer._safe_map(result)}

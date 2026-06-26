@@ -86,6 +86,16 @@ class RpcManager:
                 result = schema.dispatch(f"call_{prop}", {"value": value})
                 return {prop: self._safe_map(result)}
 
+            if verb == "CALLN":
+                reserved = {"a", "g", "token", "device_id", "device_name"}
+                call_args = {
+                    str(key): unmap_arg(value)
+                    for key, value in dict(args).items()
+                    if str(key) not in reserved
+                }
+                result = schema.dispatch(f"call_{prop}", call_args)
+                return {prop: self._safe_map(result)}
+
             return {"Error": map_arg(f"Unknown verb {verb!r} in {function_name!r}")}
         except Exception as e:
             return {prop: map_arg("None"), "Error": map_arg(str(e))}

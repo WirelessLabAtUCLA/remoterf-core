@@ -13,6 +13,8 @@ from .config.cert_fetcher import fetch_and_save_ca_cert
 from .common.idl.schema import ensure_default_driver_files
 from .common.utils.db_location import get_devices_config_path, get_host_config_dir, get_remoterf_root
 
+BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
+
 # -----------------------------
 # Host config locations (~/.config/remoterf/host by default)
 # -----------------------------
@@ -40,6 +42,7 @@ def _devices_yaml_path() -> Path:
 def print_help() -> None:
     print(
         "RemoteRF Host CLI Help\n"
+        f"{BANNER_CREDIT}\n"
         "\n"
         "Usage:\n"
         "  hostrf -h | --help\n"
