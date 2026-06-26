@@ -161,6 +161,7 @@ def _tos_ack_path() -> Path:
 
 _TOS_VERSION = "2026"
 _TOS_URL = "https://remoterf.net/tos"
+BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
 
 
 def _tos_acknowledged() -> bool:
@@ -224,6 +225,7 @@ def _ensure_tos_acknowledged() -> bool:
 def print_help() -> None:
     print(
         "RemoteRF Server CLI Help\n"
+        f"{BANNER_CREDIT}\n"
         "\n"
         "Usage:\n"
         "  serverrf -h | --help\n"

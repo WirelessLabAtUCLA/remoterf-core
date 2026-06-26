@@ -95,6 +95,7 @@ def _get_port(name: str, *, default: int | None = None) -> int:
     return n
 
 session = PromptSession()
+BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
 
 from dotenv import load_dotenv, find_dotenv
 dotenv_path = find_dotenv('.env.server')
@@ -247,6 +248,7 @@ start_time = datetime.now()
 
 def welcome():
     printf(f"Server running nominally.", Sty.BOLD)
+    printf(BANNER_CREDIT, Sty.GRAY)
     printf(f"Local IP: ", Sty.DEFAULT, f"{local_ip}", Sty.ITALIC, f" | Port: ", Sty.DEFAULT, f"{local_port}", Sty.ITALIC)
     # printf(f"   -> Started at ", Sty.DEFAULT, f"{start_time}", Sty.DEFAULT)
     printf("Input ", Sty.DEFAULT, "'help'", Sty.BOLD," for help menu.", Sty.DEFAULT)

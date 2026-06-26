@@ -180,6 +180,16 @@ class RpcManager:
             result = dev.dispatch(f"call_{prop}", {"value": value})
             return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
 
+        if verb == "CALLN":
+            reserved = {"a", "g", "token", "device_id", "device_name"}
+            call_args = {
+                str(key): unmap_arg(value)
+                for key, value in dict(args).items()
+                if str(key) not in reserved
+            }
+            result = dev.dispatch(f"call_{prop}", call_args)
+            return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
+
         raise ValueError(f"Unknown verb {verb!r} in {function_name!r}")
 
     def _resolve_idl_target(self, args: dict) -> tuple[int | None, str | None]:

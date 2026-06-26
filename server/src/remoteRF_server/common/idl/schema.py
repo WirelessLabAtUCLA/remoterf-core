@@ -24,6 +24,7 @@ That's it. The server never needs to be modified.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import importlib.util
 import json
 import sys
@@ -259,8 +260,10 @@ class DeviceSchema:
             if ex.kind == "get":
                 getters[name] = entry
             elif ex.kind == "set":
+                entry["args"] = self._args_metadata(ex, skip_self=True)
                 setters[name] = entry
             elif ex.kind == "call":
+                entry["args"] = self._args_metadata(ex, skip_self=True)
                 calls[name] = entry
 
         body = {
@@ -277,6 +280,98 @@ class DeviceSchema:
             body["client_class"] = str(client_class)
 
         return body
+
+    def _args_metadata(self, ex: "_Exposed", *, skip_self: bool) -> list[dict]:
+        sig = inspect.signature(ex.fn)
+        args = []
+        for pname, param in sig.parameters.items():
+            if skip_self and pname == "self":
+                continue
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                raise TypeError(
+                    f"{self.device_type}.{ex.name} cannot expose positional-only "
+                    f"parameter {pname!r}"
+                )
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                raise TypeError(
+                    f"{self.device_type}.{ex.name} cannot be exposed with "
+                    f"{param.kind.description} parameter {pname!r}"
+                )
+
+            item = {
+                "name": pname,
+                "required": param.default is inspect.Parameter.empty,
+                "type": self._annotation_name(param.annotation),
+                "kind": (
+                    "keyword_only"
+                    if param.kind is inspect.Parameter.KEYWORD_ONLY
+                    else "positional_or_keyword"
+                ),
+            }
+            if param.default is not inspect.Parameter.empty:
+                item["default"] = self._json_default(ex, pname, param.default)
+            args.append(item)
+        return args
+
+    @staticmethod
+    def _annotation_name(annotation: Any) -> str:
+        if annotation is inspect.Parameter.empty:
+            return "any"
+        if isinstance(annotation, str):
+            return annotation
+        name = getattr(annotation, "__name__", None)
+        if name:
+            return str(name)
+        return str(annotation).replace("typing.", "")
+
+    def _json_default(self, ex: "_Exposed", pname: str, value: Any) -> Any:
+        try:
+            json.dumps(value)
+            return value
+        except TypeError as exc:
+            raise TypeError(
+                f"{self.device_type}.{ex.name} default for {pname!r} is not JSON serializable"
+            ) from exc
+
+    def _bind_exposed_args(
+        self,
+        ex: "_Exposed",
+        args: dict,
+        *,
+        allow_value_alias: bool,
+        allow_first_arg: bool = False,
+    ) -> dict:
+        sig = inspect.signature(ex.fn)
+        bound = {}
+        params = [
+            (pname, param)
+            for pname, param in sig.parameters.items()
+            if pname != "self"
+        ]
+
+        for pname, param in params:
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                raise TypeError(
+                    f"{self.device_type}.{ex.name} cannot be dispatched with "
+                    f"positional-only parameter {pname!r}"
+                )
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                raise TypeError(
+                    f"{self.device_type}.{ex.name} cannot be dispatched with "
+                    f"{param.kind.description} parameter {pname!r}"
+                )
+
+            if pname in args:
+                bound[pname] = args[pname]
+            elif allow_value_alias and len(params) == 1 and "value" in args:
+                bound[pname] = args["value"]
+            elif allow_first_arg and len(params) == 1 and args:
+                first_key = next(iter(args))
+                bound[pname] = args[first_key]
+            elif param.default is inspect.Parameter.empty:
+                raise TypeError(f"missing required argument {pname!r} for {ex.name}")
+
+        return bound
 
     # ── Dispatch (server RPC layer calls this) ────────────────────
 
@@ -303,32 +398,19 @@ class DeviceSchema:
             return ex.fn(self)
 
         elif ex.kind == "set":
-            value = args.get("value")
-            if value is None and "value" not in args:
-                # Also check first positional-style arg key
-                for k, v in args.items():
-                    value = v
-                    break
-            return ex.fn(self, value)
+            call_args = self._bind_exposed_args(
+                ex,
+                args,
+                allow_value_alias=True,
+                allow_first_arg=True,
+            )
+            if not call_args:
+                raise TypeError(f"missing required setter value for {ex.name}")
+            return ex.fn(self, **call_args)
 
         elif ex.kind == "call":
-            # Calls can have 0 or more args
-            # Simple convention: if the function takes 'value', pass it
-            import inspect
-            sig = inspect.signature(ex.fn)
-            params = [p for p in sig.parameters if p != "self"]
-
-            if len(params) == 0:
-                return ex.fn(self)
-            elif len(params) == 1:
-                # Single arg — pull from args dict by param name or "value"
-                pname = params[0]
-                val = args.get(pname, args.get("value"))
-                return ex.fn(self, val)
-            else:
-                # Multi-arg — match by name
-                call_args = {p: args.get(p) for p in params if p in args}
-                return ex.fn(self, **call_args)
+            call_args = self._bind_exposed_args(ex, args, allow_value_alias=True)
+            return ex.fn(self, **call_args)
         else:
             raise ValueError(f"unknown kind '{ex.kind}' on {method_name}")
 

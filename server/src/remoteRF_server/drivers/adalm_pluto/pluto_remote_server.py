@@ -18,7 +18,7 @@ class PlutoServer:
             elif function_type == "SET":
                 PlutoServer.set(function_name=function_name, value=args[function_name], token=unmap_arg(args['a']))
                 
-            elif function_type in ("CALL0", "CALL1"):
+            elif function_type in ("CALL0", "CALL1", "CALLN"):
                 return PlutoServer.call_func(
                     function_name=function_name,
                     function_type=function_type,
@@ -60,6 +60,14 @@ class PlutoServer:
             # print(f"unmapped values: {python_arg}")
             # print(f"{function_name} is called on {device}")
             result = method(python_arg)
+        elif function_type == "CALLN":
+            reserved = {"a", "g", "token", "device_id", "device_name"}
+            call_args = {
+                str(key): unmap_arg(value)
+                for key, value in dict(args).items()
+                if str(key) not in reserved
+            }
+            result = method(**call_args)
         else:
             raise ValueError(f"Unsupported call type: {function_type} (arg length not supported)")
 
