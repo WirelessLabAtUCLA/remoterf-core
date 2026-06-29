@@ -16,7 +16,7 @@ class PlutoServer:
             elif function_type == "GET":
                 return PlutoServer.get(function_name=function_name, token=unmap_arg(args['a']))
             elif function_type == "SET":
-                PlutoServer.set(function_name=function_name, value=args[function_name], token=unmap_arg(args['a']))
+                return PlutoServer.set(function_name=function_name, value=args[function_name], token=unmap_arg(args['a']))
                 
             elif function_type in ("CALL0", "CALL1", "CALLN"):
                 return PlutoServer.call_func(
