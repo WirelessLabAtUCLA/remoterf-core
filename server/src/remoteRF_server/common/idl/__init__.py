@@ -1,1 +1,31 @@
-from .schema import DeviceSchema, idl_register, idl_expose
+from .schema import (
+    DeviceSchema,
+    idl_client,
+    idl_client_ctor,
+    idl_client_enum,
+    idl_client_function,
+    idl_client_method,
+    idl_client_module,
+    idl_client_namespace,
+    idl_client_payload_class,
+    idl_client_proxy_class,
+    idl_client_strict_class,
+    idl_expose,
+    idl_register,
+)
+
+__all__ = [
+    "DeviceSchema",
+    "idl_client",
+    "idl_client_ctor",
+    "idl_client_enum",
+    "idl_client_function",
+    "idl_client_method",
+    "idl_client_module",
+    "idl_client_namespace",
+    "idl_client_payload_class",
+    "idl_client_proxy_class",
+    "idl_client_strict_class",
+    "idl_expose",
+    "idl_register",
+]

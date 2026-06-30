@@ -8,6 +8,7 @@ import shutil
 import time
 import yaml
 import threading
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Any, List, Iterator
@@ -387,7 +388,14 @@ def _init_from_env() -> None:
 # Load built-in drivers, then any user-supplied drivers from the config dir.
 # Importing the module triggers @idl_register, which adds the class to the registry.
 def _packaged_driver_schema_path(filename: str) -> Path:
-    return Path(__file__).resolve().parents[1] / "drivers" / "adalm_pluto" / filename
+    drivers_root = Path(__file__).resolve().parents[1] / "drivers"
+    direct = drivers_root / filename
+    if direct.exists():
+        return direct
+    for candidate in sorted(drivers_root.glob(f"*/{filename}")):
+        if candidate.exists():
+            return candidate
+    return drivers_root / "adalm_pluto" / filename
 
 def _driver_registers_type(path: Path, device_type: str) -> bool:
     try:
@@ -430,8 +438,19 @@ def _seed_default_pluto_drivers() -> None:
     _seed_default_driver("pluto_schema.py", "adalm_pluto")
     _seed_default_driver("pluto_mimo_schema.py", "adalm_pluto_mimo")
 
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+def _seed_default_usrp_driver() -> None:
+    if _module_available("uhd"):
+        _seed_default_driver("usrp_schema.py", "usrp")
+
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
+    _seed_default_usrp_driver()
 
     try:
         from ..common.idl import pluto_schema as _  # noqa: F401
@@ -442,6 +461,12 @@ def _load_all_drivers() -> None:
         from ..common.idl import pluto_mimo_schema as _  # noqa: F401
     except Exception as e:
         print(f"Warning: could not load built-in pluto mimo driver: {e}")
+
+    if _module_available("uhd"):
+        try:
+            from ..drivers.usrp import usrp_schema as _  # noqa: F401
+        except Exception as e:
+            print(f"Warning: could not load built-in usrp driver: {e}")
 
     results = load_drivers()
     for fname, status in results.items():
