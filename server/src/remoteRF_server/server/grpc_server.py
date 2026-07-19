@@ -6,6 +6,7 @@ import os
 import io
 import sys
 import time
+from dataclasses import dataclass, field
 
 from typing import Tuple 
 
@@ -33,7 +34,11 @@ import contextlib
 from ..common.grpc import *
 from .reservation import reservation_handler
 from .rpc_manager import rpc_manager
-from .dynamic_v2 import DynamicControlV2Servicer, SampleDataV1Servicer
+from .dynamic_v2 import (
+    DynamicControlV2Servicer,
+    SampleDataV1Servicer,
+    session_manager,
+)
 from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
@@ -49,6 +54,7 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 
 from ..tools.gist_status import start_status_publisher
+from .cert_provider import start_cert_provider, stop_cert_provider
 
 from pathlib import Path
 
@@ -102,10 +108,20 @@ from dotenv import load_dotenv, find_dotenv
 dotenv_path = find_dotenv('.env.server')
 load_dotenv(dotenv_path)
 
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.connect(("8.8.8.8", 80))
+def _get_bind_host() -> str:
+    configured = (os.getenv("REMOTERF_BIND_HOST") or "").strip()
+    if configured:
+        return configured
 
-local_ip = s.getsockname()[0] # grab the local ip
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as detector:
+            detector.connect(("8.8.8.8", 80))
+            return detector.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+local_ip = _get_bind_host()
 # local_port = os.getenv('GRPC_PORT')
 local_port = str(_get_port("GRPC_PORT"))    
 cert_port = str(_get_port("CERT_PORT"))   
@@ -141,14 +157,95 @@ class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
         return grpc_pb2.GenericRPCResponse(results=response)
     
 
-# Function to start the server
-def serve():
-    
+@dataclass
+class ServerRuntime:
+    grpc_server: Any
+    cert_server: Any
+    stop_event: threading.Event
+    update_thread: threading.Thread | None
+    bind_host: str
+    grpc_port: int
+    cert_port: int
+    _stop_lock: threading.Lock = field(default_factory=threading.Lock)
+    _stopped: bool = False
+
+    def wait(self) -> None:
+        while not self.stop_event.wait(0.5):
+            pass
+
+    def stop(self, *, grace_sec: float = 1.0) -> None:
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            self.stop_event.set()
+
+        termination = self.grpc_server.stop(max(0.0, float(grace_sec)))
+        try:
+            termination.wait(timeout=max(1.0, float(grace_sec) + 2.0))
+        finally:
+            session_manager.close_all()
+            if self.cert_server is not None:
+                stop_cert_provider(self.cert_server)
+            if (
+                self.update_thread is not None
+                and self.update_thread.is_alive()
+                and self.update_thread is not threading.current_thread()
+            ):
+                self.update_thread.join(timeout=2.0)
+
+
+def _load_server_credentials(cert_dir: Path):
+    cert_key = cert_dir / "server.key"
+    cert_crt = cert_dir / "server.crt"
+    missing = [
+        str(path)
+        for path in (cert_key, cert_crt)
+        if not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "Missing TLS file(s):\n  " + "\n  ".join(missing)
+        )
+    private_key = cert_key.read_bytes()
+    certificate_chain = cert_crt.read_bytes()
+    return grpc.ssl_server_credentials(
+        ((private_key, certificate_chain),)
+    )
+
+
+def start_server_runtime(
+    *,
+    bind_host: str | None = None,
+    grpc_port: int | None = None,
+    certificate_port: int | None = None,
+    cert_dir: Path | None = None,
+    include_host_tunnel: bool = True,
+    run_reservation_updates: bool = True,
+    publish_status: bool = True,
+) -> ServerRuntime:
+    bind_host = str(bind_host or local_ip)
+    grpc_port = int(local_port if grpc_port is None else grpc_port)
+    certificate_port = int(
+        cert_port if certificate_port is None else certificate_port
+    )
+    if cert_dir is None:
+        xdg_config = Path(
+            os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")
+        )
+        cert_dir = Path(
+            os.getenv(
+                "REMOTERF_CERT_DIR",
+                xdg_config / "remoterf" / "certs",
+            )
+        )
+    cert_dir = Path(cert_dir)
+
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
         ('grpc.max_receive_message_length', 100 * 1024 * 1024)
     ]
-    
+
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
     grpc_pb2_grpc.add_DynamicControlV2Servicer_to_server(
@@ -158,53 +255,8 @@ def serve():
         SampleDataV1Servicer(), server
     )
 
-    # For generating server credentials for secure connections
-    
-    # Rasp
-    #* Server credentials generation: Add server ip to this line
-    #* openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 365 -out server.crt -subj "/CN=192.168.1.169" -addext "subjectAltName=IP:192.168.1.169"
-    
-    #ubuntu VM
-    # openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 365 -out server.crt -subj "/CN=192.168.64.5" -addext "subjectAltName=IP:192.168.64.5"
-    
-    #router
-    # openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 365 -out server.crt -subj "/CN=128.97.88.21" -addext "subjectAltName=IP:128.97.88.21"
-
-    #magikarp
-    # openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 365 -out server.crt -subj "/CN=192.168.1.109" -addext "subjectAltName=IP:192.168.1.109"
-    
-    #wlab
-    # openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 365 -out server.crt -subj "/CN=164.67.195.207" -addext "subjectAltName=IP:164.67.195.207"
-
-    # Read key and certificate
-    
-    # cert_key = Path(__file__).resolve().parent.parent/'certs'/'server.key'
-    # cert_crt = Path(__file__).resolve().parent.parent/'certs'/'server.crt'
-    
-    # with cert_key.open('rb') as f:
-    #     private_key = f.read()
-    # with cert_crt.open('rb') as f:
-    #     certificate_chain = f.read()
-    
-    # --- TLS certs live in user config (~/.config/remoterf/certs by default) ---
-    xdg_config = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
-    cert_dir = Path(os.getenv("REMOTERF_CERT_DIR", xdg_config / "remoterf" / "certs"))
-
-    cert_key = cert_dir / "server.key"
-    cert_crt = cert_dir / "server.crt"
-
     try:
-        if not cert_key.exists() or not cert_crt.exists():
-            missing = []
-            if not cert_key.exists(): missing.append(str(cert_key))
-            if not cert_crt.exists(): missing.append(str(cert_crt))
-            raise FileNotFoundError("Missing TLS file(s):\n  " + "\n  ".join(missing))
-
-        with cert_key.open("rb") as f:
-            private_key = f.read()
-        with cert_crt.open("rb") as f:
-            certificate_chain = f.read()
-
+        server_credentials = _load_server_credentials(cert_dir)
     except Exception as e:
         printf("TLS certs/keys not found or unreadable.", Sty.RED)
         printf("Expected in: ", Sty.DEFAULT, f"{cert_dir}", Sty.MAGENTA)
@@ -213,43 +265,85 @@ def serve():
         print(f"\nDetails: {e}\n", file=sys.stderr)
         raise SystemExit(2)
 
-    # Create server credentials
-    server_credentials = grpc.ssl_server_credentials(
-        ((private_key, certificate_chain,),))
+    if include_host_tunnel:
+        reg = hts.get_tunnel_registry()
+        if reg is None:
+            raise RuntimeError("host tunnel registry is unavailable")
+        hts.TUNNEL_REGISTRY = reg
+        host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
+            HostTunnelServicer(reg),
+            server,
+        )
 
-    reg = hts.get_tunnel_registry()
-    assert reg is not None
+    bound_grpc_port = server.add_secure_port(
+        f"{bind_host}:{grpc_port}",
+        server_credentials,
+    )
+    if bound_grpc_port == 0:
+        raise RuntimeError(
+            f"could not bind secure gRPC server to {bind_host}:{grpc_port}"
+        )
 
-    # publish registry where device_manager expects it
-    hts.TUNNEL_REGISTRY = reg
+    cert_server = None
+    stop_event = threading.Event()
+    update_thread = None
+    try:
+        cert_server, _cert_thread = start_cert_provider(
+            host=bind_host,
+            port=certificate_port,
+            ca_path=cert_dir / "ca.crt",
+        )
+        reservation_handler.update_devices()
+        server.start()
+        if run_reservation_updates:
+            update_thread = threading.Thread(
+                target=update_devices,
+                args=(stop_event,),
+                name="remoterf-reservation-updates",
+                daemon=True,
+            )
+            update_thread.start()
+            start_usergroup_cleanup_loop(interval_sec=60)
+        if publish_status:
+            start_status_publisher()
+    except Exception:
+        stop_event.set()
+        server.stop(0)
+        session_manager.close_all()
+        if cert_server is not None:
+            stop_cert_provider(cert_server)
+        raise
 
-    host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
-        HostTunnelServicer(reg),
-        server
+    return ServerRuntime(
+        grpc_server=server,
+        cert_server=cert_server,
+        stop_event=stop_event,
+        update_thread=update_thread,
+        bind_host=bind_host,
+        grpc_port=int(bound_grpc_port),
+        cert_port=int(cert_server.server_address[1]),
     )
 
-    # Inject registry into rpc_manager so it can forward
-    # rpc_manager.set_tunnel_registry(registry)
-    
-    # Cert fetcher
-    from .cert_provider import start_cert_provider
-    cert_server, cert_thread = start_cert_provider(host=local_ip, port=int(cert_port))
-    
-    start_status_publisher()
 
-    # Add secure port
-    server.add_secure_port(f'{local_ip}:{local_port}', server_credentials)
-    server.start()
-    server.wait_for_termination()
-    
-def update_devices():
-    while True:
-        reservation_handler.update_devices()
-        time.sleep(1)
-        
-threading.Thread(target=serve, daemon=True).start()
-threading.Thread(target=update_devices, daemon=True).start()
-start_usergroup_cleanup_loop(interval_sec=60)
+def update_devices(stop_event: threading.Event) -> None:
+    while not stop_event.wait(1.0):
+        try:
+            reservation_handler.update_devices()
+        except Exception as exc:
+            print(
+                f"Warning: reservation update failed: {exc}",
+                file=sys.stderr,
+            )
+
+
+def serve() -> None:
+    runtime = start_server_runtime()
+    try:
+        runtime.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        runtime.stop()
 
 start_time = datetime.now()
 
@@ -1025,9 +1119,32 @@ def server_input(inpu: str) -> bool:
 
     return fn()
 
-# os.system('clear')
-welcome()
-
-def main():
-    while server_input(session.prompt(stylize('server@remoterf: ', Sty.BOLD))):
+def main() -> int:
+    runtime = start_server_runtime()
+    welcome()
+    try:
+        while server_input(
+            session.prompt(stylize("server@remoterf: ", Sty.BOLD))
+        ):
+            pass
+    except (EOFError, KeyboardInterrupt):
         pass
+    finally:
+        runtime.stop()
+    return 0
+
+
+def headless_main() -> int:
+    runtime = start_server_runtime()
+    welcome()
+    try:
+        runtime.wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        runtime.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(headless_main())

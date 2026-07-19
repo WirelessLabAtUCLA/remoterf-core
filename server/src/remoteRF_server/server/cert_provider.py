@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple
 
-CERT_NAME = "server.crt"
+CERT_NAME = "ca.crt"
 
 def resolve_ca_path(ca_path: Optional[str | Path] = None) -> Path:
     """

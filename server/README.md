@@ -158,6 +158,19 @@ Start the server:
 ```bash
 serverrf -s
 ```
+
+For a loopback-only development server, explicitly bind both services to
+localhost:
+
+```bash
+REMOTERF_BIND_HOST=127.0.0.1 GRPC_PORT=55051 CERT_PORT=55052 \
+  serverrf --serve --headless
+```
+
+Headless and interactive shutdown both stop accepting RPCs, close all Dynamic
+v2 sessions/handles and native devices, stop the certificate provider, and
+terminate the reservation-update worker.
+
 Take note of the Local IP and Local Port, for example, if you see:
 
 ```bash

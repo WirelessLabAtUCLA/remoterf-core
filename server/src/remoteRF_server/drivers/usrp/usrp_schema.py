@@ -179,6 +179,49 @@ def _construct(value):
             constructor = getattr(uhd.types, "AsyncMetadata")
         return constructor()
 
+    if kind == "FilterInfoBase":
+        filter_type = getattr(
+            uhd.filters.FilterType,
+            str(value["filter_type"]).split(".")[-1],
+        )
+        native_class = str(value.get("native_class") or "filter_info_base")
+        common = [
+            filter_type,
+            bool(value.get("bypassed", False)),
+            int(value.get("position", 0)),
+        ]
+        if native_class == "analog_filter_lp":
+            return uhd.filters.AnalogFilterLP(
+                *common,
+                str(value.get("analog_type", "")),
+                float(value["cutoff"]),
+                float(value["rolloff"]),
+            )
+        if native_class == "analog_filter_base":
+            return uhd.filters.AnalogFilterBase(
+                *common,
+                str(value.get("analog_type", "")),
+            )
+        if native_class in {
+            "digital_filter_base_i16",
+            "digital_filter_fir_i16",
+        }:
+            constructor = (
+                uhd.filters.DigitalFilterFIRI16
+                if native_class == "digital_filter_fir_i16"
+                else uhd.filters.DigitalFilterBaseI16
+            )
+            return constructor(
+                *common,
+                float(value["input_rate"]),
+                int(value["interpolation"]),
+                int(value["decimation"]),
+                int(value["tap_full_scale"]),
+                int(value["max_num_taps"]),
+                [int(item) for item in value.get("taps", ())],
+            )
+        return uhd.filters.FilterInfoBase(*common)
+
     if kind == "StreamCMD":
         mode_name = value["mode"]
         try:
@@ -468,16 +511,16 @@ class UsrpSchema(DeviceSchema):
         tx_info = call("get_usrp_tx_info", 0, default={}) if tx_count else {}
         info = dict(rx_info or {})
         info.update(dict(tx_info or {}))
+        native_name = str(info.get("mboard_name") or "")
         product = (
-            info.get("mboard_name")
-            or info.get("mboard_id")
+            info.get("mboard_id")
             or call("get_mboard_name", 0, default="")
         )
         product_text = str(product or "")
-        product_lower = product_text.lower()
+        identity_lower = f"{native_name} {product_text}".lower()
         hardware_profile = (
             "usrp2901"
-            if "2901" in product_lower or "ni usrp" in product_lower
+            if "2901" in identity_lower or "ni usrp" in identity_lower
             else "b200"
         )
         serial = (
@@ -486,6 +529,22 @@ class UsrpSchema(DeviceSchema):
             or info.get("serial")
             or ""
         )
+        tree = call("get_tree", default=None)
+
+        def tree_scalar(path):
+            if tree is None:
+                return ""
+            for accessor in ("access_str", "access_int", "access_double"):
+                try:
+                    return getattr(tree, accessor)(path).get()
+                except Exception:
+                    continue
+            return ""
+
+        firmware_version = str(tree_scalar("/mboards/0/fw_version"))
+        fpga_version = str(tree_scalar("/mboards/0/fpga_version"))
+        usb_version = str(tree_scalar("/mboards/0/usb_version"))
+        link_rate = tree_scalar("/mboards/0/link_max_rate")
 
         def ranges(method_name, count):
             return [call(method_name, chan, default=None) for chan in range(count)]
@@ -494,12 +553,16 @@ class UsrpSchema(DeviceSchema):
             "remote_device_type": "usrp",
             "hardware_profile": hardware_profile,
             "native_product": product_text,
+            "native_name": native_name,
             "native_serial": str(serial),
             "uhd_version": self._version_value("get_version_string", "get_version"),
             "uhd_abi": self._version_value("get_abi_string", "get_abi"),
-            "fpga_image": info.get("fpga_version", ""),
+            "firmware_version": firmware_version,
+            "fpga_version": fpga_version,
+            "fpga_image": fpga_version,
             "transport_type": "usb",
-            "usb_speed": info.get("usb_version", info.get("usb_speed", "")),
+            "usb_speed": usb_version,
+            "transport_link_rate_bps": link_rate,
             "rx_channel_count": rx_count,
             "tx_channel_count": tx_count,
             "rx_frequency_ranges_per_channel": ranges("get_rx_freq_range", rx_count),
@@ -515,6 +578,14 @@ class UsrpSchema(DeviceSchema):
             "sensors": call("get_mboard_sensor_names", 0, default=[]),
             "supported_cpu_formats": ["fc32", "fc64", "sc16"],
             "supported_otw_formats": ["sc16", "sc12", "sc8"],
+            "advanced_interfaces": {
+                "property_tree": tree is not None,
+                "filters": True,
+                "radio_control": False,
+                "mboard_controller": False,
+                "dboard_iface": False,
+                "user_settings_iface": False,
+            },
             "maximum_remote_payload_bytes": 4 * 1024 * 1024,
             "supported_streaming_protocol_versions": ["1.0"],
             "policy_restrictions": dict(policy_restrictions or {}),

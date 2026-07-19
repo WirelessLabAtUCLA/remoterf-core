@@ -237,6 +237,7 @@ def print_help() -> None:
         "\n"
         "Serve:\n"
         "  serverrf -s | --serve              Run server (NOTE: only when -s/--serve is the FIRST arg)\n"
+        "  serverrf --serve --headless         Run without the interactive administration shell\n"
         "\n"
         "Certs:\n"
         "  serverrf --gen-certs <static_ip> [options]\n"
@@ -318,6 +319,7 @@ def print_help() -> None:
         "\n"
         "  serverrf -s\n"
         "  serverrf --serve\n"
+        "  serverrf --serve --headless\n"
         "\n"
     )
 
@@ -326,7 +328,7 @@ def print_help() -> None:
 # Serve
 # -----------------------------
 
-def _serve() -> int:
+def _serve(*, headless: bool = False) -> int:
     """
     Alias for the RRRFserver entrypoint.
     Equivalent to running the RRRFserver console_script.
@@ -334,7 +336,11 @@ def _serve() -> int:
     if not _ensure_tos_acknowledged():
         return 1
 
-    from remoteRF_server.server.grpc_server import main as grpc_main
+    from remoteRF_server.server.grpc_server import (
+        headless_main,
+        main as interactive_main,
+    )
+    grpc_main = headless_main if headless else interactive_main
     grpc_main()
     return 0
 
@@ -1023,10 +1029,16 @@ def main() -> int:
 
     # IMPORTANT: ONLY "serverrf -s/--serve" (first arg) starts the server.
     if argv[0] in ("--serve", "-s"):
-        if len(argv) != 1:
-            print("ERROR: -s/--serve cannot be combined with other commands. Run it alone.", file=sys.stderr)
+        if len(argv) == 1:
+            return _serve()
+        if len(argv) == 2 and argv[1] == "--headless":
+            return _serve(headless=True)
+        else:
+            print(
+                "ERROR: -s/--serve accepts only the optional --headless flag.",
+                file=sys.stderr,
+            )
             return 2
-        return _serve()
 
     yes = False
     verbose = False

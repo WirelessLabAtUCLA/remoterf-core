@@ -103,7 +103,11 @@ class USRPPolicy:
             )
 
     def check_control(self, method: str, args: Mapping[str, Any]) -> None:
-        if method.startswith("set_tx_") or method == "send_waveform":
+        if (
+            method.startswith("set_tx_")
+            or method == "set_normalized_tx_gain"
+            or method == "send_waveform"
+        ):
             self._require_tx()
 
         if method in {"set_tx_freq", "set_tx_lo_freq", "send_waveform"}:
@@ -134,7 +138,7 @@ class USRPPolicy:
                     method=method,
                 )
 
-        if method == "set_tx_normalized_gain":
+        if method == "set_normalized_tx_gain":
             limit = self.config.get("max_tx_normalized_gain")
             value = _argument(args, "gain", position=0)
             if limit is None or value is None or float(value) > float(limit):
@@ -279,7 +283,11 @@ class USRPPolicy:
     def check_handle_call(self, type_id: str, method: str, args: Mapping[str, Any]) -> None:
         """Keep returned low-level interfaces read-only unless allowlisted."""
         read_prefixes = ("get", "read", "list", "exists", "to_", "peek")
-        if method.startswith(read_prefixes) or method in {"access", "subtree"}:
+        if (
+            method.startswith(read_prefixes)
+            or method.startswith("access_")
+            or method in {"access", "subtree"}
+        ):
             return
         self._check_low_level_write(type_id, method, args)
 
@@ -299,7 +307,8 @@ class USRPPolicy:
 
         if method == "set_gpio_attr":
             bank = str(args.get("bank", ""))
-            requested_mask = int(_argument(args, "mask", position=3) or 0)
+            mask = _argument(args, "mask", position=3)
+            requested_mask = int((1 << 32) - 1 if mask is None else mask)
             allowed_mask = int(
                 dict(self.config.get("gpio_write_masks") or {}).get(bank, 0)
             )

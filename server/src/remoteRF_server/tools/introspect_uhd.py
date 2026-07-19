@@ -15,8 +15,10 @@ from pathlib import Path
 
 from ..drivers.usrp.uhd_manifest import (
     MULTIUSRP_METHODS,
+    OPTIONAL_METHODS,
     TARGET_UHD_VERSION,
     build_usrp_schema_v2,
+    is_supported_uhd_version,
 )
 
 
@@ -73,11 +75,7 @@ def generate_manifest():
         "unclassified_public_members": sorted(set(public) - classified),
         "missing_required_members": sorted(
             name for name, info in members.items()
-            if not info["present"] and name not in {
-                "get_radio_control", "get_mb_controller", "get_rx_radio_channel",
-                "get_tx_radio_channel", "set_rx_spp", "set_tx_spp",
-                "get_gpio_src", "set_gpio_src", "get_gpio_src_banks",
-            }
+            if not info["present"] and name not in OPTIONAL_METHODS
         ),
         "deferred_schema_entries": sorted(
             key
@@ -109,7 +107,7 @@ def main(argv=None):
     )
     if (
         not args.allow_version_mismatch
-        and manifest["api_version"] != TARGET_UHD_VERSION
+        and not is_supported_uhd_version(manifest["api_version"])
     ):
         failed = True
     if failed:

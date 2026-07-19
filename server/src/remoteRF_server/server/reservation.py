@@ -20,6 +20,23 @@ from pathlib import Path
 
 allow_connections = True
 
+
+def _parse_reservation_datetime(value) -> datetime:
+    """Parse SQLite timestamps with or without fractional seconds."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid reservation timestamp: {value!r}"
+            ) from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
 class ReservationHandler:
     def __init__(self):
         self.filepath = get_db_dir() / "reservations.db"
@@ -705,8 +722,8 @@ class ReservationHandler:
         reservations_now = 0
 
         for reservation in reservations:
-            start = datetime.strptime(reservation[3], "%Y-%m-%d %H:%M:%S")
-            end = datetime.strptime(reservation[4], "%Y-%m-%d %H:%M:%S")
+            start = _parse_reservation_datetime(reservation[3])
+            end = _parse_reservation_datetime(reservation[4])
 
             if start <= now < end:
                 dev_id = str(reservation[2]).strip()

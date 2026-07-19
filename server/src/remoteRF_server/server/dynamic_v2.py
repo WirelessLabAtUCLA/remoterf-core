@@ -5,6 +5,7 @@ import json
 import math
 import numbers
 import queue
+import re
 import secrets
 import threading
 import time
@@ -23,7 +24,12 @@ from ..common.idl.v2 import (
     STREAMING_PROTOCOL_VERSION,
 )
 from ..drivers.usrp.policy import USRPPolicy
-from ..drivers.usrp.uhd_manifest import HANDLE_RETURN_METHODS, TARGET_UHD_VERSION
+from ..drivers.usrp.uhd_manifest import (
+    HANDLE_METHOD_RETURN_TYPES,
+    HANDLE_RETURN_METHODS,
+    TARGET_UHD_VERSION,
+    is_supported_uhd_version,
+)
 from .device_manager import (
     get_local_device_context,
     register_reservation_end_callback,
@@ -48,6 +54,13 @@ _MAX_SAMPLE_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_SESSIONS = 64
 _MAX_HANDLES_PER_SESSION = 64
 _MAX_CREDITS = 64
+_SAMPLE_DTYPES = {
+    "<c8": np.dtype("<c8"),
+    "<c16": np.dtype("<c16"),
+    "<i2": np.dtype("<i2"),
+    "<f4": np.dtype("<f4"),
+    "<f8": np.dtype("<f8"),
+}
 
 
 def _opaque_id(prefix: str) -> str:
@@ -67,6 +80,25 @@ def _call_value(value: Any, name: str, default=None):
         except Exception:
             return default
     return target if target is not None else default
+
+
+def _sample_dtype(value: str) -> np.dtype:
+    """Accept only the canonical scalar little-endian wire dtypes."""
+    dtype = _SAMPLE_DTYPES.get(str(value))
+    if dtype is None:
+        raise RemoteRFProtocolError(
+            f"unsupported or non-canonical sample dtype: {value!r}"
+        )
+    return dtype
+
+
+def _sample_timeout(value: float) -> float:
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout < 0:
+        raise RemoteRFProtocolError(
+            "sample timeout must be finite and non-negative"
+        )
+    return timeout
 
 
 def _matches_wire_type(value: Any, wire_type: str) -> bool:
@@ -100,7 +132,7 @@ def _matches_wire_type(value: Any, wire_type: str) -> bool:
                 return True
             item_type = choice.partition("[")[2].rpartition("]")[0]
             return all(_matches_wire_type(item, item_type) for item in value)
-        if choice == "dict" and isinstance(value, dict):
+        if choice.startswith("dict") and isinstance(value, dict):
             return True
         if choice == "ndarray" and isinstance(value, np.ndarray):
             return True
@@ -135,11 +167,31 @@ def _validate_overload(
     allowed: set[str] = set()
     accepts_positional = False
     accepts_keywords = False
+    positional_index = 0
     for parameter in selected.get("parameters", ()):
         kind = parameter.get("kind", "positional_or_keyword")
         name = str(parameter["name"])
+        if kind == "positional_only":
+            accepts_positional = True
+            if positional_index < len(positional_args):
+                value = positional_args[positional_index]
+                positional_index += 1
+                if not _matches_wire_type(
+                    value, str(parameter.get("type") or "any")
+                ):
+                    raise RemoteRFOverloadError(
+                        f"argument {name!r} does not match "
+                        f"{parameter.get('type', 'any')}"
+                    )
+            elif parameter.get("required", True):
+                raise RemoteRFOverloadError(
+                    f"missing required argument {name!r} for "
+                    f"{descriptor['name']}"
+                )
+            continue
         if kind == "var_positional":
             accepts_positional = True
+            positional_index = len(positional_args)
             continue
         if kind == "var_keyword":
             accepts_keywords = True
@@ -160,6 +212,10 @@ def _validate_overload(
     if unexpected and not accepts_keywords:
         raise RemoteRFOverloadError(
             f"unexpected arguments for {descriptor['name']}: {sorted(unexpected)}"
+        )
+    if len(positional_args) > positional_index:
+        raise RemoteRFOverloadError(
+            f"unexpected positional arguments for {descriptor['name']}"
         )
     if positional_args and not accepts_positional:
         raise RemoteRFOverloadError(
@@ -316,14 +372,46 @@ def snapshot_native(value: Any):
             "end_of_burst": getattr(value, "end_of_burst", False),
         }
 
-    if "filter_info" in class_name:
-        fields = {}
-        for name in (
-            "type", "analog", "bypass", "cutoff", "rolloff", "description",
-        ):
-            if hasattr(value, name):
-                fields[name] = snapshot_native(getattr(value, name))
-        return {"__uhd_type__": "FilterInfoBase", **fields}
+    if hasattr(value, "get_type") and hasattr(value, "is_bypassed"):
+        pretty = str(value)
+
+        def pretty_int(label, default=0):
+            match = re.search(
+                rf"^\s*{re.escape(label)}:\s*(\d+)\s*$",
+                pretty,
+                flags=re.MULTILINE,
+            )
+            return int(match.group(1)) if match else default
+
+        fields = {
+            "__uhd_type__": "FilterInfoBase",
+            "native_class": class_name,
+            "filter_type": str(value.get_type()).split(".")[-1],
+            "bypassed": bool(value.is_bypassed()),
+            "position": pretty_int("position index"),
+            "pretty": pretty,
+        }
+        method_fields = {
+            "get_analog_type": "analog_type",
+            "get_cutoff": "cutoff",
+            "get_rolloff": "rolloff",
+            "get_output_rate": "output_rate",
+            "get_input_rate": "input_rate",
+            "get_interpolation": "interpolation",
+            "get_decimation": "decimation",
+            "get_tap_full_scale": "tap_full_scale",
+            "get_taps": "taps",
+        }
+        for getter, field_name in method_fields.items():
+            target = getattr(value, getter, None)
+            if callable(target):
+                fields[field_name] = snapshot_native(target())
+        if "taps" in fields:
+            fields["max_num_taps"] = pretty_int(
+                "max num taps",
+                len(fields["taps"]),
+            )
+        return fields
 
     enum_name = getattr(value, "name", None)
     if isinstance(enum_name, str):
@@ -493,7 +581,7 @@ class SessionManager:
                 "maximum_stream_credits": _MAX_CREDITS,
             }
             version = str(capabilities.get("uhd_version") or "")
-            if version != TARGET_UHD_VERSION:
+            if not is_supported_uhd_version(version):
                 raise RemoteRFProtocolError(
                     f"UHD {TARGET_UHD_VERSION} is required; server reports {version or 'unknown'}",
                     details={"required": TARGET_UHD_VERSION, "actual": version},
@@ -561,6 +649,33 @@ class SessionManager:
             if generation is not None and int(generation) != entry.generation:
                 raise RemoteRFStaleHandleError("stream generation does not match the handle")
             return entry
+
+    def _resolve_handle_argument(self, session: DeviceSession, value: Any):
+        if isinstance(value, Mapping):
+            handle = value.get("__remoterf_handle_arg__")
+            if handle is not None:
+                entry = self.get_handle(
+                    session,
+                    str(handle),
+                    expected_type=str(value.get("type_id") or "") or None,
+                    generation=int(value.get("generation", 0)),
+                )
+                return entry.value
+            if value.get("__uhd_type__") or value.get(
+                "__remoterf_uhd_helper__"
+            ):
+                from ..drivers.usrp.usrp_schema import _construct
+                return _construct(dict(value))
+            return {
+                str(key): self._resolve_handle_argument(session, item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                self._resolve_handle_argument(session, item)
+                for item in value
+            ]
+        return value
 
     def register_handle(
         self,
@@ -709,6 +824,16 @@ class SessionManager:
         if session_id:
             self.close(session_id)
 
+    def close_all(self) -> int:
+        """Close every live session and native handle during server shutdown."""
+        with self._lock:
+            session_ids = list(self._sessions)
+        closed = 0
+        for session_id in session_ids:
+            if self.close(session_id):
+                closed += 1
+        return closed
+
     def invoke(
         self,
         session_id: str,
@@ -744,10 +869,20 @@ class SessionManager:
             if positional_args:
                 policy_args["__args__"] = positional_args
             session.policy.check_control(method_name, policy_args)
+            native_args = {
+                key: self._resolve_handle_argument(session, value)
+                for key, value in args.items()
+            }
+            native_positional = [
+                self._resolve_handle_argument(session, value)
+                for value in positional_args
+            ]
             with session.control_lock:
                 try:
                     result = session.schema.invoke_native(
-                        method_name, args, positional_args=positional_args
+                        method_name,
+                        native_args,
+                        positional_args=native_positional,
                     )
                 except (RemoteRFPolicyError, RemoteRFProtocolError):
                     raise
@@ -760,11 +895,13 @@ class SessionManager:
                     ) from exc
             self.get(session_id)
             type_id = HANDLE_RETURN_METHODS.get(method_name)
-            if type_id:
+            if type_id and result is not None:
                 child = self.register_handle(
                     session, result, type_id, parent=session.root_handle
                 )
                 stream_args = args.get("stream_args")
+                if stream_args is None and positional_args:
+                    stream_args = positional_args[0]
                 if isinstance(stream_args, dict):
                     child.stream_channels = [
                         int(item) for item in stream_args.get("channels", ())
@@ -785,13 +922,17 @@ class SessionManager:
             ),
             None,
         )
-        if descriptor is not None:
-            _validate_overload(
-                descriptor,
-                overload_id,
-                args,
-                positional_args,
+        if descriptor is None:
+            raise RemoteRFProtocolError(
+                f"method is not declared by schema v2: "
+                f"{entry.type_id}.{method_name}"
             )
+        _validate_overload(
+            descriptor,
+            overload_id,
+            args,
+            positional_args,
+        )
 
         if method_name in {"recv", "send"}:
             raise RemoteRFProtocolError(
@@ -799,15 +940,18 @@ class SessionManager:
             )
         if entry.type_id.endswith("TXStreamer") and method_name == "recv_async_msg":
             timeout = float(args.get("timeout", 0.1))
+            mutate_metadata = "async_metadata" in args
             try:
                 event = entry.async_events.get(timeout=max(0.0, timeout))
                 if entry.async_overflowed:
                     event["remoterf_queue_overflow"] = True
                     entry.async_overflowed = False
-                mutations.append(("async_metadata", event))
-                return True, mutations
+                if mutate_metadata:
+                    mutations.append(("async_metadata", event))
+                    return True, mutations
+                return event, mutations
             except queue.Empty:
-                return False, mutations
+                return (False if mutate_metadata else None), mutations
 
         if not entry.type_id.endswith(("RXStreamer", "TXStreamer")):
             policy_args = dict(args)
@@ -823,9 +967,17 @@ class SessionManager:
             raise RemoteRFProtocolError(
                 f"{entry.type_id} does not expose method {method_name!r}"
             )
+        native_args = {
+            key: self._resolve_handle_argument(session, value)
+            for key, value in args.items()
+        }
+        native_positional = [
+            self._resolve_handle_argument(session, value)
+            for value in positional_args
+        ]
         with entry.lock:
             try:
-                result = target(*positional_args, **args)
+                result = target(*native_positional, **native_args)
             except Exception as exc:
                 raise RemoteRFNativeUHDError(
                     str(exc),
@@ -835,6 +987,21 @@ class SessionManager:
                 ) from exc
         self.get(session_id)
         snapshot = snapshot_native(result)
+        return_type = HANDLE_METHOD_RETURN_TYPES.get(
+            (entry.type_id, method_name)
+        )
+        if return_type and result is not None:
+            child = self.register_handle(
+                session,
+                result,
+                return_type,
+                parent=entry.handle,
+            )
+            return {
+                "__remoterf_handle__": child.handle,
+                "__remoterf_type__": child.type_id,
+                "generation": child.generation,
+            }, mutations
         if (
             result is not None
             and not isinstance(result, (str, bool, int, float, complex, bytes, dict, list, tuple, np.ndarray, np.generic))
@@ -1128,20 +1295,13 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                         )
                         return
 
-                    dtype = np.dtype(request.dtype)
-                    if dtype.itemsize > 1 and dtype.byteorder == ">":
+                    dtype = _sample_dtype(request.dtype)
+                    try:
+                        shape = tuple(int(item) for item in request.shape)
+                    except (TypeError, ValueError, OverflowError) as exc:
                         raise RemoteRFProtocolError(
-                            "sample payloads must use canonical little-endian byte order"
-                        )
-                    if dtype not in {
-                        np.dtype(np.complex64),
-                        np.dtype(np.complex128),
-                        np.dtype(np.int16),
-                        np.dtype(np.float32),
-                        np.dtype(np.float64),
-                    }:
-                        raise RemoteRFProtocolError(f"unsupported sample dtype: {dtype}")
-                    shape = tuple(int(item) for item in request.shape)
+                            "sample shape contains a non-integer dimension"
+                        ) from exc
                     if len(shape) not in {1, 2} or any(item < 0 for item in shape):
                         raise RemoteRFProtocolError(
                             "sample shape must be one- or two-dimensional"
@@ -1197,12 +1357,17 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                         metadata = self._metadata_object(
                             session.schema, "RXMetadata", request.metadata_json
                         )
+                        if request.one_packet:
+                            raise RemoteRFProtocolError(
+                                "one_packet is not exposed by the pinned "
+                                "UHD 4.10 Python RXStreamer.recv binding"
+                            )
+                        timeout = _sample_timeout(request.timeout_sec)
                         with entry.lock:
                             count = entry.value.recv(
                                 buffer,
                                 metadata,
-                                float(request.timeout_sec or 0.1),
-                                bool(request.one_packet),
+                                timeout,
                             )
                         session_manager.get(session.session_id)
                         count = int(count)
@@ -1269,12 +1434,13 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                         metadata = self._metadata_object(
                             session.schema, "TXMetadata", request.metadata_json
                         )
+                        timeout = _sample_timeout(request.timeout_sec)
                         with entry.lock:
                             count = int(
                                 entry.value.send(
                                     samples,
                                     metadata,
-                                    float(request.timeout_sec or 0.1),
+                                    timeout,
                                 )
                             )
                         session_manager.get(session.session_id)

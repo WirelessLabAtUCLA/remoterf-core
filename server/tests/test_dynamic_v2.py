@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,9 +14,12 @@ from remoteRF_server.common.grpc.v2_codec import decode_value, encode_value
 from remoteRF_server.common.idl.v2 import validate_schema
 from remoteRF_server.drivers.usrp.policy import USRPPolicy
 from remoteRF_server.drivers.usrp.uhd_manifest import (
+    MULTIUSRP_METHODS,
     TARGET_UHD_VERSION,
     assert_release_coverage,
     build_usrp_schema_v2,
+    canonical_uhd_version,
+    is_supported_uhd_version,
 )
 from remoteRF_server.server.dynamic_v2 import (
     DynamicControlV2Servicer,
@@ -25,6 +29,8 @@ from remoteRF_server.server.dynamic_v2 import (
 from remoteRF_server.server.v2_errors import (
     RemoteRFOverloadError,
     RemoteRFPolicyError,
+    RemoteRFProtocolError,
+    RemoteRFServerOverloadedError,
     RemoteRFSessionExpiredError,
     RemoteRFStaleHandleError,
 )
@@ -34,7 +40,8 @@ class FakeRXStreamer:
     def get_max_num_samps(self):
         return 256
 
-    def recv(self, buffer, metadata, timeout, one_packet):
+    def recv(self, buffer, metadata, timeout):
+        self.last_timeout = timeout
         buffer[..., :2] = np.array([1 + 2j, 3 + 4j], dtype=buffer.dtype)
         metadata.error_code = "none"
         metadata.has_time_spec = False
@@ -55,10 +62,46 @@ class FakeNativeDevice:
     pass
 
 
+class FakeProperty:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def get_desired(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+    def set_coerced(self, value):
+        self.value = value
+
+
+class FakePropertyTree:
+    def __init__(self):
+        self.integer = FakeProperty(3)
+
+    def exists(self, path):
+        return path == "/value"
+
+    def list(self, path):
+        return ["value"]
+
+    def subtree(self, path):
+        return self
+
+    def access_int(self, path):
+        return self.integer
+
+
 class FakeLiveSchema:
     def __init__(self):
         self.device = FakeNativeDevice()
         self.closed = False
+        self.calls = []
+        self.tree = FakePropertyTree()
 
     def get_capabilities_v2(self, policy_restrictions=None):
         return {
@@ -69,8 +112,11 @@ class FakeLiveSchema:
         }
 
     def invoke_native(self, method, args, positional_args=None):
+        self.calls.append((method, args, list(positional_args or ())))
         if method == "get_rx_stream":
             return FakeRXStreamer()
+        if method == "get_tree":
+            return self.tree
         if method == "get_time_now":
             return 1.5
         return None
@@ -92,15 +138,66 @@ class FakeInventorySchema:
 
 
 class DynamicV2ServerTests(unittest.TestCase):
-    def test_manifest_is_valid_and_unqualified_entries_block_release(self):
+    def test_usrp2901_manifest_is_valid_and_has_no_deferred_reachable_api(self):
         schema = build_usrp_schema_v2()
         validate_schema(schema)
         self.assertEqual(schema["schema_version"], "2.0")
         self.assertGreaterEqual(len(schema["methods"]), 140)
         self.assertIn("usrp2901", schema["hardware_profiles"])
-        self.assertIn("deferred", schema["coverage"].values())
-        with self.assertRaisesRegex(RuntimeError, "deferred"):
-            assert_release_coverage(schema)
+        self.assertNotIn("deferred", schema["coverage"].values())
+        self.assertIn(
+            "unsupported_by_hardware_native_equivalent",
+            schema["coverage"].values(),
+        )
+        object_paths = {
+            item["python_path"] for item in schema["objects"]
+        }
+        self.assertIn("uhd.filters.AnalogFilterLP", object_paths)
+        self.assertIn("uhd.filters.DigitalFilterFIRI16", object_paths)
+        self.assertIn("uhd.filters.FilterType", object_paths)
+        assert_release_coverage(schema)
+
+    def test_promoted_signatures_preserve_native_defaults_and_parameter_kinds(self):
+        schema = build_usrp_schema_v2()
+        methods = {
+            (item["owner"], item["name"]): item
+            for item in schema["methods"]
+        }
+        owner = "uhd.usrp.MultiUSRP"
+        rx_rate = methods[(owner, "set_rx_rate")]["overloads"][0]
+        self.assertEqual(rx_rate["parameters"][1]["default"], (1 << 64) - 1)
+
+        clock = methods[(owner, "get_clock_source")]["overloads"][0]
+        self.assertEqual(clock["parameters"][0]["kind"], "positional_only")
+        self.assertTrue(clock["parameters"][0]["required"])
+
+        receive = methods[(owner, "recv_num_samps")]["overloads"][0]
+        receive_params = {
+            item["name"]: item for item in receive["parameters"]
+        }
+        self.assertEqual(receive_params["rate"]["default"], 1_000_000.0)
+        self.assertEqual(receive_params["channels"]["default"], [0])
+        self.assertIsNone(receive_params["streamer"]["default"])
+        self.assertEqual(
+            methods[(owner, "send_waveform")]["overloads"][0]["returns"],
+            "int",
+        )
+
+    def test_manifest_uses_native_uhd_410_names_and_accepts_package_suffix(self):
+        self.assertIn("set_normalized_rx_gain", MULTIUSRP_METHODS)
+        self.assertIn("get_normalized_tx_gain", MULTIUSRP_METHODS)
+        self.assertIn("has_rx_power_reference", MULTIUSRP_METHODS)
+        self.assertIn("get_gpio_srcs", MULTIUSRP_METHODS)
+        self.assertNotIn("set_rx_normalized_gain", MULTIUSRP_METHODS)
+        self.assertNotIn("get_rx_agc", MULTIUSRP_METHODS)
+        self.assertNotIn("set_tx_spp", MULTIUSRP_METHODS)
+
+        packaged = "4.10.0.0-0ubuntu1~noble1"
+        self.assertEqual(canonical_uhd_version(packaged), TARGET_UHD_VERSION)
+        self.assertTrue(is_supported_uhd_version(packaged))
+        self.assertTrue(is_supported_uhd_version("UHD 4.10.0.0-0-gabcdef"))
+        self.assertFalse(is_supported_uhd_version("4.10.0.1"))
+        self.assertFalse(is_supported_uhd_version("4.9.0.0"))
 
     def test_dynamic_value_ndarray_is_binary_and_exact(self):
         original = np.array([[1 + 2j, 3 + 4j]], dtype=np.complex64)
@@ -110,6 +207,10 @@ class DynamicV2ServerTests(unittest.TestCase):
         decoded = decode_value(encoded)
         self.assertEqual(decoded.dtype, original.dtype)
         np.testing.assert_array_equal(decoded, original)
+        all_indexes = (1 << 64) - 1
+        encoded_integer = encode_value(all_indexes)
+        self.assertEqual(encoded_integer.WhichOneof("value"), "json_value")
+        self.assertEqual(decode_value(encoded_integer), all_indexes)
 
     def test_negotiation_requires_mutually_supported_versions(self):
         servicer = DynamicControlV2Servicer()
@@ -139,6 +240,8 @@ class DynamicV2ServerTests(unittest.TestCase):
         with self.assertRaises(RemoteRFPolicyError):
             denied.check_control("set_tx_freq", {"tune_request": 915e6})
         with self.assertRaises(RemoteRFPolicyError):
+            denied.check_control("set_normalized_tx_gain", {"gain": 0.1})
+        with self.assertRaises(RemoteRFPolicyError):
             denied.check_control("set_gpio_attr", {})
 
         policy = USRPPolicy(
@@ -159,6 +262,16 @@ class DynamicV2ServerTests(unittest.TestCase):
         with self.assertRaises(RemoteRFPolicyError):
             policy.check_control("set_tx_gain", {"gain": 21})
 
+        normalized = USRPPolicy(
+            {
+                "tx_enabled": True,
+                "max_tx_normalized_gain": 0.5,
+            }
+        )
+        normalized.check_control("set_normalized_tx_gain", {"gain": 0.5})
+        with self.assertRaises(RemoteRFPolicyError):
+            normalized.check_control("set_normalized_tx_gain", {"gain": 0.6})
+
         low_level = USRPPolicy(
             {
                 "low_level_write_enabled": True,
@@ -175,6 +288,11 @@ class DynamicV2ServerTests(unittest.TestCase):
             low_level.check_control(
                 "set_gpio_attr",
                 {"bank": "FP0", "mask": 0x04},
+            )
+        with self.assertRaises(RemoteRFPolicyError):
+            low_level.check_control(
+                "set_gpio_attr",
+                {"bank": "FP0"},
             )
         low_level.check_handle_call(
             "uhd.property_tree",
@@ -224,7 +342,8 @@ class DynamicV2ServerTests(unittest.TestCase):
                 session.session_id,
                 session.root_handle,
                 "get_rx_stream",
-                {"stream_args": {}},
+                {},
+                positional_args=[{}],
             )
             handle = result["__remoterf_handle__"]
             self.assertTrue(handle.startswith("rx_"))
@@ -239,6 +358,71 @@ class DynamicV2ServerTests(unittest.TestCase):
                     session,
                     handle,
                     generation=entry.generation + 1,
+                )
+            manager.invoke(
+                session.session_id,
+                session.root_handle,
+                "recv_num_samps",
+                {
+                    "num_samps": 1,
+                    "freq": 100e6,
+                    "streamer": {
+                        "__remoterf_handle_arg__": handle,
+                        "type_id": "uhd.usrp.RXStreamer",
+                        "generation": entry.generation,
+                    },
+                },
+                overload_id="default",
+            )
+            native_streamer = inventory.live.calls[-1][1]["streamer"]
+            self.assertIsInstance(native_streamer, FakeRXStreamer)
+            tree, _ = manager.invoke(
+                session.session_id,
+                session.root_handle,
+                "get_tree",
+                {},
+                overload_id="default",
+            )
+            exists, _ = manager.invoke(
+                session.session_id,
+                tree["__remoterf_handle__"],
+                "exists",
+                {"path": "/value"},
+                overload_id="default",
+            )
+            self.assertTrue(exists)
+            prop, _ = manager.invoke(
+                session.session_id,
+                tree["__remoterf_handle__"],
+                "access_int",
+                {},
+                positional_args=["/value"],
+                overload_id="default",
+            )
+            value, _ = manager.invoke(
+                session.session_id,
+                prop["__remoterf_handle__"],
+                "get",
+                {},
+                overload_id="default",
+            )
+            self.assertEqual(value, 3)
+            with self.assertRaises(RemoteRFPolicyError):
+                manager.invoke(
+                    session.session_id,
+                    prop["__remoterf_handle__"],
+                    "set",
+                    {},
+                    positional_args=[4],
+                    overload_id="default",
+                )
+            with self.assertRaises(RemoteRFProtocolError):
+                manager.invoke(
+                    session.session_id,
+                    tree["__remoterf_handle__"],
+                    "set",
+                    {"path": "/mboards/0/unsafe", "value": 1},
+                    overload_id="native",
                 )
             with self.assertRaises(RemoteRFOverloadError):
                 manager.invoke(
@@ -284,7 +468,8 @@ class DynamicV2ServerTests(unittest.TestCase):
                 session.session_id,
                 session.root_handle,
                 "get_rx_stream",
-                {"stream_args": {}},
+                {},
+                positional_args=[{}],
                 overload_id="default",
             )
             handle = result["__remoterf_handle__"]
@@ -369,6 +554,10 @@ class DynamicV2ServerTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(data.metadata_json)["error_code"], "none")
             self.assertEqual(
+                manager.get_handle(session, handle).value.last_timeout,
+                0.1,
+            )
+            self.assertEqual(
                 malformed[-1].error.code,
                 "RemoteRFProtocolError",
             )
@@ -406,6 +595,281 @@ class DynamicV2ServerTests(unittest.TestCase):
                 manager.get(session.session_id)
         self.assertTrue(inventory.live.closed)
 
+    def test_resource_limits_metrics_and_close_all_are_bounded(self):
+        inventory = FakeInventorySchema()
+        context = {
+            "schema": inventory,
+            "dtype": "usrp",
+            "ident": "SERIAL",
+            "name": "test",
+        }
+        manager = SessionManager()
+        with (
+            patch(
+                "remoteRF_server.server.dynamic_v2.resolve_gid_for_token",
+                return_value=7,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.get_local_device_context",
+                return_value=context,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.token_matches_device",
+                return_value=True,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.USRPPolicy.load",
+                return_value=USRPPolicy({}),
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2._MAX_HANDLES_PER_SESSION",
+                3,
+            ),
+        ):
+            session = manager.open("token")
+            manager.register_handle(
+                session,
+                object(),
+                "test.handle",
+                parent=session.root_handle,
+            )
+            manager.register_handle(
+                session,
+                object(),
+                "test.handle",
+                parent=session.root_handle,
+            )
+            with self.assertRaises(RemoteRFServerOverloadedError):
+                manager.register_handle(
+                    session,
+                    object(),
+                    "test.handle",
+                    parent=session.root_handle,
+                )
+            self.assertEqual(
+                manager.metrics(),
+                {
+                    "sessions": 1,
+                    "opening_sessions": 0,
+                    "handles": 3,
+                    "async_queue_depth": 0,
+                    "async_queue_overflows": 0,
+                },
+            )
+            self.assertEqual(manager.close_all(), 1)
+            self.assertEqual(manager.close_all(), 0)
+            self.assertEqual(manager.metrics()["sessions"], 0)
+            self.assertEqual(manager.metrics()["handles"], 0)
+            self.assertTrue(inventory.live.closed)
+
+    def test_stream_limits_reject_oversize_and_concurrent_operations(self):
+        inventory = FakeInventorySchema()
+        context = {
+            "schema": inventory,
+            "dtype": "usrp",
+            "ident": "SERIAL",
+            "name": "test",
+        }
+        manager = SessionManager()
+        with (
+            patch(
+                "remoteRF_server.server.dynamic_v2.resolve_gid_for_token",
+                return_value=7,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.get_local_device_context",
+                return_value=context,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.token_matches_device",
+                return_value=True,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.USRPPolicy.load",
+                return_value=USRPPolicy({}),
+            ),
+        ):
+            session = manager.open("token")
+            result, _ = manager.invoke(
+                session.session_id,
+                session.root_handle,
+                "get_rx_stream",
+                {},
+                positional_args=[{}],
+                overload_id="default",
+            )
+            handle = result["__remoterf_handle__"]
+            generation = result["generation"]
+            common = {
+                "session_id": session.session_id,
+                "handle": handle,
+                "generation": generation,
+                "direction": grpc_pb2.SAMPLE_DIRECTION_RX,
+            }
+            with (
+                patch(
+                    "remoteRF_server.server.dynamic_v2.session_manager",
+                    manager,
+                ),
+                patch(
+                    "remoteRF_server.server.dynamic_v2.token_matches_device",
+                    return_value=True,
+                ),
+                patch.object(
+                    SampleDataV1Servicer,
+                    "_metadata_object",
+                    return_value=FakeRXMetadata(),
+                ),
+            ):
+                credit_response = list(
+                    SampleDataV1Servicer().SampleStream(
+                        iter(
+                            [
+                                grpc_pb2.SampleFrame(
+                                    **common,
+                                    operation_id="credits",
+                                    sequence=0,
+                                    kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                                    credits=999,
+                                )
+                            ]
+                        ),
+                        None,
+                    )
+                )
+                self.assertEqual(credit_response[0].credits, 64)
+
+                oversize = list(
+                    SampleDataV1Servicer().SampleStream(
+                        iter(
+                            [
+                                grpc_pb2.SampleFrame(
+                                    **common,
+                                    operation_id="oversize",
+                                    sequence=1,
+                                    kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                                ),
+                                grpc_pb2.SampleFrame(
+                                    **common,
+                                    operation_id="oversize",
+                                    sequence=2,
+                                    kind=grpc_pb2.SAMPLE_FRAME_REQUEST,
+                                    dtype=np.dtype(np.complex64).str,
+                                    shape=[524289],
+                                    sample_count=524289,
+                                ),
+                            ]
+                        ),
+                        None,
+                    )
+                )
+                self.assertEqual(
+                    oversize[-1].error.code,
+                    "RemoteRFProtocolError",
+                )
+
+                invalid_dtypes = (
+                    "",
+                    "object",
+                    "O",
+                    ">c8",
+                    "[('sample','<c8')]",
+                )
+                sequence = 3
+                for index, dtype in enumerate(invalid_dtypes):
+                    operation_id = f"bad-dtype-{index}"
+                    malformed = list(
+                        SampleDataV1Servicer().SampleStream(
+                            iter(
+                                [
+                                    grpc_pb2.SampleFrame(
+                                        **common,
+                                        operation_id=operation_id,
+                                        sequence=sequence,
+                                        kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                                    ),
+                                    grpc_pb2.SampleFrame(
+                                        **common,
+                                        operation_id=operation_id,
+                                        sequence=sequence + 1,
+                                        kind=grpc_pb2.SAMPLE_FRAME_REQUEST,
+                                        dtype=dtype,
+                                        shape=[1],
+                                        sample_count=1,
+                                    ),
+                                ]
+                            ),
+                            None,
+                        )
+                    )
+                    self.assertEqual(
+                        malformed[-1].error.code,
+                        "RemoteRFProtocolError",
+                    )
+                    sequence += 2
+
+                zero_timeout = list(
+                    SampleDataV1Servicer().SampleStream(
+                        iter(
+                            [
+                                grpc_pb2.SampleFrame(
+                                    **common,
+                                    operation_id="zero-timeout",
+                                    sequence=sequence,
+                                    kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                                ),
+                                grpc_pb2.SampleFrame(
+                                    **common,
+                                    operation_id="zero-timeout",
+                                    sequence=sequence + 1,
+                                    kind=grpc_pb2.SAMPLE_FRAME_REQUEST,
+                                    dtype="<c8",
+                                    shape=[2],
+                                    sample_count=2,
+                                    timeout_sec=0.0,
+                                    metadata_json="{}",
+                                ),
+                            ]
+                        ),
+                        None,
+                    )
+                )
+                self.assertFalse(
+                    zero_timeout[-1].error.code,
+                    (
+                        zero_timeout[-1].error.message,
+                        zero_timeout[-1].error.native_exception,
+                    ),
+                )
+                self.assertEqual(
+                    manager.get_handle(session, handle).value.last_timeout,
+                    0.0,
+                )
+
+                entry = manager.get_handle(session, handle)
+                entry.active_operation = "already-running"
+                concurrent = list(
+                    SampleDataV1Servicer().SampleStream(
+                        iter(
+                            [
+                                grpc_pb2.SampleFrame(
+                                    **common,
+                                    operation_id="concurrent",
+                                    sequence=sequence + 2,
+                                    kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                                )
+                            ]
+                        ),
+                        None,
+                    )
+                )
+                self.assertEqual(
+                    concurrent[-1].error.code,
+                    "RemoteRFServerOverloadedError",
+                )
+                entry.active_operation = ""
+            manager.close_all()
+
     def test_usrp_cli_writes_runtime_yaml_inventory_and_legacy_mirror(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -426,6 +890,22 @@ class DynamicV2ServerTests(unittest.TestCase):
                 self.assertEqual(records[7]["TYPE"], "usrp")
                 self.assertEqual(records[7]["IDENT"], "31A2B3C")
                 self.assertTrue(Path(tmp, "devices.env").exists())
+
+    def test_server_cli_exposes_headless_runtime(self):
+        with (
+            patch.object(
+                serverrf_cli,
+                "_serve",
+                return_value=0,
+            ) as serve,
+            patch.object(
+                sys,
+                "argv",
+                ["serverrf", "--serve", "--headless"],
+            ),
+        ):
+            self.assertEqual(serverrf_cli.main(), 0)
+        serve.assert_called_once_with(headless=True)
 
 
 if __name__ == "__main__":
