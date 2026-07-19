@@ -50,6 +50,8 @@
 #     def toggle_debug(self):
 #         self.debug = not self.debug
 
+import json
+
 from .reservation import reservation_handler
 from ..common.utils import *
 from ..common.grpc import grpc_pb2 as generic_pb2
@@ -285,6 +287,27 @@ class RpcManager:
             schema = get_device_schema(gid)
             if schema is None:
                 return {'error': map_arg(f'No schema available for device {gid} (offline)')}
+
+            requested_versions = []
+            if "schema_versions" in args:
+                try:
+                    requested_versions = list(unmap_arg(args["schema_versions"]) or [])
+                except Exception:
+                    requested_versions = []
+            get_v2 = getattr(schema, "get_idl_v2", None)
+            if "2.0" in requested_versions and callable(get_v2):
+                schema_v2 = get_v2()
+                return {
+                    'schema': map_arg(json.dumps(
+                        schema_v2, sort_keys=True, separators=(",", ":")
+                    )),
+                    'schema_version': map_arg("2.0"),
+                    'driver_version': map_arg(schema.driver_version),
+                    'schema_hash': map_arg(schema_v2["schema_hash"]),
+                    'device_type': map_arg(schema.device_type),
+                    'control_protocol_version': map_arg("2.0"),
+                    'streaming_protocol_version': map_arg("1.0"),
+                }
 
             return {
                 'schema':         map_arg(schema.get_idl_json()),

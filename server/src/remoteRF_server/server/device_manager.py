@@ -19,6 +19,7 @@ from ..common.idl.schema import get_driver_class, load_drivers
 from ..host import host_tunnel_server as hts
 
 _state_lock = threading.RLock()
+_reservation_end_callbacks: list = []
 
 @dataclass(frozen=True)
 class VirtualDevice:
@@ -323,6 +324,15 @@ def _connect_from_record(rec: Dict[str, Any]):
         print(f"No driver registered for device_type={dtype!r} — skipping")
         return (None, ident, dtype)
 
+    if bool(getattr(schema_cls, "session_scoped", False)):
+        try:
+            schema = schema_cls()
+            schema.bind_inventory(init_kwargs)
+            return (schema, ident, dtype)
+        except Exception as e:
+            print(f"inventory binding failed for {dtype}: {e}")
+            return (None, ident, dtype)
+
     try:
         raw_dev = schema_cls.make_device(**init_kwargs)
     except Exception as e:
@@ -548,12 +558,51 @@ def set_device(device_id: int, salt: str, hash: str):
         if not st:
             return
 
+    notify_end = False
     with _state_lock:
         st = _devices.get(int(device_id))
         if not st:
             return
+        was_reserved = bool(st.salt or st.hsh)
         st.salt = str(salt or "")
         st.hsh = str(hash or "")
+        notify_end = was_reserved and not (st.salt or st.hsh)
+
+    if notify_end:
+        for callback in tuple(_reservation_end_callbacks):
+            try:
+                callback(int(device_id))
+            except Exception as exc:
+                print(f"Warning: reservation cleanup callback failed for {device_id}: {exc}")
+
+
+def register_reservation_end_callback(callback) -> None:
+    """Register an in-process local-device cleanup hook."""
+    if not callable(callback):
+        raise TypeError("reservation callback must be callable")
+    with _state_lock:
+        if callback not in _reservation_end_callbacks:
+            _reservation_end_callbacks.append(callback)
+
+
+def get_local_device_context(device_id: int) -> dict[str, Any] | None:
+    """Return a read-only local inventory/session view for Dynamic v2."""
+    with _state_lock:
+        st = _devices.get(int(device_id))
+        if st is None or st.origin != "local" or st.dev is None:
+            return None
+        return {
+            "gid": int(device_id),
+            "schema": st.dev,
+            "dtype": st.dtype,
+            "ident": st.ident,
+            "name": st.name,
+            "reserved": bool(st.salt or st.hsh),
+        }
+
+
+def token_matches_device(api_token: str, device_id: int) -> bool:
+    return resolve_gid_for_token(api_token) == int(device_id)
 
 def device_exists(device_id: int) -> bool:
     did = int(device_id)

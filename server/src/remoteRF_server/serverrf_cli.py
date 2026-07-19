@@ -8,12 +8,13 @@ import re
 import ssl
 import ipaddress
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 from datetime import datetime, timezone
 import base64
 import secrets
 import hashlib
 import getpass
+import yaml
 
 def _x509_notafter_utc(cert_path: Path) -> Optional[datetime]:
     # openssl output: notAfter=Feb 16 23:12:02 2027 GMT
@@ -134,8 +135,12 @@ def _server_env_path() -> Path:
 
 
 def _devices_env_path() -> Path:
-    # server-side device config storage (same schema as hostrf)
+    # Legacy mirror retained for older tooling.
     return _cfg_dir() / "devices.env"
+
+
+def _devices_yaml_path() -> Path:
+    return _cfg_dir() / "devices.yml"
 
 
 def _gen_certs_path() -> Path:
@@ -257,12 +262,13 @@ def print_help() -> None:
         "Devices:\n"
         "  serverrf -d | --device [options]\n"
         "\n"
-        # "Device options:\n"
-        # "  --add --pluto <id:name:iio_serial>  Add device (fails if gid OR serial already used)\n"
-        # "  --remove <id>                       Remove device\n"
-        # "  --edit-name <id> <name>             Override device NAME for existing device\n"
-        # "  --show | -s                         Show all devices\n"
-        # "  -w | --wipe [-y]                    Wipe ONLY device config (devices.env)\n"
+        "Device options:\n"
+        "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
+        "  --add --usrp <id:name:serial>       Add a serial-bound B200/USRP-2901\n"
+        "  --remove <id>                       Remove device\n"
+        "  --edit-name <id> <name>             Override device name\n"
+        "  --show | -s                         Show all devices\n"
+        "  -w | --wipe [-y]                    Wipe device inventory\n"
 
         "\n"
         "Cert options (for --gen-certs):\n"
@@ -304,13 +310,12 @@ def print_help() -> None:
         "  serverrf --host --show\n"
         "  serverrf --host --delete lab-host-01\n"
         "  serverrf --host --wipe -y\n"
-        # "\n"
-        # "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
-        # "  serverrf --device --edit-name 0 \"New Pluto Name\"\n"
-        # "  serverrf --device --remove 0\n"
-        # "  serverrf --device --show\n"
-        # "  serverrf --device --wipe -y\n"
-        # "\n"
+        "\n"
+        "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
+        "  serverrf --device --add --usrp 1:usrp2901_lab:31A2B3C\n"
+        "  serverrf --device --show\n"
+        "  serverrf --device --wipe -y\n"
+        "\n"
         "  serverrf -s\n"
         "  serverrf --serve\n"
         "\n"
@@ -732,20 +737,24 @@ def _config_wipe_ports(*, yes: bool) -> int:
 
 _DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
 
-def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
-    # <gid:name:iio_serial>
+
+def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, str]:
     parts = [p.strip() for p in (tok or "").split(":")]
     if len(parts) != 3:
-        raise ValueError("Expected <gid:name:iio_serial>")
-    gid_s, name, iio_serial = parts
+        raise ValueError(f"Expected <gid:name:{serial_label}>")
+    gid_s, name, serial = parts
     gid = int(gid_s)
     if gid < 0:
         raise ValueError("gid must be >= 0")
     if not name:
         raise ValueError("name is empty")
-    if not iio_serial:
-        raise ValueError("iio_serial is empty")
-    return gid, name, iio_serial
+    if not serial:
+        raise ValueError(f"{serial_label} is empty")
+    return gid, name, serial
+
+
+def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
+    return _parse_serial_add_spec(tok, serial_label="iio_serial")
 
 def _device_edit_name(global_id_str: str, new_name: str) -> int:
     try:
@@ -759,7 +768,11 @@ def _device_edit_name(global_id_str: str, new_name: str) -> int:
         print("ERROR: new_name is empty", file=sys.stderr)
         return 2
 
-    recs = _read_device_records()
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     if gid not in recs:
         print(f"ERROR: global_id {gid} not present; cannot edit name.", file=sys.stderr)
         return 2
@@ -769,9 +782,39 @@ def _device_edit_name(global_id_str: str, new_name: str) -> int:
     print(f"Updated device name: {gid} name={name}")
     return 0
 
-def _read_device_records() -> Dict[int, Dict[str, str]]:
+def _read_device_records() -> Dict[int, Dict[str, Any]]:
+    yaml_path = _devices_yaml_path()
+    if yaml_path.exists() and yaml_path.stat().st_size:
+        try:
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            devices = data.get("devices") or []
+            if not isinstance(devices, list):
+                raise ValueError("'devices' must be a list")
+            recs: Dict[int, Dict[str, Any]] = {}
+            for item in devices:
+                if not isinstance(item, dict):
+                    continue
+                gid = int(item["device_id"])
+                dtype = str(item.get("device_type") or "").strip().lower()
+                if not dtype:
+                    raise ValueError(f"device {gid} has no device_type")
+                init = item.get("init") or {}
+                if not isinstance(init, dict):
+                    raise ValueError(f"device {gid} init must be a mapping")
+                ident = str(init.get("serial") or "").strip()
+                recs[gid] = {
+                    "TYPE": dtype,
+                    "NAME": str(item.get("name") or f"device-{gid}").strip(),
+                    "IDENT_KIND": "iio_serial" if dtype == "pluto" else "serial",
+                    "IDENT": ident,
+                    "INIT": dict(init),
+                }
+            return recs
+        except Exception as exc:
+            raise ValueError(f"invalid device inventory {yaml_path}: {exc}") from exc
+
     kv = _read_env_kv(_devices_env_path())
-    recs: Dict[int, Dict[str, str]] = {}
+    recs: Dict[int, Dict[str, Any]] = {}
     for k, v in kv.items():
         m = _DEVICE_KEY_RE.match(k.strip())
         if not m:
@@ -782,19 +825,42 @@ def _read_device_records() -> Dict[int, Dict[str, str]]:
     return recs
 
 
-def _write_device_records(recs: Dict[int, Dict[str, str]]) -> None:
+def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
+    devices: List[Dict[str, Any]] = []
     out: Dict[str, str] = {}
     for gid in sorted(recs.keys()):
         fields = recs[gid]
+        dtype = str(fields.get("TYPE") or "").strip().lower()
+        ident = str(fields.get("IDENT") or "").strip()
+        init = fields.get("INIT") or {}
+        if not isinstance(init, dict):
+            init = {}
+        init = dict(init)
+        if ident:
+            init["serial"] = ident
+        devices.append(
+            {
+                "device_id": int(gid),
+                "device_type": dtype,
+                "name": str(fields.get("NAME") or f"device-{gid}"),
+                "init": init,
+            }
+        )
         order = ["TYPE", "NAME", "IDENT_KIND", "IDENT"]
         for f in order:
             if f in fields and fields[f] != "":
-                out[f"DEVICE_{gid}_{f}"] = fields[f]
+                out[f"DEVICE_{gid}_{f}"] = str(fields[f])
         for f in sorted(fields.keys()):
-            if f in order:
+            if f in order or f == "INIT":
                 continue
             if fields[f] != "":
-                out[f"DEVICE_{gid}_{f}"] = fields[f]
+                out[f"DEVICE_{gid}_{f}"] = str(fields[f])
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    _devices_yaml_path().write_text(
+        yaml.safe_dump({"devices": devices}, sort_keys=False),
+        encoding="utf-8",
+    )
+    # Maintain the original env representation for older CLI consumers.
     _write_env_kv(_devices_env_path(), out)
 
 
@@ -806,7 +872,11 @@ def _device_add_pluto(spec: str) -> int:
         return 2
 
     _cfg_dir().mkdir(parents=True, exist_ok=True)
-    recs = _read_device_records()
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     if gid in recs:
         print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
@@ -829,6 +899,41 @@ def _device_add_pluto(spec: str) -> int:
     return 0
 
 
+def _device_add_usrp(spec: str) -> int:
+    try:
+        gid, name, serial = _parse_serial_add_spec(spec, serial_label="serial")
+    except Exception as e:
+        print(f"ERROR: invalid usrp spec: {e}", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+
+    for other_gid, record in recs.items():
+        if str(record.get("IDENT", "")) == serial:
+            print(f"ERROR: serial already used by global_id={other_gid}", file=sys.stderr)
+            return 2
+
+    recs[gid] = {
+        "TYPE": "usrp",
+        "NAME": name,
+        "IDENT_KIND": "serial",
+        "IDENT": serial,
+        "INIT": {"serial": serial},
+    }
+    _write_device_records(recs)
+    print(f"Added device: {gid} type=usrp name={name} serial={serial}")
+    return 0
+
+
 def _device_remove(global_id_str: str) -> int:
     try:
         gid = int((global_id_str or "").strip())
@@ -836,7 +941,11 @@ def _device_remove(global_id_str: str) -> int:
         print("ERROR: --remove expects <gid:int>", file=sys.stderr)
         return 2
 
-    recs = _read_device_records()
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     if gid not in recs:
         print(f"WARNING: global_id {gid} not present; nothing to remove.")
         return 0
@@ -848,12 +957,16 @@ def _device_remove(global_id_str: str) -> int:
 
 
 def _device_show() -> int:
-    p = _devices_env_path()
-    if not p.exists():
+    p = _devices_yaml_path()
+    if not p.exists() and not _devices_env_path().exists():
         print(f"No devices configured (missing {p}).")
         return 0
 
-    recs = _read_device_records()
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     print(f"Devices: {p}")
     if not recs:
         print("  (none)")
@@ -870,22 +983,27 @@ def _device_show() -> int:
 
 
 def _wipe_devices_only(*, yes: bool) -> int:
-    p = _devices_env_path()
-    if not p.exists():
-        print(f"No device config found at: {p}")
+    paths = [
+        p
+        for p in (_devices_yaml_path(), _cfg_dir() / "devices.yaml", _devices_env_path())
+        if p.exists()
+    ]
+    if not paths:
+        print(f"No device config found at: {_devices_yaml_path()}")
         return 0
 
     if not yes:
         try:
-            if input("This will delete devices.env. Type 'wipe' to confirm: ").strip().lower() != "wipe":
+            if input("This will delete the device inventory. Type 'wipe' to confirm: ").strip().lower() != "wipe":
                 print("Wipe aborted.")
                 return 1
         except KeyboardInterrupt:
             print("\nCancelled.")
             return 1
 
-    p.unlink()
-    print("Wiped device config (devices.env).")
+    for path in paths:
+        path.unlink()
+    print("Wiped device inventory.")
     return 0
 
 # -----------------------------
@@ -1174,16 +1292,16 @@ def main() -> int:
 
         if device_mode and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
-                print("ERROR: missing device type after --device --add (expected --pluto)", file=sys.stderr)
+                print("ERROR: missing device type after --device --add (expected --pluto or --usrp)", file=sys.stderr)
                 return 2
             dt = argv[i + 1].strip()
-            if dt != "--pluto":
-                print("ERROR: only '--device --add --pluto <gid:name:iio_serial>' is supported", file=sys.stderr)
+            if dt not in ("--pluto", "--usrp"):
+                print("ERROR: device type must be --pluto or --usrp", file=sys.stderr)
                 return 2
             if i + 2 >= len(argv):
-                print("ERROR: missing spec after --device --add --pluto", file=sys.stderr)
+                print(f"ERROR: missing spec after --device --add {dt}", file=sys.stderr)
                 return 2
-            device_add_type = "pluto"
+            device_add_type = dt[2:]
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
@@ -1420,6 +1538,11 @@ def main() -> int:
 
         if device_add_type == "pluto" and device_add_spec is not None:
             rc = _device_add_pluto(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+        elif device_add_type == "usrp" and device_add_spec is not None:
+            rc = _device_add_usrp(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

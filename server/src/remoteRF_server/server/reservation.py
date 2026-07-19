@@ -99,7 +99,9 @@ class ReservationHandler:
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     if self.validate_cancel_reservation(unmap_arg(args['res_id']), username):
-                        return self.remove_reservation(res_id=unmap_arg(args['res_id']))
+                        response = self.remove_reservation(res_id=unmap_arg(args['res_id']))
+                        self.update_devices()
+                        return response
                     else:
                         return {"ace": map_arg("Invalid reservation ID or user does not own reservation.")}
                 else:

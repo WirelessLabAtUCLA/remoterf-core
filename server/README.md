@@ -211,7 +211,9 @@ Some distros come with default firewall settings that block traffic on specific 
 
 ## Server Device Configuration
 
-Currently, only Adalm Plutos are supported.
+ADALM-Pluto and local UHD B200-family inventories are supported. USRP devices
+remain registered as device type `usrp`; runtime capabilities distinguish
+`usrp2901` and `b200`.
 
 To connect plutos to the server:
 
@@ -267,6 +269,83 @@ serverrf -d --edit-name 0 "New Name"
 ```
 
 Note that all device and server config parameters need a 'restart' to take affect (ctrl + c -> serverrf -s).
+
+### NI USRP-2901 / B200-family
+
+Dynamic protocol v2 requires the target server to have the exact supported
+UHD Python API, UHD `4.10.0.0`, installed. The server does not open the device
+while loading inventory. It opens the reservation's exact
+`type=b200,serial=...` device only when the authenticated client opens a v2
+session.
+
+Add a serial-bound device:
+
+```bash
+serverrf --device --add --usrp 7:usrp2901_lab:31A2B3C
+serverrf --device --show
+```
+
+The canonical inventory is `~/.config/remoterf/devices.yml`:
+
+```yaml
+devices:
+  - device_id: 7
+    device_type: usrp
+    name: usrp2901_lab
+    init:
+      serial: 31A2B3C
+```
+
+Transmit is denied if `~/.config/remoterf/usrp_policy.yml` is missing,
+unreadable, invalid, or does not explicitly enable and bound the requested
+operation. Low-level writes are also denied unless both globally enabled and
+method/path/address allowlisted. A starting policy looks like:
+
+```yaml
+defaults:
+  tx_enabled: false
+  low_level_write_enabled: false
+
+devices:
+  "31A2B3C":
+    tx_enabled: true
+    tx_frequency_ranges_hz:
+      - [902000000, 928000000]
+    max_tx_gain_db: 20
+    max_tx_normalized_gain: 0.5
+    max_tx_power_dbm: -10
+    max_tx_bandwidth_hz: 2000000
+    max_tx_sample_rate_sps: 2000000
+    allowed_tx_antennas: [TX/RX]
+    max_burst_seconds: 1.0
+    max_duty_cycle: 0.1
+    duty_cycle_window_seconds: 60
+    low_level_write_enabled: false
+    low_level_write_methods: []
+    gpio_write_masks: {}
+    property_write_paths: []
+    register_write_addresses: []
+```
+
+On every qualified target, generate the introspection record and enforce the
+pinned API gate:
+
+```bash
+python -m remoteRF_server.tools.introspect_uhd \
+  --output uhd-4.10.0.0-target.json
+```
+
+The command exits nonzero for a version mismatch, a missing required member,
+an unclassified public `MultiUSRP` member, or any still-deferred schema entry.
+Hardware differential,
+two-channel/full-duplex, USB 2/3, external clock/PPS, policy-bypass, and
+qualified-LAN performance tests remain mandatory release gates; they cannot
+be completed on a checkout without UHD and a physical NI USRP-2901.
+
+Dynamic v2 control and `SampleDataV1.SampleStream` run on the existing TLS
+gRPC channel. IQ samples are carried as bounded raw binary payloads with
+dtype/shape/channel metadata; JSON/base64 and repeated-float sample transport
+are not used.
 
 ## Server Runtime Configuration
 

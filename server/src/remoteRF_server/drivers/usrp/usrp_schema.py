@@ -1,6 +1,7 @@
 # Last edit: Jun 26 16:37
 
 from remoteRF_server.common.idl import DeviceSchema, idl_client, idl_expose, idl_register
+from .uhd_manifest import build_usrp_schema_v2
 
 c = idl_client
 
@@ -42,7 +43,9 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
         addr = None
 
     if args is None:
-        parts = []
+        # The inventory is intentionally constrained to the B200 family so a
+        # serial cannot accidentally select a different UHD transport/device.
+        parts = ["type=b200"]
         if serial:
             parts.append(f"serial={serial}")
         if addr:
@@ -125,7 +128,30 @@ def _construct(value):
             key: _construct(item)
             for key, item in value.get("kwargs", {}).items()
         }
-        return uhd.libpyuhd.types.tune_request(*args, **kwargs)
+        constructor = getattr(getattr(uhd, "types", None), "TuneRequest", None)
+        if constructor is None:
+            constructor = uhd.libpyuhd.types.tune_request
+        if not args and "target_freq" in value:
+            args = [value["target_freq"]]
+            if value.get("lo_offset") is not None:
+                args.append(value["lo_offset"])
+        obj = constructor(*args, **kwargs)
+        for field in (
+            "rf_freq", "dsp_freq", "rf_freq_policy", "dsp_freq_policy",
+            "target_freq", "lo_offset", "args",
+        ):
+            if field in value and hasattr(obj, field):
+                setattr(obj, field, _construct(value[field]))
+        return obj
+
+    if kind == "DeviceAddr":
+        constructor = getattr(getattr(uhd, "types", None), "DeviceAddr", None)
+        if constructor is None:
+            constructor = uhd.libpyuhd.types.device_addr
+        raw = value.get("value", value.get("items", value.get("args", "")))
+        if isinstance(raw, dict):
+            raw = _device_args(raw)
+        return constructor(raw)
 
     if kind == "TimeSpec":
         return uhd.types.TimeSpec(value["secs"])
@@ -139,6 +165,19 @@ def _construct(value):
 
     if kind == "TXMetadata":
         return _tx_metadata(value)
+
+    if kind == "RXMetadata":
+        metadata = uhd.types.RXMetadata()
+        reset = getattr(metadata, "reset", None)
+        if callable(reset):
+            reset()
+        return metadata
+
+    if kind in {"TXAsyncMetadata", "AsyncMetadata"}:
+        constructor = getattr(uhd.types, "TXAsyncMetadata", None)
+        if constructor is None:
+            constructor = getattr(uhd.types, "AsyncMetadata")
+        return constructor()
 
     if kind == "StreamCMD":
         mode_name = value["mode"]
@@ -168,6 +207,7 @@ def _rx_metadata_payload(metadata):
     return {
         "error_code": str(metadata.error_code).split(".")[-1],
         "error_code_repr": str(metadata.error_code),
+        "has_time_spec": getattr(metadata, "has_time_spec", None),
         "time_spec": time_spec,
         "out_of_sequence": getattr(metadata, "out_of_sequence", None),
         "fragment_offset": getattr(metadata, "fragment_offset", None),
@@ -185,6 +225,7 @@ def _tx_metadata(value):
     metadata.has_time_spec = bool(value.get("has_time_spec", False))
     if value.get("time_spec") is not None:
         metadata.time_spec = _construct(value["time_spec"])
+    metadata.start_of_burst = bool(value.get("start_of_burst", False))
     metadata.end_of_burst = bool(value.get("end_of_burst", False))
     return metadata
 
@@ -341,10 +382,143 @@ class UsrpSchema(DeviceSchema):
     client_class = "MultiUSRP"
     client_objects = _uhd_client_objects()
     driver_version = "0.0.1"
+    session_scoped = True
+
+    def __init__(self):
+        super().__init__()
+        self._inventory = {}
+        self._legacy_device = False
 
     @staticmethod
     def make_device(**kwargs):
         return _connect_usrp(**kwargs)
+
+    def bind_inventory(self, init_kwargs):
+        """Bind stable inventory data without opening USB/UHD at server startup."""
+        self._inventory = dict(init_kwargs or {})
+
+    def open_native_device(self):
+        return _connect_usrp(**self._inventory)
+
+    def create_session_schema(self):
+        """Create an isolated, live adapter for one authenticated reservation."""
+        clone = type(self)()
+        clone.bind_inventory(self._inventory)
+        clone.bind(clone.open_native_device())
+        return clone
+
+    def close_native_device(self):
+        self.call_close_all_streams()
+        device = self.device
+        self.device = None
+        close = getattr(device, "close", None)
+        if callable(close):
+            close()
+
+    def dispatch(self, method_name, args):
+        # V1 compatibility: old clients still work, but share one lazily-opened
+        # adapter exactly as they did before session-scoped inventory support.
+        if self.device is None:
+            self.bind(self.open_native_device())
+            self._legacy_device = True
+        return super().dispatch(method_name, args)
+
+    def get_idl_v2(self):
+        return build_usrp_schema_v2(self.driver_version)
+
+    def invoke_native(self, method_name, args, positional_args=None):
+        """Invoke a pinned UHD member while reconstructing tagged value inputs."""
+        if self.device is None:
+            raise RuntimeError("USRP session is not open")
+        target = getattr(self.device, method_name)
+        positional = [_construct(item) for item in (positional_args or ())]
+        keywords = {str(key): _construct(item) for key, item in dict(args or {}).items()}
+        return target(*positional, **keywords)
+
+    @staticmethod
+    def _version_value(*names):
+        for name in names:
+            value = getattr(uhd, name, None)
+            if callable(value):
+                try:
+                    return str(value())
+                except Exception:
+                    continue
+            if value:
+                return str(value)
+        return ""
+
+    def get_capabilities_v2(self, *, policy_restrictions=None):
+        device = self.device
+        if device is None:
+            raise RuntimeError("USRP session is not open")
+
+        def call(name, *args, default=None):
+            fn = getattr(device, name, None)
+            if not callable(fn):
+                return default
+            try:
+                return fn(*args)
+            except Exception:
+                return default
+
+        rx_count = int(call("get_rx_num_channels", default=0) or 0)
+        tx_count = int(call("get_tx_num_channels", default=0) or 0)
+        rx_info = call("get_usrp_rx_info", 0, default={}) if rx_count else {}
+        tx_info = call("get_usrp_tx_info", 0, default={}) if tx_count else {}
+        info = dict(rx_info or {})
+        info.update(dict(tx_info or {}))
+        product = (
+            info.get("mboard_name")
+            or info.get("mboard_id")
+            or call("get_mboard_name", 0, default="")
+        )
+        product_text = str(product or "")
+        product_lower = product_text.lower()
+        hardware_profile = (
+            "usrp2901"
+            if "2901" in product_lower or "ni usrp" in product_lower
+            else "b200"
+        )
+        serial = (
+            self._inventory.get("serial")
+            or info.get("mboard_serial")
+            or info.get("serial")
+            or ""
+        )
+
+        def ranges(method_name, count):
+            return [call(method_name, chan, default=None) for chan in range(count)]
+
+        return {
+            "remote_device_type": "usrp",
+            "hardware_profile": hardware_profile,
+            "native_product": product_text,
+            "native_serial": str(serial),
+            "uhd_version": self._version_value("get_version_string", "get_version"),
+            "uhd_abi": self._version_value("get_abi_string", "get_abi"),
+            "fpga_image": info.get("fpga_version", ""),
+            "transport_type": "usb",
+            "usb_speed": info.get("usb_version", info.get("usb_speed", "")),
+            "rx_channel_count": rx_count,
+            "tx_channel_count": tx_count,
+            "rx_frequency_ranges_per_channel": ranges("get_rx_freq_range", rx_count),
+            "tx_frequency_ranges_per_channel": ranges("get_tx_freq_range", tx_count),
+            "rx_gain_ranges_per_channel": ranges("get_rx_gain_range", rx_count),
+            "tx_gain_ranges_per_channel": ranges("get_tx_gain_range", tx_count),
+            "rx_bandwidth_ranges_per_channel": ranges("get_rx_bandwidth_range", rx_count),
+            "tx_bandwidth_ranges_per_channel": ranges("get_tx_bandwidth_range", tx_count),
+            "master_clock_rate_range": call("get_master_clock_rate_range", default=None),
+            "time_sources": call("get_time_sources", 0, default=[]),
+            "clock_sources": call("get_clock_sources", 0, default=[]),
+            "gpio_banks": call("get_gpio_banks", 0, default=[]),
+            "sensors": call("get_mboard_sensor_names", 0, default=[]),
+            "supported_cpu_formats": ["fc32", "fc64", "sc16"],
+            "supported_otw_formats": ["sc16", "sc12", "sc8"],
+            "maximum_remote_payload_bytes": 4 * 1024 * 1024,
+            "supported_streaming_protocol_versions": ["1.0"],
+            "policy_restrictions": dict(policy_restrictions or {}),
+        }
 
     def _streamers(self):
         if not hasattr(self, "_usrp_streamers"):

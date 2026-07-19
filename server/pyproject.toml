@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "remoteRF-server"
 version = "1.0.2"
 description = "RemoteRF server-side control package"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
-  "grpcio",
-  "protobuf",
+  "grpcio>=1.78.1,<2.0.0",
+  "protobuf>=6.31.1,<7.0.0",
   "numpy",
   "prompt_toolkit",
   "python-dotenv",

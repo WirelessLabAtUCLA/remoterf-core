@@ -33,6 +33,7 @@ import contextlib
 from ..common.grpc import *
 from .reservation import reservation_handler
 from .rpc_manager import rpc_manager
+from .dynamic_v2 import DynamicControlV2Servicer, SampleDataV1Servicer
 from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
@@ -150,6 +151,12 @@ def serve():
     
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
+    grpc_pb2_grpc.add_DynamicControlV2Servicer_to_server(
+        DynamicControlV2Servicer(), server
+    )
+    grpc_pb2_grpc.add_SampleDataV1Servicer_to_server(
+        SampleDataV1Servicer(), server
+    )
 
     # For generating server credentials for secure connections
     
@@ -238,7 +245,7 @@ def serve():
 def update_devices():
     while True:
         reservation_handler.update_devices()
-        time.sleep(60)
+        time.sleep(1)
         
 threading.Thread(target=serve, daemon=True).start()
 threading.Thread(target=update_devices, daemon=True).start()
@@ -367,6 +374,7 @@ def set_acc():
                         if inpu2 == 'c' or inpu2 == 'e':
                             break
                         reservation_handler.remove_reservation(res_id=int(inpu2))
+                        reservation_handler.update_devices()
                         printf(f"Reservation {inpu2} removed.", Sty.GREEN)
                         break
                     except Exception as e:
