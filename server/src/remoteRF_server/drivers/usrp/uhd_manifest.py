@@ -135,11 +135,6 @@ HANDLE_METHOD_RETURN_TYPES = {
     ("uhd.property.dboard_iface", "get_desired"): "uhd.usrp.dboard_iface",
 }
 
-LOW_LEVEL_WRITES = {
-    "set_gpio_attr", "set_gpio_src", "set_user_register",
-    "set_rx_filter", "set_tx_filter",
-}
-
 USRP2901_UNSUPPORTED_HANDLE_TYPES = {
     "uhd.usrp.radio_control",
     "uhd.usrp.mboard_controller",
@@ -1305,7 +1300,7 @@ def _objects() -> list[dict]:
             "uhd.property_tree",
             kind="remote_handle",
             mutability="remote_handle",
-            ownership={"scope": "session", "default_access": "read_only"},
+            ownership={"scope": "session", "default_access": "read_write"},
         ),
         *[
             object_type(
@@ -1315,7 +1310,7 @@ def _objects() -> list[dict]:
                 ownership={
                     "scope": "session",
                     "parent": "uhd.property_tree",
-                    "default_access": "read_only",
+                    "default_access": "read_write",
                 },
             )
             for suffix in (
@@ -1331,25 +1326,25 @@ def _objects() -> list[dict]:
             "uhd.usrp.radio_control",
             kind="remote_handle",
             mutability="remote_handle",
-            ownership={"scope": "session", "default_access": "read_only"},
+            ownership={"scope": "session", "default_access": "read_write"},
         ),
         object_type(
             "uhd.usrp.mboard_controller",
             kind="remote_handle",
             mutability="remote_handle",
-            ownership={"scope": "session", "default_access": "read_only"},
+            ownership={"scope": "session", "default_access": "read_write"},
         ),
         object_type(
             "uhd.usrp.dboard_iface",
             kind="remote_handle",
             mutability="remote_handle",
-            ownership={"scope": "session", "default_access": "read_only"},
+            ownership={"scope": "session", "default_access": "read_write"},
         ),
         object_type(
             "uhd.usrp.user_settings_iface",
             kind="remote_handle",
             mutability="remote_handle",
-            ownership={"scope": "session", "default_access": "read_only"},
+            ownership={"scope": "session", "default_access": "read_write"},
         ),
     ]
 
@@ -1415,7 +1410,6 @@ def _streamer_methods() -> list[dict]:
                 )
             ],
             execution="sample_stream",
-            policy="tx_samples",
         ),
         method(
             "recv_async_msg", "uhd.usrp.TXStreamer",
@@ -1514,7 +1508,6 @@ def _property_tree_methods() -> list[dict]:
                         )
                     ],
                     execution="server_handle",
-                    policy="low_level_write",
                 )
             )
     return methods
@@ -1531,13 +1524,13 @@ CAPABILITY_FIELDS = (
     "tx_bandwidth_ranges_per_channel", "master_clock_rate_range", "time_sources",
     "clock_sources", "gpio_banks", "sensors", "supported_cpu_formats",
     "supported_otw_formats", "maximum_remote_payload_bytes",
-    "supported_streaming_protocol_versions", "policy_restrictions",
+    "supported_streaming_protocol_versions",
     "remote_resource_limits", "advanced_interfaces",
 )
 
 ERRORS = (
     "RemoteRFTransportError", "RemoteRFSessionExpiredError",
-    "RemoteRFReservationError", "RemoteRFPolicyError",
+    "RemoteRFReservationError",
     "RemoteRFStaleHandleError", "RemoteRFProtocolError",
     "RemoteRFOverloadError",
     "RemoteRFServerOverloadedError", "RemoteRFNativeUHDError",
@@ -1558,15 +1551,6 @@ def build_usrp_schema_v2(driver_version: str = "0.0.1") -> dict:
     coverage: dict[str, str] = {}
     for name in MULTIUSRP_METHODS:
         execution = "server_optimized" if name in {"recv_num_samps", "send_waveform"} else "server_control"
-        policy = None
-        if (
-            name.startswith("set_tx_")
-            or name == "set_normalized_tx_gain"
-            or name == "send_waveform"
-        ):
-            policy = "tx_control"
-        elif name in LOW_LEVEL_WRITES:
-            policy = "low_level_write"
         availability = {"runtime_member": name}
         if name in OPTIONAL_METHODS:
             availability["optional"] = True
@@ -1577,7 +1561,6 @@ def build_usrp_schema_v2(driver_version: str = "0.0.1") -> dict:
                 signatures.get(name, _fallback_overload()),
                 execution=execution,
                 availability=availability,
-                policy=policy,
             )
         )
         coverage[f"uhd.usrp.MultiUSRP.{name}"] = (

@@ -29,7 +29,6 @@ from remoteRF_server.server.dynamic_v2 import (
 )
 from remoteRF_server.server.v2_errors import (
     RemoteRFOverloadError,
-    RemoteRFPolicyError,
     RemoteRFProtocolError,
     RemoteRFServerOverloadedError,
     RemoteRFSessionExpiredError,
@@ -241,76 +240,19 @@ class DynamicV2ServerTests(unittest.TestCase):
         )
         self.assertEqual(rejected.error.code, "RemoteRFProtocolError")
 
-    def test_policy_denies_tx_by_default_and_enforces_configured_limits(self):
-        denied = USRPPolicy({})
-        with self.assertRaises(RemoteRFPolicyError):
-            denied.check_control("set_tx_freq", {"tune_request": 915e6})
-        with self.assertRaises(RemoteRFPolicyError):
-            denied.check_control("set_normalized_tx_gain", {"gain": 0.1})
-        with self.assertRaises(RemoteRFPolicyError):
-            denied.check_control("set_gpio_attr", {})
-
-        policy = USRPPolicy(
-            {
-                "tx_enabled": True,
-                "tx_frequency_ranges_hz": [[900e6, 930e6]],
-                "max_tx_gain_db": 20,
-                "max_tx_sample_rate_sps": 2e6,
-                "max_burst_seconds": 1.0,
-                "max_duty_cycle": 0.1,
-                "duty_cycle_window_seconds": 60,
-            }
-        )
-        policy.check_control("set_tx_freq", {"tune_request": 915e6})
-        policy.check_control("set_tx_gain", {"gain": 19})
-        with self.assertRaises(RemoteRFPolicyError):
-            policy.check_control("set_tx_freq", {"tune_request": 2.4e9})
-        with self.assertRaises(RemoteRFPolicyError):
-            policy.check_control("set_tx_gain", {"gain": 21})
-
-        normalized = USRPPolicy(
-            {
-                "tx_enabled": True,
-                "max_tx_normalized_gain": 0.5,
-            }
-        )
-        normalized.check_control("set_normalized_tx_gain", {"gain": 0.5})
-        with self.assertRaises(RemoteRFPolicyError):
-            normalized.check_control("set_normalized_tx_gain", {"gain": 0.6})
-
-        low_level = USRPPolicy(
-            {
-                "low_level_write_enabled": True,
-                "low_level_write_methods": ["set_gpio_attr", "set"],
-                "gpio_write_masks": {"FP0": 0x03},
-                "property_write_paths": ["/mboards/0/user"],
-            }
-        )
-        low_level.check_control(
-            "set_gpio_attr",
-            {"bank": "FP0", "mask": 0x03},
-        )
-        with self.assertRaises(RemoteRFPolicyError):
-            low_level.check_control(
-                "set_gpio_attr",
-                {"bank": "FP0", "mask": 0x04},
-            )
-        with self.assertRaises(RemoteRFPolicyError):
-            low_level.check_control(
-                "set_gpio_attr",
-                {"bank": "FP0"},
-            )
-        low_level.check_handle_call(
+    def test_policy_compatibility_shim_allows_all_operations(self):
+        policy = USRPPolicy({"tx_enabled": False, "max_tx_gain_db": 0})
+        self.assertTrue(policy.tx_enabled)
+        self.assertEqual(policy.restrictions, {})
+        policy.check_control("set_tx_freq", {"tune_request": 2.4e9})
+        policy.check_control("set_tx_gain", {"gain": 100})
+        policy.check_control("set_gpio_attr", {"bank": "FP0", "mask": 0xFFFFFFFF})
+        policy.check_tx_duration(3600)
+        policy.check_handle_call(
             "uhd.property_tree",
             "set",
-            {"__args__": ["/mboards/0/user/value", 1]},
+            {"__args__": ["/mboards/0/unsafe", 1]},
         )
-        with self.assertRaises(RemoteRFPolicyError):
-            low_level.check_handle_call(
-                "uhd.property_tree",
-                "set",
-                {"__args__": ["/mboards/0/unsafe", 1]},
-            )
 
     def test_sessions_use_opaque_typed_generation_checked_handles(self):
         inventory = FakeInventorySchema()
@@ -344,6 +286,20 @@ class DynamicV2ServerTests(unittest.TestCase):
             self.assertTrue(session.session_id.startswith("sess_"))
             self.assertTrue(session.root_handle.startswith("dev_"))
             self.assertNotIn("rx:1", session.root_handle)
+            manager.invoke(
+                session.session_id,
+                session.root_handle,
+                "set_tx_freq",
+                {"tune_request": 2.4e9},
+                overload_id="default",
+            )
+            manager.invoke(
+                session.session_id,
+                session.root_handle,
+                "set_gpio_attr",
+                {"bank": "FP0", "attr": "OUT", "value": 1},
+                overload_id="default",
+            )
             result, _ = manager.invoke(
                 session.session_id,
                 session.root_handle,
@@ -413,15 +369,22 @@ class DynamicV2ServerTests(unittest.TestCase):
                 overload_id="default",
             )
             self.assertEqual(value, 3)
-            with self.assertRaises(RemoteRFPolicyError):
-                manager.invoke(
-                    session.session_id,
-                    prop["__remoterf_handle__"],
-                    "set",
-                    {},
-                    positional_args=[4],
-                    overload_id="default",
-                )
+            manager.invoke(
+                session.session_id,
+                prop["__remoterf_handle__"],
+                "set",
+                {},
+                positional_args=[4],
+                overload_id="default",
+            )
+            updated, _ = manager.invoke(
+                session.session_id,
+                prop["__remoterf_handle__"],
+                "get",
+                {},
+                overload_id="default",
+            )
+            self.assertEqual(updated, 4)
             with self.assertRaises(RemoteRFProtocolError):
                 manager.invoke(
                     session.session_id,

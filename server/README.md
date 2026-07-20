@@ -314,36 +314,10 @@ devices:
       serial: 31A2B3C
 ```
 
-Transmit is denied if `~/.config/remoterf/usrp_policy.yml` is missing,
-unreadable, invalid, or does not explicitly enable and bound the requested
-operation. Low-level writes are also denied unless both globally enabled and
-method/path/address allowlisted. A starting policy looks like:
-
-```yaml
-defaults:
-  tx_enabled: false
-  low_level_write_enabled: false
-
-devices:
-  "31A2B3C":
-    tx_enabled: true
-    tx_frequency_ranges_hz:
-      - [902000000, 928000000]
-    max_tx_gain_db: 20
-    max_tx_normalized_gain: 0.5
-    max_tx_power_dbm: -10
-    max_tx_bandwidth_hz: 2000000
-    max_tx_sample_rate_sps: 2000000
-    allowed_tx_antennas: [TX/RX]
-    max_burst_seconds: 1.0
-    max_duty_cycle: 0.1
-    duty_cycle_window_seconds: 60
-    low_level_write_enabled: false
-    low_level_write_methods: []
-    gpio_write_masks: {}
-    property_write_paths: []
-    register_write_addresses: []
-```
+All USRP operations exposed by the Dynamic v2 schema are available without a
+separate policy file. This includes transmit controls, transmit streaming,
+GPIO/register methods, and property-tree writes. `usrp_policy.yml` is not read
+or required by the current server.
 
 On every qualified target, generate the introspection record and enforce the
 pinned API gate:

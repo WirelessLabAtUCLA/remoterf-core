@@ -518,7 +518,7 @@ class UsrpSchema(DeviceSchema):
                 return str(value)
         return ""
 
-    def get_capabilities_v2(self, *, policy_restrictions=None):
+    def get_capabilities_v2(self):
         device = self.device
         if device is None:
             raise RuntimeError("USRP session is not open")
@@ -615,7 +615,6 @@ class UsrpSchema(DeviceSchema):
             },
             "maximum_remote_payload_bytes": 4 * 1024 * 1024,
             "supported_streaming_protocol_versions": ["1.0"],
-            "policy_restrictions": dict(policy_restrictions or {}),
         }
 
     def _streamers(self):

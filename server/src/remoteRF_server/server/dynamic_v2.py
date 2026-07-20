@@ -23,6 +23,8 @@ from ..common.idl.v2 import (
     SCHEMA_VERSION,
     STREAMING_PROTOCOL_VERSION,
 )
+# Retained as a module attribute for integrations that patched the former
+# policy loader. Runtime access is no longer gated by it.
 from ..drivers.usrp.policy import USRPPolicy
 from ..drivers.usrp.uhd_manifest import (
     HANDLE_METHOD_RETURN_TYPES,
@@ -39,7 +41,6 @@ from .device_manager import (
 from .v2_errors import (
     RemoteRFNativeUHDError,
     RemoteRFOverloadError,
-    RemoteRFPolicyError,
     RemoteRFProtocolError,
     RemoteRFReservationError,
     RemoteRFServerOverloadedError,
@@ -466,7 +467,6 @@ class DeviceSession:
     gid: int
     schema: Any
     schema_v2: dict
-    policy: USRPPolicy
     root_handle: str
     capabilities: dict
     handles: dict[str, HandleEntry] = field(default_factory=dict)
@@ -569,10 +569,7 @@ class SessionManager:
                     "the USRP is already open through a legacy v1 session"
                 )
             live_schema = create()
-            policy = USRPPolicy.load(gid=gid, serial=context.get("ident", ""))
-            capabilities = live_schema.get_capabilities_v2(
-                policy_restrictions=policy.restrictions
-            )
+            capabilities = live_schema.get_capabilities_v2()
             capabilities["remote_resource_limits"] = {
                 "maximum_sessions": _MAX_SESSIONS,
                 "maximum_handles_per_session": _MAX_HANDLES_PER_SESSION,
@@ -601,7 +598,6 @@ class SessionManager:
             gid=gid,
             schema=live_schema,
             schema_v2=schema_v2,
-            policy=policy,
             root_handle=root_handle,
             capabilities=capabilities,
         )
@@ -865,10 +861,6 @@ class SessionManager:
                 args,
                 positional_args,
             )
-            policy_args = dict(args)
-            if positional_args:
-                policy_args["__args__"] = positional_args
-            session.policy.check_control(method_name, policy_args)
             native_args = {
                 key: self._resolve_handle_argument(session, value)
                 for key, value in args.items()
@@ -884,7 +876,7 @@ class SessionManager:
                         native_args,
                         positional_args=native_positional,
                     )
-                except (RemoteRFPolicyError, RemoteRFProtocolError):
+                except RemoteRFProtocolError:
                     raise
                 except Exception as exc:
                     raise RemoteRFNativeUHDError(
@@ -953,15 +945,6 @@ class SessionManager:
             except queue.Empty:
                 return (False if mutate_metadata else None), mutations
 
-        if not entry.type_id.endswith(("RXStreamer", "TXStreamer")):
-            policy_args = dict(args)
-            if positional_args:
-                policy_args["__args__"] = positional_args
-            session.policy.check_handle_call(
-                entry.type_id,
-                method_name,
-                policy_args,
-            )
         target = getattr(entry.value, method_name, None)
         if not callable(target):
             raise RemoteRFProtocolError(
@@ -1413,19 +1396,6 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                     ):
                         if not entry.type_id.endswith("TXStreamer"):
                             raise RemoteRFStaleHandleError("TX data used a non-TX handle")
-                        channels = entry.stream_channels or [0]
-                        rates = []
-                        get_rate = getattr(session.schema.device, "get_tx_rate", None)
-                        if callable(get_rate):
-                            for channel in channels:
-                                rates.append(float(get_rate(channel)))
-                        if not rates or min(rates) <= 0:
-                            raise RemoteRFPolicyError(
-                                "TX sample rate is unavailable for duty-cycle enforcement"
-                            )
-                        session.policy.check_tx_duration(
-                            float(request.sample_count) / min(rates)
-                        )
                         if len(request.payload) != byte_count:
                             raise RemoteRFProtocolError(
                                 "TX payload byte length does not match dtype/shape"
