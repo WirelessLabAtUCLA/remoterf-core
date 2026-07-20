@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import hashlib
 import time
 import yaml
 import threading
@@ -419,10 +420,60 @@ def _driver_registers_type(path: Path, device_type: str) -> bool:
     pattern = rf"(?:idl_register|register_driver)\(\s*['\"]{re.escape(device_type)}['\"]\s*\)"
     return re.search(pattern, text) is not None
 
-def _seed_default_driver(filename: str, *device_types: str) -> None:
+def _driver_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _managed_driver_marker(target: Path) -> Path:
+    return target.with_name(f".{target.name}.remoterf-managed")
+
+
+def _refresh_managed_driver(
+    target: Path,
+    source: Path,
+    *,
+    legacy_hashes: tuple[str, ...] = (),
+) -> bool:
+    """Refresh an unmodified RemoteRF-managed schema and preserve user edits."""
+    marker = _managed_driver_marker(target)
+    try:
+        target_hash = _driver_sha256(target)
+        marker_hash = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+    except OSError:
+        return False
+
+    if target_hash != marker_hash and target_hash not in legacy_hashes:
+        return False
+
+    try:
+        source_hash = _driver_sha256(source)
+        if target_hash != source_hash:
+            shutil.copy2(source, target)
+        marker.write_text(source_hash + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _seed_default_driver(
+    filename: str,
+    *device_types: str,
+    legacy_hashes: tuple[str, ...] = (),
+) -> None:
     drivers_dir = get_drivers_dir()
     target = drivers_dir / filename
+    source = _packaged_driver_schema_path(filename)
     if target.exists() or target.is_symlink():
+        if target.is_file() and source.exists():
+            _refresh_managed_driver(
+                target,
+                source,
+                legacy_hashes=legacy_hashes,
+            )
         return
 
     try:
@@ -437,13 +488,16 @@ def _seed_default_driver(filename: str, *device_types: str) -> None:
         if any(_driver_registers_type(driver_file, device_type) for device_type in device_types):
             return
 
-    source = _packaged_driver_schema_path(filename)
     if not source.exists():
         print(f"Warning: default driver schema source is missing: {source}")
         return
 
     try:
         shutil.copy2(source, target)
+        _managed_driver_marker(target).write_text(
+            _driver_sha256(source) + "\n",
+            encoding="utf-8",
+        )
         print(f"Created default driver config at {target}")
     except OSError as e:
         print(f"Warning: could not create default driver config {target}: {e}")
@@ -453,7 +507,19 @@ def _seed_default_pluto_drivers() -> None:
     _seed_default_driver("pluto_mimo_schema.py", "adalm_pluto_mimo")
 
 def _seed_default_usrp_driver() -> None:
-    _seed_default_driver("usrp_schema.py", "usrp")
+    _seed_default_driver(
+        "usrp_schema.py",
+        "usrp",
+        legacy_hashes=(
+            # Previously shipped built-in copies. These are safe to refresh;
+            # any edited/custom schema has a different digest and is preserved.
+            "ec30aaadb1e8edec289de01e4f997aa3c8b59d3fd0a69c5ac94b37b05dac7a65",
+            "baf29cd0f22e84891b546c30c963cddb02bc93db0efb50fe32cc743c8600c227",
+            "01360d017359d6cb65761b78b5c2bb570b8f2f55e8ab280ba23d6813deddb233",
+            "ca32b958759a5f7933e10426a320ca74e7546734524749ea510de83cf5084397",
+            "0d185cd24571bae2d5f75d6c28164694918a86b20854b96fe9b77c475ca28ed1",
+        ),
+    )
 
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()

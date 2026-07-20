@@ -337,6 +337,16 @@ def _serve(*, headless: bool = False) -> int:
     if not _ensure_tos_acknowledged():
         return 1
 
+    # UHD writes native log messages to stderr/std::clog. Set this before the
+    # server imports device drivers so those messages cannot corrupt the
+    # interactive prompt. RemoteRF keeps this off even when the surrounding
+    # shell has a noisy UHD default; diagnostics require an explicit RemoteRF
+    # opt-in.
+    os.environ["UHD_LOG_CONSOLE_LEVEL"] = os.getenv(
+        "REMOTERF_UHD_CONSOLE_LEVEL",
+        "off",
+    )
+
     from remoteRF_server.server.grpc_server import (
         headless_main,
         main as interactive_main,

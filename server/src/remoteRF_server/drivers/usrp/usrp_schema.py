@@ -6,6 +6,18 @@ from remoteRF_server.drivers.usrp.uhd_manifest import build_usrp_schema_v2
 c = idl_client
 
 import itertools
+import os
+
+
+def _configure_uhd_console_logging():
+    """Keep native UHD logs out of the interactive server console by default."""
+    os.environ["UHD_LOG_CONSOLE_LEVEL"] = os.getenv(
+        "REMOTERF_UHD_CONSOLE_LEVEL",
+        "off",
+    )
+
+
+_configure_uhd_console_logging()
 
 try:
     import uhd
@@ -77,7 +89,6 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
 
     args = _device_args(args)
     dev = uhd_module.usrp.MultiUSRP(args)
-    print(f"Connected to USRP with args={args!r}")
     return dev
 
 

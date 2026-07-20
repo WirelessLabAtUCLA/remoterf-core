@@ -319,6 +319,15 @@ separate policy file. This includes transmit controls, transmit streaming,
 GPIO/register methods, and property-tree writes. `usrp_policy.yml` is not read
 or required by the current server.
 
+RemoteRF forces `UHD_LOG_CONSOLE_LEVEL=off` before importing UHD so native UHD
+messages do not overwrite the interactive `serverrf` prompt. To temporarily
+restore UHD diagnostics, explicitly set `REMOTERF_UHD_CONSOLE_LEVEL` to a level
+such as `warning`, `info`, or `debug` before starting the server:
+
+```bash
+REMOTERF_UHD_CONSOLE_LEVEL=warning serverrf -s
+```
+
 On every qualified target, generate the introspection record and enforce the
 pinned API gate:
 

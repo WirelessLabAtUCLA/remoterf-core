@@ -14,6 +14,7 @@ from remoteRF_server.common.grpc import grpc_pb2
 from remoteRF_server.common.grpc.v2_codec import decode_value, encode_value
 from remoteRF_server.common.idl.v2 import validate_schema
 from remoteRF_server.drivers.usrp.policy import USRPPolicy
+from remoteRF_server.drivers.usrp.usrp_schema import _configure_uhd_console_logging
 from remoteRF_server.drivers.usrp.uhd_manifest import (
     MULTIUSRP_METHODS,
     TARGET_UHD_VERSION,
@@ -138,6 +139,23 @@ class FakeInventorySchema:
 
 
 class DynamicV2ServerTests(unittest.TestCase):
+    def test_usrp_console_logging_is_forced_off_without_remoterf_opt_in(self):
+        with patch.dict(
+            os.environ,
+            {"UHD_LOG_CONSOLE_LEVEL": "debug"},
+            clear=True,
+        ):
+            _configure_uhd_console_logging()
+            self.assertEqual(os.environ["UHD_LOG_CONSOLE_LEVEL"], "off")
+
+        with patch.dict(
+            os.environ,
+            {"REMOTERF_UHD_CONSOLE_LEVEL": "warning"},
+            clear=True,
+        ):
+            _configure_uhd_console_logging()
+            self.assertEqual(os.environ["UHD_LOG_CONSOLE_LEVEL"], "warning")
+
     def test_usrp2901_manifest_is_valid_and_has_no_deferred_reachable_api(self):
         schema = build_usrp_schema_v2()
         validate_schema(schema)
