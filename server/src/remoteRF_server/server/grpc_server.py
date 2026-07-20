@@ -214,6 +214,18 @@ def _load_server_credentials(cert_dir: Path):
     )
 
 
+def _print_tls_credentials_error(cert_dir: Path, error: Exception) -> None:
+    messages = (
+        "TLS certs/keys not found or unreadable.",
+        f"Expected in: {cert_dir}",
+        f"Fix: run serverrf --gen-certs {local_ip} --force",
+        "Or set REMOTERF_CERT_DIR to your cert folder.",
+        f"Details: {error}",
+    )
+    for message in messages:
+        printf(message, Sty.MAGENTA)
+
+
 def start_server_runtime(
     *,
     bind_host: str | None = None,
@@ -258,11 +270,7 @@ def start_server_runtime(
     try:
         server_credentials = _load_server_credentials(cert_dir)
     except Exception as e:
-        printf("TLS certs/keys not found or unreadable.", Sty.RED)
-        printf("Expected in: ", Sty.DEFAULT, f"{cert_dir}", Sty.MAGENTA)
-        printf("Fix: run ", Sty.DEFAULT, "RRRFcerts --ip ", Sty.GREEN, f"{local_ip}", Sty.MAGENTA, " --force", Sty.DEFAULT)
-        printf("Or set REMOTERF_CERT_DIR to your cert folder.", Sty.GRAY)
-        print(f"\nDetails: {e}\n", file=sys.stderr)
+        _print_tls_credentials_error(cert_dir, e)
         raise SystemExit(2)
 
     if include_host_tunnel:

@@ -135,7 +135,7 @@ def _server_env_path() -> Path:
 
 
 def _devices_env_path() -> Path:
-    # Legacy mirror retained for older tooling.
+    # Read-only migration source for pre-YAML installations.
     return _cfg_dir() / "devices.env"
 
 
@@ -156,11 +156,11 @@ def _gen_certs_path() -> Path:
     return (_repo_root() / "tools" / "gen_certs.py").resolve()
 
 def _gist_env_path() -> Path:
-    # Stored alongside server.env/devices.env under ~/.config/remoterf by default
+    # Stored alongside server.env/devices.yml under ~/.config/remoterf by default
     return _cfg_dir() / "gist.env"
 
 def _tos_ack_path() -> Path:
-    # Stored alongside server.env/devices.env under ~/.config/remoterf by default
+    # Stored alongside server.env/devices.yml under ~/.config/remoterf by default
     return _cfg_dir() / "tos.env"
 
 
@@ -262,6 +262,7 @@ def print_help() -> None:
         "\n"
         "Devices:\n"
         "  serverrf -d | --device [options]\n"
+        "  Inventory: ~/.config/remoterf/devices.yml (canonical YAML)\n"
         "\n"
         "Device options:\n"
         "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
@@ -811,7 +812,11 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
                 recs[gid] = {
                     "TYPE": dtype,
                     "NAME": str(item.get("name") or f"device-{gid}").strip(),
-                    "IDENT_KIND": "iio_serial" if dtype == "pluto" else "serial",
+                    "IDENT_KIND": (
+                        "iio_serial"
+                        if dtype in {"pluto", "adalm_pluto"}
+                        else "serial"
+                    ),
                     "IDENT": ident,
                     "INIT": dict(init),
                 }
@@ -833,7 +838,6 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
 
 def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
     devices: List[Dict[str, Any]] = []
-    out: Dict[str, str] = {}
     for gid in sorted(recs.keys()):
         fields = recs[gid]
         dtype = str(fields.get("TYPE") or "").strip().lower()
@@ -852,22 +856,14 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
                 "init": init,
             }
         )
-        order = ["TYPE", "NAME", "IDENT_KIND", "IDENT"]
-        for f in order:
-            if f in fields and fields[f] != "":
-                out[f"DEVICE_{gid}_{f}"] = str(fields[f])
-        for f in sorted(fields.keys()):
-            if f in order or f == "INIT":
-                continue
-            if fields[f] != "":
-                out[f"DEVICE_{gid}_{f}"] = str(fields[f])
     _cfg_dir().mkdir(parents=True, exist_ok=True)
     _devices_yaml_path().write_text(
         yaml.safe_dump({"devices": devices}, sort_keys=False),
         encoding="utf-8",
     )
-    # Maintain the original env representation for older CLI consumers.
-    _write_env_kv(_devices_env_path(), out)
+    # Once a legacy inventory has been migrated successfully, remove it so
+    # there is exactly one authoritative device manifest.
+    _devices_env_path().unlink(missing_ok=True)
 
 
 def _device_add_pluto(spec: str) -> int:
@@ -894,14 +890,14 @@ def _device_add_pluto(spec: str) -> int:
             return 2
 
     recs[gid] = {
-        "TYPE": "pluto",
+        "TYPE": "adalm_pluto",
         "NAME": name,
         "IDENT_KIND": "iio_serial",
         "IDENT": iio_serial,
     }
     _write_device_records(recs)
 
-    print(f"Added device: {gid} type=pluto name={name} iio_serial={iio_serial}")
+    print(f"Added device: {gid} type=adalm_pluto name={name} iio_serial={iio_serial}")
     return 0
 
 

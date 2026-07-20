@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import yaml
 
 from remoteRF_server import serverrf_cli
 from remoteRF_server.common.grpc import grpc_pb2
@@ -875,7 +876,7 @@ class DynamicV2ServerTests(unittest.TestCase):
                 entry.active_operation = ""
             manager.close_all()
 
-    def test_usrp_cli_writes_runtime_yaml_inventory_and_legacy_mirror(self):
+    def test_usrp_cli_writes_only_canonical_yaml_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
                 os.environ,
@@ -894,7 +895,72 @@ class DynamicV2ServerTests(unittest.TestCase):
                 records = serverrf_cli._read_device_records()
                 self.assertEqual(records[7]["TYPE"], "usrp")
                 self.assertEqual(records[7]["IDENT"], "31A2B3C")
-                self.assertTrue(Path(tmp, "devices.env").exists())
+                self.assertFalse(Path(tmp, "devices.env").exists())
+
+    def test_pluto_cli_uses_registered_adalm_pluto_device_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"REMOTERF_CONFIG_DIR": tmp},
+                clear=False,
+            ):
+                self.assertEqual(
+                    serverrf_cli._device_add_pluto("1:Pluto A:104473f6"),
+                    0,
+                )
+                inventory = Path(tmp, "devices.yml")
+                text = inventory.read_text(encoding="utf-8")
+                self.assertIn("device_type: adalm_pluto", text)
+                self.assertIn("serial: 104473f6", text)
+                records = serverrf_cli._read_device_records()
+                self.assertEqual(records[1]["TYPE"], "adalm_pluto")
+                self.assertEqual(records[1]["IDENT"], "104473f6")
+                self.assertEqual(records[1]["IDENT_KIND"], "iio_serial")
+                self.assertFalse(Path(tmp, "devices.env").exists())
+
+    def test_device_cli_migrates_legacy_env_inventory_to_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"REMOTERF_CONFIG_DIR": tmp},
+                clear=False,
+            ):
+                Path(tmp, "devices.env").write_text(
+                    "DEVICE_1_TYPE=adalm_pluto\n"
+                    "DEVICE_1_NAME=Pluto A\n"
+                    "DEVICE_1_IDENT_KIND=iio_serial\n"
+                    "DEVICE_1_IDENT=104473f6\n",
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    serverrf_cli._device_add_usrp("7:lab_usrp:31A2B3C"),
+                    0,
+                )
+
+                inventory = yaml.safe_load(
+                    Path(tmp, "devices.yml").read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    inventory,
+                    {
+                        "devices": [
+                            {
+                                "device_id": 1,
+                                "device_type": "adalm_pluto",
+                                "name": "Pluto A",
+                                "init": {"serial": "104473f6"},
+                            },
+                            {
+                                "device_id": 7,
+                                "device_type": "usrp",
+                                "name": "lab_usrp",
+                                "init": {"serial": "31A2B3C"},
+                            },
+                        ]
+                    },
+                )
+                self.assertFalse(Path(tmp, "devices.env").exists())
 
     def test_server_cli_exposes_headless_runtime(self):
         with (

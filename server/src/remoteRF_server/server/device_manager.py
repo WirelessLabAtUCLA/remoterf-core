@@ -314,6 +314,11 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
 def _connect_from_record(rec: Dict[str, Any]):
     """Returns (schema_instance_or_None, ident, dtype)."""
     dtype = (rec.get("TYPE") or "").strip().lower()
+    # Older serverrf builds serialized the --pluto shorthand as "pluto",
+    # while the packaged schema has always registered as "adalm_pluto".
+    # Keep those inventories usable while all new writes use the canonical type.
+    if dtype == "pluto":
+        dtype = "adalm_pluto"
     ident = (rec.get("IDENT") or "").strip()
     init_kwargs = rec.get("INIT") or {}
 
@@ -873,7 +878,7 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
 
 def reload_devices() -> None:
     """
-    Reload devices.env and reconnect local devices.
+    Reload devices.yml and reconnect local devices.
     Preserves existing salt/hash for devices that remain (same gid),
     and preserves host virtual devices + their auth state.
     """

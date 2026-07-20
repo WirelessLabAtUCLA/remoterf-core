@@ -6,7 +6,7 @@ Admin writes one .py per device TYPE, drops it in ~/.config/remoterf/drivers/,
 and the server auto-discovers it on startup via load_drivers().
 
     ~/.config/remoterf/
-        devices.env                 ← "I have 3 plutos at these serials"
+        devices.yml                 ← "I have 3 devices at these serials"
         drivers/
             pluto_schema.py         ← "here's what a pluto IS"
             hackrf_schema.py
@@ -531,7 +531,7 @@ class DeviceSchema:
     Base for all device schemas.  Admin subclasses this once per device type.
 
     Class attributes (admin sets these):
-        device_type      str   — must match the TYPE in devices.env
+        device_type      str   — must match device_type in devices.yml
         driver_version   str   — semver
 
     Admin implements:

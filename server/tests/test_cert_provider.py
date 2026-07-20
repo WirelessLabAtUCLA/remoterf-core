@@ -59,6 +59,30 @@ class CertificateProviderTests(unittest.TestCase):
         self.assertEqual(served, ca_pem)
         self.assertNotEqual(served, leaf_pem)
 
+    def test_missing_tls_guidance_is_visible_and_uses_serverrf(self):
+        from remoteRF_server.server import grpc_server
+
+        cert_dir = Path("/tmp/remoterf-test-certs")
+        error = FileNotFoundError("missing server.key")
+        with patch.object(grpc_server, "printf") as mock_printf:
+            grpc_server._print_tls_credentials_error(cert_dir, error)
+
+        rendered = [call.args for call in mock_printf.call_args_list]
+        self.assertEqual(
+            [message for message, _style in rendered],
+            [
+                "TLS certs/keys not found or unreadable.",
+                f"Expected in: {cert_dir}",
+                f"Fix: run serverrf --gen-certs {grpc_server.local_ip} --force",
+                "Or set REMOTERF_CERT_DIR to your cert folder.",
+                "Details: missing server.key",
+            ],
+        )
+        self.assertTrue(
+            all(style is grpc_server.Sty.MAGENTA for _message, style in rendered)
+        )
+        self.assertNotIn("RRRFcerts", "\n".join(message for message, _style in rendered))
+
 
 if __name__ == "__main__":
     unittest.main()

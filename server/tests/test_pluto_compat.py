@@ -12,6 +12,7 @@ sys.modules.setdefault("adi", types.ModuleType("adi"))
 from remoteRF_server.common.idl.pluto_schema import PlutoSchema
 from remoteRF_server.common.utils import map_arg, unmap_arg
 from remoteRF_server.drivers.adalm_pluto.pluto_remote_server import PlutoServer
+from remoteRF_server.server import device_manager
 
 
 class FakePluto:
@@ -78,6 +79,20 @@ class PlutoCompatTests(unittest.TestCase):
         samples = np.array([9 + 1j, 10 + 2j], dtype=np.complex64)
         self.assertIsNone(schema.dispatch("call_tx", {"value": samples}))
         np.testing.assert_allclose(self.device.tx_samples, samples)
+
+    def test_legacy_pluto_inventory_type_resolves_to_packaged_schema(self) -> None:
+        with patch.object(PlutoSchema, "make_device", return_value=self.device):
+            schema, ident, dtype = device_manager._connect_from_record(
+                {
+                    "TYPE": "pluto",
+                    "IDENT": "104473f6",
+                    "INIT": {"serial": "104473f6"},
+                }
+            )
+
+        self.assertIsInstance(schema, PlutoSchema)
+        self.assertEqual(ident, "104473f6")
+        self.assertEqual(dtype, "adalm_pluto")
 
 
 if __name__ == "__main__":
