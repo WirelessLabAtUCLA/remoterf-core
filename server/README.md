@@ -285,11 +285,16 @@ Note that all device and server config parameters need a 'restart' to take affec
 
 ### NI USRP-2901 / B200-family
 
-Dynamic protocol v2 requires the target server to have the exact supported
-UHD Python API, UHD `4.10.0.0`, installed. The server does not open the device
-while loading inventory. It opens the reservation's exact
-`type=b200,serial=...` device only when the authenticated client opens a v2
-session.
+The server automatically installs and registers its complete USRP v1/v2
+schema on first startup, so clients can discover the API even when UHD is not
+installed locally. Existing custom `usrp` drivers in
+`~/.config/remoterf/drivers/` take precedence over that default.
+
+Opening a real USRP session requires the machine that owns the hardware to
+have the exact supported UHD Python API, UHD `4.10.0.0`, installed. The
+server does not open the device while loading inventory. It opens the
+reservation's exact `type=b200,serial=...` device only when the authenticated
+client opens a v2 session.
 
 Add a serial-bound device:
 
@@ -354,6 +359,21 @@ Hardware differential,
 two-channel/full-duplex, USB 2/3, external clock/PPS, policy-bypass, and
 qualified-LAN performance tests remain mandatory release gates; they cannot
 be completed on a checkout without UHD and a physical NI USRP-2901.
+
+To qualify the actual two-channel RX path through both checkouts on the Linux
+USRP host, run the opt-in localhost client/server test from the server repo:
+
+```bash
+REMOTERF_TEST_USRP_SERIAL=31A2B3C \
+REMOTERF_CLIENT_SRC=../RemoteRF-Client/src \
+python -m unittest discover -s tests \
+  -p test_usrp_client_server_hardware.py -v
+```
+
+This opens the serial-bound device, negotiates the v2 schema over a real
+localhost gRPC socket, configures both RX channels through the client API,
+receives raw binary IQ, restores the prior RX settings, and closes the remote
+stream/session. It is RX-only and does not enable transmit.
 
 Dynamic v2 control and `SampleDataV1.SampleStream` run on the existing TLS
 gRPC channel. IQ samples are carried as bounded raw binary payloads with

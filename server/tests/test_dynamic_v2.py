@@ -196,6 +196,11 @@ class DynamicV2ServerTests(unittest.TestCase):
         self.assertEqual(canonical_uhd_version(packaged), TARGET_UHD_VERSION)
         self.assertTrue(is_supported_uhd_version(packaged))
         self.assertTrue(is_supported_uhd_version("UHD 4.10.0.0-0-gabcdef"))
+        self.assertEqual(
+            canonical_uhd_version("4.10.0.main-release"),
+            TARGET_UHD_VERSION,
+        )
+        self.assertTrue(is_supported_uhd_version("4.10.0.main-release"))
         self.assertFalse(is_supported_uhd_version("4.10.0.1"))
         self.assertFalse(is_supported_uhd_version("4.9.0.0"))
 

@@ -88,6 +88,49 @@ class ClientMetadataSchema(DeviceSchema):
 
 
 class DeviceSchemaTests(unittest.TestCase):
+    def setUp(self):
+        self._missing_module = object()
+        self._uhd_module = sys.modules.get("uhd", self._missing_module)
+        schema_name = "remoteRF_server.drivers.usrp.usrp_schema"
+        self._usrp_schema_module = sys.modules.get(
+            schema_name,
+            self._missing_module,
+        )
+        if self._usrp_schema_module is self._missing_module:
+            self._usrp_schema_uhd = self._missing_module
+        else:
+            self._usrp_schema_uhd = getattr(
+                self._usrp_schema_module,
+                "uhd",
+                self._missing_module,
+            )
+
+    def tearDown(self):
+        if self._uhd_module is self._missing_module:
+            sys.modules.pop("uhd", None)
+        else:
+            sys.modules["uhd"] = self._uhd_module
+
+        schema_name = "remoteRF_server.drivers.usrp.usrp_schema"
+        package = sys.modules.get("remoteRF_server.drivers.usrp")
+        if self._usrp_schema_module is self._missing_module:
+            current = sys.modules.pop(schema_name, None)
+            if (
+                current is not None
+                and package is not None
+                and getattr(package, "usrp_schema", None) is current
+            ):
+                delattr(package, "usrp_schema")
+        else:
+            sys.modules[schema_name] = self._usrp_schema_module
+            if package is not None:
+                package.usrp_schema = self._usrp_schema_module
+            if self._usrp_schema_uhd is self._missing_module:
+                if hasattr(self._usrp_schema_module, "uhd"):
+                    delattr(self._usrp_schema_module, "uhd")
+            else:
+                self._usrp_schema_module.uhd = self._usrp_schema_uhd
+
     def test_client_helper_namespace_matches_explicit_helpers(self):
         self.assertEqual(
             idl_client.ctor("uhd.types.TimeSpec", "$result"),

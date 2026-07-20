@@ -15,11 +15,15 @@ from remoteRF_server.drivers.usrp.uhd_manifest import (
     TARGET_UHD_VERSION,
     is_supported_uhd_version,
 )
-from remoteRF_server.drivers.usrp.usrp_schema import UsrpSchema, _construct
 from remoteRF_server.server.dynamic_v2 import snapshot_native
 
 
 SERIAL = os.getenv("REMOTERF_TEST_USRP_SERIAL", "").strip()
+if SERIAL:
+    from remoteRF_server.drivers.usrp.usrp_schema import UsrpSchema, _construct
+else:
+    UsrpSchema = None
+    _construct = None
 
 
 @unittest.skipUnless(SERIAL, "set REMOTERF_TEST_USRP_SERIAL for hardware tests")

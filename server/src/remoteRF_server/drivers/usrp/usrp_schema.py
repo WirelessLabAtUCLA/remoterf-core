@@ -1,12 +1,19 @@
 # Last edit: Jun 26 16:37
 
 from remoteRF_server.common.idl import DeviceSchema, idl_client, idl_expose, idl_register
-from .uhd_manifest import build_usrp_schema_v2
+from remoteRF_server.drivers.usrp.uhd_manifest import build_usrp_schema_v2
 
 c = idl_client
 
 import itertools
-import uhd
+
+try:
+    import uhd
+except Exception as exc:  # UHD is optional until a configured USRP session opens.
+    uhd = None
+    _UHD_IMPORT_ERROR = exc
+else:
+    _UHD_IMPORT_ERROR = None
 
 
 _STREAM_USAGE = (
@@ -15,6 +22,18 @@ _STREAM_USAGE = (
     "If using the generated client directly, first call get_rx_stream/get_tx_stream "
     "and then pass {'handle': streamer_payload['handle'], ...} to stream_* calls."
 )
+
+
+def _require_uhd():
+    if uhd is None:
+        message = (
+            "USRP support requires the UHD 4.10 Python module on the machine "
+            "that owns the hardware"
+        )
+        if _UHD_IMPORT_ERROR is not None:
+            message += f": {_UHD_IMPORT_ERROR}"
+        raise RuntimeError(message) from _UHD_IMPORT_ERROR
+    return uhd
 
 
 def _looks_like_device_args(value):
@@ -32,6 +51,7 @@ def _device_args(value):
 
 
 def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
+    uhd_module = _require_uhd()
     args = args or kwargs.pop("device_args", None) or kwargs.pop("init_args", None)
 
     if args is None and _looks_like_device_args(serial):
@@ -56,7 +76,7 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
         args = ",".join(parts)
 
     args = _device_args(args)
-    dev = uhd.usrp.MultiUSRP(args)
+    dev = uhd_module.usrp.MultiUSRP(args)
     print(f"Connected to USRP with args={args!r}")
     return dev
 
@@ -114,10 +134,15 @@ def _construct(value):
         elif "spec" in value:
             kind = "SubdevSpec"
         elif "target_freq" in value or "freq" in value:
-            return uhd.libpyuhd.types.tune_request(value.get("target_freq", value.get("freq")))
+            uhd_module = _require_uhd()
+            return uhd_module.libpyuhd.types.tune_request(
+                value.get("target_freq", value.get("freq"))
+            )
 
     if kind is None:
         return value
+
+    _require_uhd()
 
     if kind == "SubdevSpec":
         return uhd.usrp.SubdevSpec(value["spec"])
@@ -264,6 +289,7 @@ def _tx_metadata(value):
     if not isinstance(value, dict):
         return value
 
+    _require_uhd()
     metadata = uhd.types.TXMetadata()
     metadata.has_time_spec = bool(value.get("has_time_spec", False))
     if value.get("time_spec") is not None:
@@ -480,8 +506,9 @@ class UsrpSchema(DeviceSchema):
 
     @staticmethod
     def _version_value(*names):
+        uhd_module = _require_uhd()
         for name in names:
-            value = getattr(uhd, name, None)
+            value = getattr(uhd_module, name, None)
             if callable(value):
                 try:
                     return str(value())
@@ -781,6 +808,7 @@ class UsrpSchema(DeviceSchema):
         handle = _handle(value["handle"], "stream_recv")
         recv_buffer = value["recv_buffer"]
         timeout = value.get("timeout", 0.1)
+        _require_uhd()
         metadata = uhd.types.RXMetadata()
         count = self._get_streamer(handle).recv(
             recv_buffer,

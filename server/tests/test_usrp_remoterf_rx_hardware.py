@@ -10,7 +10,6 @@ import numpy as np
 
 from remoteRF_server.common.grpc import grpc_pb2
 from remoteRF_server.drivers.usrp.policy import USRPPolicy
-from remoteRF_server.drivers.usrp.usrp_schema import UsrpSchema
 from remoteRF_server.server.dynamic_v2 import (
     SampleDataV1Servicer,
     SessionManager,
@@ -18,6 +17,10 @@ from remoteRF_server.server.dynamic_v2 import (
 
 
 SERIAL = os.getenv("REMOTERF_TEST_USRP_SERIAL", "").strip()
+if SERIAL:
+    from remoteRF_server.drivers.usrp.usrp_schema import UsrpSchema
+else:
+    UsrpSchema = None
 
 
 @unittest.skipUnless(SERIAL, "set REMOTERF_TEST_USRP_SERIAL for hardware tests")

@@ -8,7 +8,6 @@ import shutil
 import time
 import yaml
 import threading
-import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Any, List, Iterator
@@ -448,15 +447,8 @@ def _seed_default_pluto_drivers() -> None:
     _seed_default_driver("pluto_schema.py", "adalm_pluto")
     _seed_default_driver("pluto_mimo_schema.py", "adalm_pluto_mimo")
 
-def _module_available(module_name: str) -> bool:
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except (ImportError, ValueError):
-        return False
-
 def _seed_default_usrp_driver() -> None:
-    if _module_available("uhd"):
-        _seed_default_driver("usrp_schema.py", "usrp")
+    _seed_default_driver("usrp_schema.py", "usrp")
 
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
@@ -472,11 +464,10 @@ def _load_all_drivers() -> None:
     except Exception as e:
         print(f"Warning: could not load built-in pluto mimo driver: {e}")
 
-    if _module_available("uhd"):
-        try:
-            from ..drivers.usrp import usrp_schema as _  # noqa: F401
-        except Exception as e:
-            print(f"Warning: could not load built-in usrp driver: {e}")
+    try:
+        from ..drivers.usrp import usrp_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in usrp driver: {e}")
 
     results = load_drivers()
     for fname, status in results.items():
