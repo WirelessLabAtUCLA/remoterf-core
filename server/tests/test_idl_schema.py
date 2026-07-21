@@ -319,6 +319,25 @@ class DeviceSchemaTests(unittest.TestCase):
             def __init__(self, spec):
                 self.spec = spec
 
+        class DeviceAddr:
+            def __init__(self, value=""):
+                self.value = value
+
+        class TuneRequestPolicy:
+            AUTO = object()
+            MANUAL = object()
+            NONE = object()
+
+        class TuneRequest:
+            def __init__(self, target_freq=0.0, lo_offset=None):
+                self.target_freq = float(target_freq)
+                self.lo_offset = lo_offset
+                self.rf_freq = 0.0
+                self.dsp_freq = 0.0
+                self.rf_freq_policy = TuneRequestPolicy.AUTO
+                self.dsp_freq_policy = TuneRequestPolicy.AUTO
+                self.args = DeviceAddr()
+
         class TXMetadata:
             def __init__(self):
                 self.has_time_spec = False
@@ -334,6 +353,9 @@ class DeviceSchemaTests(unittest.TestCase):
 
         fake_uhd.types = types.SimpleNamespace(
             TimeSpec=TimeSpec,
+            DeviceAddr=DeviceAddr,
+            TuneRequest=TuneRequest,
+            TuneRequestPolicy=TuneRequestPolicy,
             TXMetadata=TXMetadata,
             StreamCMD=StreamCMD,
             StreamMode=types.SimpleNamespace(
@@ -403,9 +425,32 @@ class DeviceSchemaTests(unittest.TestCase):
         tune = usrp_schema._construct({
             "__uhd_type__": "TuneRequest",
             "args": [915e6],
-            "kwargs": {"dsp_freq": 0.0},
+            "kwargs": {},
         })
-        self.assertEqual(tune, {"args": (915e6,), "kwargs": {"dsp_freq": 0.0}})
+        self.assertIsInstance(tune, TuneRequest)
+        self.assertEqual(tune.target_freq, 915e6)
+
+        tune = usrp_schema._construct({
+            "__uhd_type__": "TuneRequest",
+            "target_freq": 100e6,
+            "lo_offset": None,
+            "rf_freq": 99e6,
+            "dsp_freq": 1e6,
+            "rf_freq_policy": "MANUAL",
+            "dsp_freq_policy": "AUTO",
+            "args": {
+                "__uhd_type__": "DeviceAddr",
+                "items": {"mode_n": "integer"},
+            },
+        })
+        self.assertIsInstance(tune, TuneRequest)
+        self.assertEqual(tune.target_freq, 100e6)
+        self.assertEqual(tune.rf_freq, 99e6)
+        self.assertEqual(tune.dsp_freq, 1e6)
+        self.assertIs(tune.rf_freq_policy, TuneRequestPolicy.MANUAL)
+        self.assertIs(tune.dsp_freq_policy, TuneRequestPolicy.AUTO)
+        self.assertIsInstance(tune.args, DeviceAddr)
+        self.assertEqual(tune.args.value, "mode_n=integer")
 
         subdev = usrp_schema._construct({"__uhd_type__": "SubdevSpec", "spec": "A:0"})
         self.assertIsInstance(subdev, SubdevSpec)

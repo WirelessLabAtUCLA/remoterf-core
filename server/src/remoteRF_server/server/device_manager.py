@@ -502,8 +502,19 @@ def _seed_default_driver(
     except OSError as e:
         print(f"Warning: could not create default driver config {target}: {e}")
 
+_LEGACY_PLUTO_SCHEMA_HASHES = (
+    # Built-in 0.0.1 schema shipped before managed-driver markers existed.
+    # An exact hash match is safe to upgrade; locally edited copies differ.
+    "a3697eeef55827e0db7705685f8fe64b615468dd26057211de8b5805b9ecf583",
+)
+
+
 def _seed_default_pluto_drivers() -> None:
-    _seed_default_driver("pluto_schema.py", "adalm_pluto")
+    _seed_default_driver(
+        "pluto_schema.py",
+        "adalm_pluto",
+        legacy_hashes=_LEGACY_PLUTO_SCHEMA_HASHES,
+    )
     _seed_default_driver("pluto_mimo_schema.py", "adalm_pluto_mimo")
 
 def _seed_default_usrp_driver() -> None:

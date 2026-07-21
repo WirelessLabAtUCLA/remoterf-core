@@ -173,6 +173,16 @@ class DynamicV2ServerTests(unittest.TestCase):
         self.assertIn("uhd.filters.AnalogFilterLP", object_paths)
         self.assertIn("uhd.filters.DigitalFilterFIRI16", object_paths)
         self.assertIn("uhd.filters.FilterType", object_paths)
+        self.assertIn("uhd.dsp", object_paths)
+        self.assertIn("uhd.dsp.signals", object_paths)
+        self.assertEqual(
+            schema["coverage"]["uhd.dsp.signals.get_continuous_tone"],
+            "implemented",
+        )
+        self.assertEqual(
+            schema["coverage"]["uhd.usrp.RXStreamer.get_max_num_samps"],
+            "implemented_with_documented_remote_difference",
+        )
         assert_release_coverage(schema)
 
     def test_promoted_signatures_preserve_native_defaults_and_parameter_kinds(self):
@@ -423,7 +433,7 @@ class DynamicV2ServerTests(unittest.TestCase):
             self.assertTrue(manager.close(session.session_id))
             self.assertTrue(inventory.live.closed)
 
-    def test_binary_rx_stream_returns_only_native_received_prefix(self):
+    def test_binary_rx_stream_coalesces_native_packets(self):
         inventory = FakeInventorySchema()
         context = {
             "schema": inventory,
@@ -533,14 +543,21 @@ class DynamicV2ServerTests(unittest.TestCase):
                 )
             data = responses[-1]
             self.assertEqual(data.kind, grpc_pb2.SAMPLE_FRAME_DATA)
-            self.assertEqual(data.sample_count, 2)
-            self.assertEqual(len(data.payload), 2 * np.dtype(np.complex64).itemsize)
+            self.assertEqual(data.sample_count, 4)
+            self.assertEqual(len(data.payload), 4 * np.dtype(np.complex64).itemsize)
             np.testing.assert_array_equal(
                 np.frombuffer(data.payload, dtype=np.complex64),
-                np.array([1 + 2j, 3 + 4j], dtype=np.complex64),
+                np.array(
+                    [1 + 2j, 3 + 4j, 1 + 2j, 3 + 4j],
+                    dtype=np.complex64,
+                ),
             )
             self.assertEqual(json.loads(data.metadata_json)["error_code"], "none")
-            self.assertEqual(
+            self.assertGreater(
+                manager.get_handle(session, handle).value.last_timeout,
+                0.0,
+            )
+            self.assertLessEqual(
                 manager.get_handle(session, handle).value.last_timeout,
                 0.1,
             )

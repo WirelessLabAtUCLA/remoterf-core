@@ -217,7 +217,7 @@ class USRPClientServerLocalhostTests(unittest.TestCase):
                     with device.get_rx_stream(stream_args) as streamer:
                         self.assertEqual(
                             streamer.get_max_num_samps(),
-                            256,
+                            64 * 1024,
                         )
                         samples = np.full(
                             4,
@@ -231,18 +231,11 @@ class USRPClientServerLocalhostTests(unittest.TestCase):
                             0.25,
                         )
 
-                self.assertEqual(count, 2)
+                self.assertEqual(count, 4)
                 np.testing.assert_array_equal(
                     samples[:count],
                     np.array(
-                        [1 + 2j, 3 + 4j],
-                        dtype=np.complex64,
-                    ),
-                )
-                np.testing.assert_array_equal(
-                    samples[count:],
-                    np.array(
-                        [99 + 0j, 99 + 0j],
+                        [1 + 2j, 3 + 4j, 1 + 2j, 3 + 4j],
                         dtype=np.complex64,
                     ),
                 )

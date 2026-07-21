@@ -8,6 +8,26 @@ import subprocess
 import re
 import adi
 
+
+def _normalize_channels(value):
+    """Restore channel lists after numeric lists cross the legacy RPC codec."""
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list):
+        return value
+
+    channels = []
+    for channel in value:
+        if not isinstance(channel, str):
+            integer = int(channel)
+            if channel == integer:
+                channel = integer
+        channels.append(channel)
+    return channels
+
+
 # == PLUTO Connection Logic ==
 
 def connect_pluto(*, serial: str):
@@ -50,7 +70,7 @@ class PlutoSchema(DeviceSchema):
 
     device_type = "adalm_pluto"
     client_class = "Pluto"
-    driver_version = "0.0.1"
+    driver_version = "0.0.2"
 
     @staticmethod
     def make_device(**kwargs):
@@ -85,13 +105,13 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="get")
     def get_rx_hardwaregain_chan0(self):
-        """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
-        return self.device.hardwaregain_chan0
+        """RX hardware gain (dB). pyadi-iio attribute: rx_hardwaregain_chan0"""
+        return self.device.rx_hardwaregain_chan0
 
     @idl_expose(kind="set")
     def set_rx_hardwaregain_chan0(self, value):
-        """RX hardware gain (dB). pyadi-iio attribute: hardwaregain_chan0"""
-        self.device.hardwaregain_chan0 = value
+        """RX hardware gain (dB). pyadi-iio attribute: rx_hardwaregain_chan0"""
+        self.device.rx_hardwaregain_chan0 = value
 
     @idl_expose(kind="get")
     def get_tx_hardwaregain_chan0(self):
@@ -179,6 +199,109 @@ class PlutoSchema(DeviceSchema):
     def call_disable_dds(self):
         """Disable the internal DDS tone generator."""
         self.device.disable_dds()
+
+    # region DDS
+
+    @idl_expose(kind="call")
+    def call_dds_single_tone(self, frequency, scale, channel=0):
+        """Generate one complex DDS tone on the selected TX channel."""
+        self.device.dds_single_tone(frequency, scale, channel)
+
+    @idl_expose(kind="call")
+    def call_dds_dual_tone(
+        self,
+        frequency1,
+        scale1,
+        frequency2,
+        scale2,
+        channel=0,
+    ):
+        """Generate two complex DDS tones on the selected TX channel."""
+        self.device.dds_dual_tone(
+            frequency1,
+            scale1,
+            frequency2,
+            scale2,
+            channel,
+        )
+
+    @idl_expose(kind="get")
+    def get_dds_frequencies(self):
+        return self.device.dds_frequencies
+
+    @idl_expose(kind="set")
+    def set_dds_frequencies(self, value):
+        self.device.dds_frequencies = value
+
+    @idl_expose(kind="get")
+    def get_dds_scales(self):
+        return self.device.dds_scales
+
+    @idl_expose(kind="set")
+    def set_dds_scales(self, value):
+        self.device.dds_scales = value
+
+    @idl_expose(kind="get")
+    def get_dds_phases(self):
+        return self.device.dds_phases
+
+    @idl_expose(kind="set")
+    def set_dds_phases(self, value):
+        self.device.dds_phases = value
+
+    @idl_expose(kind="get")
+    def get_dds_enabled(self):
+        return self.device.dds_enabled
+
+    @idl_expose(kind="set")
+    def set_dds_enabled(self, value):
+        self.device.dds_enabled = value
+
+    # endregion
+
+    # region channel configuration
+
+    @idl_expose(kind="get")
+    def get_rx_enabled_channels(self):
+        return self.device.rx_enabled_channels
+
+    @idl_expose(kind="set")
+    def set_rx_enabled_channels(self, value):
+        self.device.rx_enabled_channels = _normalize_channels(value)
+
+    @idl_expose(kind="get")
+    def get_tx_enabled_channels(self):
+        return self.device.tx_enabled_channels
+
+    @idl_expose(kind="set")
+    def set_tx_enabled_channels(self, value):
+        self.device.tx_enabled_channels = _normalize_channels(value)
+
+    @idl_expose(kind="get")
+    def get_rx_annotated(self):
+        return self.device.rx_annotated
+
+    @idl_expose(kind="set")
+    def set_rx_annotated(self, value):
+        self.device.rx_annotated = value
+
+    @idl_expose(kind="get")
+    def get_rx_output_type(self):
+        return self.device.rx_output_type
+
+    @idl_expose(kind="set")
+    def set_rx_output_type(self, value):
+        self.device.rx_output_type = value
+
+    @idl_expose(kind="get")
+    def get_rx_channel_names(self):
+        return self.device.rx_channel_names
+
+    @idl_expose(kind="get")
+    def get_tx_channel_names(self):
+        return self.device.tx_channel_names
+
+    # endregion
 
     # endregion
 

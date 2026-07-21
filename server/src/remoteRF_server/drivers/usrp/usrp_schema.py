@@ -98,6 +98,31 @@ def _payload_type(value):
     return None
 
 
+def _tune_request_policy(value, current):
+    """Translate a portable policy name back to UHD's native enum value."""
+    if not isinstance(value, str):
+        return value
+    name = value.rsplit(".", 1)[-1].upper()
+    policy_types = (
+        type(current),
+        getattr(getattr(uhd, "types", None), "TuneRequestPolicy", None),
+        getattr(getattr(uhd, "types", None), "tune_request_policy", None),
+        getattr(
+            getattr(getattr(uhd, "libpyuhd", None), "types", None),
+            "tune_request_policy",
+            None,
+        ),
+    )
+    for policy_type in policy_types:
+        if policy_type is None:
+            continue
+        for candidate in (name, name.lower(), f"POLICY_{name}"):
+            native = getattr(policy_type, candidate, None)
+            if native is not None:
+                return native
+    return value
+
+
 def _require_dict(value, method):
     if not isinstance(value, dict):
         raise TypeError(
@@ -159,7 +184,16 @@ def _construct(value):
         return uhd.usrp.SubdevSpec(value["spec"])
 
     if kind == "TuneRequest":
-        args = [_construct(item) for item in value.get("args", ())]
+        # Older generated clients used ``args`` for constructor arguments.
+        # Current TuneRequest snapshots use that same key for UHD's DeviceAddr
+        # field, so only sequences may be interpreted as constructor arguments.
+        raw_args = value.get("args", ())
+        legacy_constructor_args = isinstance(raw_args, (list, tuple))
+        args = (
+            [_construct(item) for item in raw_args]
+            if legacy_constructor_args
+            else []
+        )
         kwargs = {
             key: _construct(item)
             for key, item in value.get("kwargs", {}).items()
@@ -174,10 +208,18 @@ def _construct(value):
         obj = constructor(*args, **kwargs)
         for field in (
             "rf_freq", "dsp_freq", "rf_freq_policy", "dsp_freq_policy",
-            "target_freq", "lo_offset", "args",
+            "args",
         ):
+            if field == "args" and legacy_constructor_args:
+                continue
             if field in value and hasattr(obj, field):
-                setattr(obj, field, _construct(value[field]))
+                converted = _construct(value[field])
+                if field in {"rf_freq_policy", "dsp_freq_policy"}:
+                    converted = _tune_request_policy(
+                        converted,
+                        getattr(obj, field),
+                    )
+                setattr(obj, field, converted)
         return obj
 
     if kind == "DeviceAddr":
@@ -461,7 +503,7 @@ class UsrpSchema(DeviceSchema):
     device_type = "usrp"
     client_class = "MultiUSRP"
     client_objects = _uhd_client_objects()
-    driver_version = "0.0.1"
+    driver_version = "0.0.2"
     session_scoped = True
 
     def __init__(self):

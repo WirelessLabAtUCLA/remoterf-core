@@ -1076,6 +1076,8 @@ def _objects() -> list[dict]:
         object_type("uhd", kind="namespace"),
         object_type("uhd.usrp", kind="namespace"),
         object_type("uhd.types", kind="namespace"),
+        object_type("uhd.dsp", kind="namespace"),
+        object_type("uhd.dsp.signals", kind="namespace"),
         object_type("uhd.filters", kind="namespace"),
         object_type("uhd.property", kind="namespace"),
         value(
@@ -1537,7 +1539,7 @@ ERRORS = (
 )
 
 
-def build_usrp_schema_v2(driver_version: str = "0.0.1") -> dict:
+def build_usrp_schema_v2(driver_version: str = "0.0.2") -> dict:
     signatures = _signatures()
     for additions in (
         _control_signatures(),
@@ -1580,6 +1582,11 @@ def build_usrp_schema_v2(driver_version: str = "0.0.1") -> dict:
         coverage[f"{item['owner']}.{item['name']}"] = "implemented"
 
     declared_owners = {item["owner"] for item in methods}
+    coverage.update({
+        "uhd.dsp.signals.get_continuous_tone": "implemented",
+        "uhd.dsp.signals.get_power_dbfs": "implemented",
+        "uhd.dsp.signals.get_usrp_power": "implemented",
+    })
     for item in _objects():
         path = item["python_path"]
         if item["kind"] == "value_class":
@@ -1602,6 +1609,14 @@ def build_usrp_schema_v2(driver_version: str = "0.0.1") -> dict:
                 if path in USRP2901_UNSUPPORTED_HANDLE_TYPES
                 else "deferred"
             )
+
+    # Remote streamers advertise an efficient RPC batch size rather than the
+    # device transport's packet size.  The server coalesces native RX packets,
+    # while UHD's native TX send already accepts a larger host buffer.
+    for owner in ("uhd.usrp.RXStreamer", "uhd.usrp.TXStreamer"):
+        coverage[f"{owner}.get_max_num_samps"] = (
+            "implemented_with_documented_remote_difference"
+        )
 
     return build_schema(
         device_type="usrp",

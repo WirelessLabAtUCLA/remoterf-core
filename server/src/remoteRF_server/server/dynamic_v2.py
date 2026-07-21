@@ -1346,14 +1346,50 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                                 "UHD 4.10 Python RXStreamer.recv binding"
                             )
                         timeout = _sample_timeout(request.timeout_sec)
+                        deadline = time.monotonic() + timeout
+                        count = 0
+                        metadata_snapshot = snapshot_native(metadata)
                         with entry.lock:
-                            count = entry.value.recv(
-                                buffer,
-                                metadata,
-                                timeout,
-                            )
+                            while count < int(request.sample_count):
+                                remaining = max(0.0, deadline - time.monotonic())
+                                if count and remaining <= 0.0:
+                                    break
+                                current_metadata = (
+                                    metadata
+                                    if count == 0
+                                    else self._metadata_object(
+                                        session.schema,
+                                        "RXMetadata",
+                                        request.metadata_json,
+                                    )
+                                )
+                                target = buffer[..., count:]
+                                received = int(
+                                    entry.value.recv(
+                                        target,
+                                        current_metadata,
+                                        timeout if count == 0 else remaining,
+                                    )
+                                )
+                                if received < 0 or received > target.shape[-1]:
+                                    raise RemoteRFProtocolError(
+                                        "native RX returned an invalid sample count"
+                                    )
+                                current_snapshot = snapshot_native(current_metadata)
+                                error_code = str(
+                                    current_snapshot.get("error_code", "none")
+                                ).rsplit(".", 1)[-1].lower()
+                                has_error = error_code not in {
+                                    "none",
+                                    "error_code_none",
+                                }
+                                if count == 0 or has_error:
+                                    metadata = current_metadata
+                                    metadata_snapshot = current_snapshot
+                                count += received
+                                if received == 0 or has_error:
+                                    break
                         session_manager.get(session.session_id)
-                        count = int(count)
                         if count < 0 or count > int(request.sample_count):
                             raise RemoteRFProtocolError(
                                 "native RX returned an invalid sample count"
@@ -1381,7 +1417,7 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                             sample_count=count,
                             payload=payload,
                             metadata_json=json.dumps(
-                                snapshot_native(metadata),
+                                metadata_snapshot,
                                 sort_keys=True,
                                 separators=(",", ":"),
                             ),
