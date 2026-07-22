@@ -1,6 +1,8 @@
 import unittest
+import os
 import sys
 import types
+from unittest.mock import patch
 
 import numpy as np
 
@@ -338,6 +340,10 @@ class DeviceSchemaTests(unittest.TestCase):
                 self.dsp_freq_policy = TuneRequestPolicy.AUTO
                 self.args = DeviceAddr()
 
+        class MultiUSRP:
+            def __init__(self, args):
+                self.args = args
+
         class TXMetadata:
             def __init__(self):
                 self.has_time_spec = False
@@ -366,6 +372,7 @@ class DeviceSchemaTests(unittest.TestCase):
             ),
         )
         fake_uhd.usrp = types.SimpleNamespace(
+            MultiUSRP=MultiUSRP,
             StreamArgs=StreamArgs,
             SubdevSpec=SubdevSpec,
         )
@@ -382,6 +389,37 @@ class DeviceSchemaTests(unittest.TestCase):
         from remoteRF_server.drivers.usrp import usrp_schema
 
         usrp_schema.uhd = fake_uhd
+
+        device = usrp_schema._connect_usrp(serial="31A2B3C")
+        self.assertEqual(
+            device.args,
+            "type=b200,serial=31A2B3C,num_recv_frames=256",
+        )
+        device = usrp_schema._connect_usrp(
+            args="type=b200,serial=31A2B3C,num_recv_frames=64"
+        )
+        self.assertEqual(
+            device.args,
+            "type=b200,serial=31A2B3C,num_recv_frames=64",
+        )
+        with patch.dict(
+            os.environ,
+            {"REMOTERF_USRP_NUM_RECV_FRAMES": "128"},
+        ):
+            device = usrp_schema._connect_usrp(serial="31A2B3C")
+        self.assertEqual(
+            device.args,
+            "type=b200,serial=31A2B3C,num_recv_frames=128",
+        )
+        with patch.dict(
+            os.environ,
+            {"REMOTERF_USRP_NUM_RECV_FRAMES": "invalid"},
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "REMOTERF_USRP_NUM_RECV_FRAMES",
+            ):
+                usrp_schema._connect_usrp(serial="31A2B3C")
 
         time_spec = usrp_schema._construct({"__uhd_type__": "TimeSpec", "secs": 3.25})
         self.assertIsInstance(time_spec, TimeSpec)

@@ -62,6 +62,32 @@ def _device_args(value):
     return str(value)
 
 
+def _remote_transport_args(value):
+    """Add buffering for UI/processing gaps between remote RX batches."""
+    args = _device_args(value).strip().strip(",")
+    keys = {
+        item.split("=", 1)[0].strip().lower()
+        for item in args.split(",")
+        if "=" in item
+    }
+    if "num_recv_frames" in keys:
+        return args
+
+    raw_frames = os.getenv("REMOTERF_USRP_NUM_RECV_FRAMES", "256")
+    try:
+        frames = int(raw_frames)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "REMOTERF_USRP_NUM_RECV_FRAMES must be a positive integer"
+        ) from exc
+    if frames <= 0:
+        raise ValueError(
+            "REMOTERF_USRP_NUM_RECV_FRAMES must be a positive integer"
+        )
+    setting = f"num_recv_frames={frames}"
+    return f"{args},{setting}" if args else setting
+
+
 def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
     uhd_module = _require_uhd()
     args = args or kwargs.pop("device_args", None) or kwargs.pop("init_args", None)
@@ -87,7 +113,7 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
                 parts.append(f"{key}={value}")
         args = ",".join(parts)
 
-    args = _device_args(args)
+    args = _remote_transport_args(args)
     dev = uhd_module.usrp.MultiUSRP(args)
     return dev
 
@@ -503,7 +529,7 @@ class UsrpSchema(DeviceSchema):
     device_type = "usrp"
     client_class = "MultiUSRP"
     client_objects = _uhd_client_objects()
-    driver_version = "0.0.2"
+    driver_version = "0.0.3"
     session_scoped = True
 
     def __init__(self):
