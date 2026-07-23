@@ -92,6 +92,35 @@ class HostRfCliTests(unittest.TestCase):
         self.assertIn("Wiped device config", out)
         self.assertFalse(devices_yml.exists())
 
+    def test_device_mode_adds_serial_bound_usrp(self) -> None:
+        rc, out, err = self.run_cli(
+            "--device", "--add", "--usrp", "7:usrp2901_lab:31A2B3C"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Added device: 7 type=usrp", out)
+
+        records = json.loads(
+            (self.host_dir / "devices.yml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            records["devices"],
+            [{
+                "device_id": 7,
+                "device_type": "usrp",
+                "name": "usrp2901_lab",
+                "init": {"serial": "31A2B3C"},
+            }],
+        )
+
+        rc, out, err = self.run_cli("--device", "--show")
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn(
+            "7: type=usrp name=usrp2901_lab serial=31A2B3C",
+            out,
+        )
+
     def test_device_show_creates_empty_devices_config_on_first_run(self) -> None:
         devices_yml = self.host_dir / "devices.yml"
         pluto_schema = self.drivers_dir / "pluto_schema.py"

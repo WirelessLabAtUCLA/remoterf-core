@@ -463,10 +463,32 @@ def install_server_import_compat() -> None:
 
     sys.modules[idl_pkg_name] = idl_pkg
     sys.modules[schema_pkg_name] = schema_mod
+    v2_mod = sys.modules.get(f"{__package__}.v2")
+    if v2_mod is not None:
+        sys.modules["remoteRF_server.common.idl.v2"] = v2_mod
 
     setattr(server_pkg, "common", common_pkg)
     setattr(common_pkg, "idl", idl_pkg)
     setattr(idl_pkg, "schema", schema_mod)
+
+    # Server-authored USRP schema files are intentionally portable to HostRF.
+    # Alias their pinned, hardware-independent manifest to the host package so
+    # a shared ~/.config/remoterf/drivers directory works in either process.
+    try:
+        host_drivers = importlib.import_module("remoteRF_host.drivers")
+        host_usrp = importlib.import_module("remoteRF_host.drivers.usrp")
+        host_manifest = importlib.import_module(
+            "remoteRF_host.drivers.usrp.uhd_manifest"
+        )
+    except Exception:
+        pass
+    else:
+        sys.modules["remoteRF_server.drivers"] = host_drivers
+        sys.modules["remoteRF_server.drivers.usrp"] = host_usrp
+        sys.modules["remoteRF_server.drivers.usrp.uhd_manifest"] = host_manifest
+        setattr(server_pkg, "drivers", host_drivers)
+        setattr(host_drivers, "usrp", host_usrp)
+        setattr(host_usrp, "uhd_manifest", host_manifest)
 
 
 def load_drivers() -> Dict[str, str]:

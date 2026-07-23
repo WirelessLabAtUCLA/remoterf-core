@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from ..common.utils import map_arg, unmap_arg
 from .device_manager import find_device_id_by_name, get_device, get_device_schema
 
@@ -35,6 +37,21 @@ class RpcManager:
     def run_rpc(self, *, function_name, args) -> dict:
         if function_name == "echo":
             return args
+
+        if function_name.startswith("DynamicV2:"):
+            gid = self._resolve_gid(args)
+            if gid is None:
+                return {"Error": map_arg("Missing device id for tunneled Dynamic v2 request.")}
+            try:
+                from .dynamic_v2_bridge import run_bridge
+
+                return run_bridge(
+                    operation=function_name.split(":", 1)[1],
+                    args=args,
+                    gid=gid,
+                )
+            except Exception as exc:
+                return {"Error": map_arg(str(exc))}
 
         if function_name.startswith("IDL:"):
             return self._handle_idl(function_name.split(":", 1)[1], args)
@@ -119,6 +136,27 @@ class RpcManager:
         schema = self._resolve_idl_schema(args)
         if schema is None:
             return {"error": map_arg("No schema available for this device on this host.")}
+
+        requested_versions = []
+        if "schema_versions" in args:
+            try:
+                requested_versions = list(unmap_arg(args["schema_versions"]) or [])
+            except Exception:
+                requested_versions = []
+        get_v2 = getattr(schema, "get_idl_v2", None)
+        if "2.0" in requested_versions and callable(get_v2):
+            schema_v2 = get_v2()
+            return {
+                "schema": map_arg(json.dumps(
+                    schema_v2, sort_keys=True, separators=(",", ":")
+                )),
+                "schema_version": map_arg("2.0"),
+                "driver_version": map_arg(str(getattr(schema, "driver_version", "") or "")),
+                "schema_hash": map_arg(schema_v2["schema_hash"]),
+                "device_type": map_arg(str(getattr(schema, "device_type", "") or "")),
+                "control_protocol_version": map_arg("2.0"),
+                "streaming_protocol_version": map_arg("1.0"),
+            }
 
         return {
             "schema": map_arg(schema.get_idl_json()),

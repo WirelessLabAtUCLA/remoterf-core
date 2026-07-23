@@ -67,7 +67,8 @@ def print_help() -> None:
         "  hostrf -d | --device [options]\n"
         "\n"
         "Device options:\n"
-        "  --add --pluto <id:name:iio_serial>  Add device (fails if gid OR serial already used)\n"
+        "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
+        "  --add --usrp <id:name:serial>        Add a serial-bound USRP-2901/B200\n"
         "  --remove <id>                       Remove device\n"
         "  --edit-name <id> <name>             Override device NAME for existing device\n"
         "  --show | -s                         Show all devices\n"
@@ -90,6 +91,7 @@ def print_help() -> None:
         "  hostrf --host --wipe -y\n"
         "\n"
         "  hostrf --device --add --pluto 0:pluto_aaa:123123\n"
+        "  hostrf --device --add --usrp 7:usrp2901_lab:31A2B3C\n"
         "  hostrf --device --edit-name 0 \"New Pluto Name\"\n"
         "  hostrf --device --remove 0\n"
         "  hostrf --device --show\n"
@@ -176,6 +178,14 @@ def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
     if not iio_serial:
         raise ValueError("iio_serial is empty")
     return gid, name, iio_serial
+
+
+def _parse_usrp_add_spec(tok: str) -> Tuple[int, str, str]:
+    try:
+        gid, name, serial = _parse_pluto_add_spec(tok)
+    except ValueError as exc:
+        raise ValueError("Expected <gid:name:serial>") from exc
+    return gid, name, serial
 
 
 def _read_device_records() -> Dict[int, Dict[str, Any]]:
@@ -407,6 +417,36 @@ def _device_add_pluto(spec: str) -> int:
     print(f"Added device: {gid} type=adalm_pluto name={name} iio_serial={iio_serial}")
     return 0
 
+
+def _device_add_usrp(spec: str) -> int:
+    try:
+        gid, name, serial = _parse_usrp_add_spec(spec)
+    except Exception as exc:
+        print(f"ERROR: invalid usrp spec: {exc}", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    recs = _read_device_records()
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+
+    for other_gid, record in recs.items():
+        existing_serial = str((record.get("init") or {}).get("serial", "")).strip()
+        if existing_serial and existing_serial == serial:
+            print(f"ERROR: serial already used by global_id={other_gid}", file=sys.stderr)
+            return 2
+
+    recs[gid] = {
+        "device_id": gid,
+        "device_type": "usrp",
+        "name": name,
+        "init": {"serial": serial},
+    }
+    _write_device_records(recs)
+    print(f"Added device: {gid} type=usrp name={name} serial={serial}")
+    return 0
+
 def _device_edit_name(global_id_str: str, new_name: str) -> int:
     try:
         gid = int((global_id_str or "").strip())
@@ -465,7 +505,8 @@ def _device_show() -> int:
         name = r.get("name", "")
         init = r.get("init") or {}
         serial = init.get("serial", "")
-        print(f"  {gid}: type={dtype} name={name} iio_serial={serial}")
+        serial_label = "iio_serial" if dtype in {"adalm_pluto", "pluto"} else "serial"
+        print(f"  {gid}: type={dtype} name={name} {serial_label}={serial}")
     return 0
 
 def _wipe_all(*, yes: bool) -> int:
@@ -717,16 +758,16 @@ def main() -> int:
 
         if device_mode and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
-                print("ERROR: missing device type after --device --add (expected --pluto)", file=sys.stderr)
+                print("ERROR: missing device type after --device --add (expected --pluto or --usrp)", file=sys.stderr)
                 return 2
             dt = argv[i + 1].strip()
-            if dt != "--pluto":
-                print("ERROR: only '--device --add --pluto <gid:name:iio_serial>' is supported", file=sys.stderr)
+            if dt not in ("--pluto", "--usrp"):
+                print("ERROR: device type must be --pluto or --usrp", file=sys.stderr)
                 return 2
             if i + 2 >= len(argv):
-                print("ERROR: missing spec after --device --add --pluto", file=sys.stderr)
+                print(f"ERROR: missing spec after --device --add {dt}", file=sys.stderr)
                 return 2
-            device_add_type = "pluto"
+            device_add_type = dt.removeprefix("--")
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
@@ -817,6 +858,12 @@ def main() -> int:
 
         if device_add_type == "pluto" and device_add_spec is not None:
             rc = _device_add_pluto(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "usrp" and device_add_spec is not None:
+            rc = _device_add_usrp(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

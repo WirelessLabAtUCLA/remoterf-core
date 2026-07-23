@@ -889,6 +889,21 @@ class HostTunnelAgent:
                 finally:
                     if hb_stop is not None:
                         hb_stop.set()
+                    if stream_established:
+                        try:
+                            from .dynamic_v2_bridge import close_all_bridge_sessions
+
+                            closed = close_all_bridge_sessions()
+                            if closed:
+                                info(
+                                    f"Closed {closed} Dynamic v2 host session(s) after tunnel loss.",
+                                    component="hostrf.tunnel_agent",
+                                )
+                        except Exception:
+                            exception(
+                                "Dynamic v2 tunnel-loss cleanup failed.",
+                                component="hostrf.tunnel_agent",
+                            )
                     if channel is not None:
                         try:
                             channel.close()

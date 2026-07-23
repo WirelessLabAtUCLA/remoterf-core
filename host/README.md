@@ -219,3 +219,35 @@ Run to start the host. You should be able to see host on the server if setup pro
 ```bash
 hostrf --serve
 ```
+
+### 4) Connect an NI USRP-2901 / B200-family device
+
+The machine connected to the radio must provide the UHD `4.10.0.0` Python
+module. HostRF publishes the full USRP schema even when UHD is unavailable, but
+opening a real Dynamic v2 session requires that exact supported UHD API.
+
+Add a serial-bound inventory entry:
+
+```bash
+hostrf --device --add --usrp 7:usrp2901_lab:31A2B3C
+hostrf --device --show
+```
+
+Equivalent `devices.yml`:
+
+```yaml
+devices:
+  - device_id: 7
+    device_type: usrp
+    name: usrp2901_lab
+    init:
+      serial: 31A2B3C
+```
+
+Run `hostrf --serve` after the RemoteRF server has been upgraded with tunneled
+Dynamic v2 support. Control calls, opaque handles, and `SampleDataV1` binary IQ
+frames then use the existing authenticated host tunnel. HostRF closes native
+USRP sessions automatically when a reservation ends or the tunnel disconnects.
+
+Custom `usrp` schemas under `~/.config/remoterf/drivers/` take precedence over
+the packaged default. No `usrp_policy.yml` file is required.

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +14,8 @@ from ..common.utils import get_devices_config_path, get_drivers_dir
 from ..common.utils.host_logging import error, warn
 
 _state_lock = threading.RLock()
+_reservation_end_callbacks: list = []
+_HOST_BRIDGE_TOKEN_PREFIX = "__remoterf_host_v2_gid__:"
 
 
 @dataclass
@@ -140,6 +145,15 @@ def _connect_from_record(rec: Dict[str, Any]):
         warn(f"No driver registered for device_type={dtype!r} - skipping", component="hostrf.device_manager")
         return (None, ident, dtype)
 
+    if bool(getattr(schema_cls, "session_scoped", False)):
+        try:
+            schema = schema_cls()
+            schema.bind_inventory(init_kwargs)
+            return (schema, ident, dtype)
+        except Exception as e:
+            warn(f"inventory binding failed for {dtype}: {e}", component="hostrf.device_manager")
+            return (None, ident, dtype)
+
     try:
         raw_dev = schema_cls.make_device(**init_kwargs)
     except Exception as e:
@@ -154,7 +168,77 @@ def _connect_from_record(rec: Dict[str, Any]):
     return (schema, ident, dtype)
 
 
+def _driver_registers_type(path: Path, device_type: str) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    pattern = rf"(?:idl_register|register_driver)\(\s*['\"]{re.escape(device_type)}['\"]\s*\)"
+    return re.search(pattern, text) is not None
+
+
+def _driver_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _driver_normalized_sha256(path: Path) -> str:
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _managed_driver_marker(target: Path) -> Path:
+    return target.with_name(f".{target.name}.remoterf-managed")
+
+
+def _seed_default_usrp_driver() -> None:
+    """Install/refresh the packaged USRP schema without replacing custom drivers."""
+    drivers_dir = get_drivers_dir()
+    drivers_dir.mkdir(parents=True, exist_ok=True)
+    target = drivers_dir / "usrp_schema.py"
+    source = Path(__file__).resolve().parents[1] / "drivers" / "usrp" / "usrp_schema.py"
+
+    if target.exists() or target.is_symlink():
+        marker = _managed_driver_marker(target)
+        try:
+            target_hash = _driver_sha256(target)
+            marker_hash = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+            normalized_hash = _driver_normalized_sha256(target)
+            if target_hash != marker_hash and normalized_hash != marker_hash:
+                return
+            source_hash = _driver_sha256(source)
+            if target_hash != source_hash:
+                shutil.copy2(source, target)
+            marker.write_text(source_hash + "\n", encoding="utf-8")
+        except OSError as exc:
+            warn(f"Could not refresh managed USRP schema: {exc}", component="hostrf.device_manager")
+        return
+
+    for driver_file in drivers_dir.glob("*.py"):
+        if _driver_registers_type(driver_file, "usrp"):
+            return
+
+    if not source.is_file():
+        warn(f"Packaged USRP schema is missing: {source}", component="hostrf.device_manager")
+        return
+
+    try:
+        shutil.copy2(source, target)
+        _managed_driver_marker(target).write_text(
+            _driver_sha256(source) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        warn(f"Could not install default USRP schema: {exc}", component="hostrf.device_manager")
+
+
 def _load_all_drivers(required_types: set[str]) -> None:
+    if "usrp" in required_types:
+        _seed_default_usrp_driver()
+
     if {"adalm_pluto", "pluto"} & required_types:
         try:
             from ..common.idl import pluto_schema as _  # noqa: F401
@@ -166,6 +250,12 @@ def _load_all_drivers(required_types: set[str]) -> None:
             from ..common.idl import pluto_mimo_schema as _  # noqa: F401
         except Exception as e:
             warn(f"Could not load built-in pluto mimo driver: {e}", component="hostrf.device_manager")
+
+    if "usrp" in required_types:
+        try:
+            from ..drivers.usrp import usrp_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in USRP driver: {e}", component="hostrf.device_manager")
 
     results = load_drivers()
     for fname, status in results.items():
@@ -313,3 +403,53 @@ def find_device_id_by_name(name: str):
             if str(st.name or "").strip().lower() == name_lower:
                 return int(gid)
     return None
+
+
+def get_local_device_context(device_id: int) -> dict[str, Any] | None:
+    """Return the local inventory context consumed by Dynamic v2 sessions."""
+    try:
+        did = int(device_id)
+    except Exception:
+        return None
+
+    with _state_lock:
+        st = _devices.get(did)
+        if st is None or st.schema is None:
+            return None
+        return {
+            "gid": did,
+            "schema": st.schema,
+            "dtype": st.dtype,
+            "ident": st.ident,
+            "name": st.name,
+            "reserved": True,
+        }
+
+
+def register_reservation_end_callback(callback) -> None:
+    """Register cleanup invoked when the server closes a tunneled reservation."""
+    if not callable(callback):
+        raise TypeError("reservation callback must be callable")
+    with _state_lock:
+        if callback not in _reservation_end_callbacks:
+            _reservation_end_callbacks.append(callback)
+
+
+def make_host_bridge_token(device_id: int | str) -> str:
+    """Create a tunnel-internal token; it is accepted only inside the host agent."""
+    return f"{_HOST_BRIDGE_TOKEN_PREFIX}{int(device_id)}"
+
+
+def resolve_gid_for_token(token: str):
+    value = str(token or "")
+    if not value.startswith(_HOST_BRIDGE_TOKEN_PREFIX):
+        return None
+    try:
+        gid = int(value[len(_HOST_BRIDGE_TOKEN_PREFIX):])
+    except (TypeError, ValueError):
+        return None
+    return gid if device_exists(gid) else None
+
+
+def token_matches_device(token: str, device_id: int) -> bool:
+    return resolve_gid_for_token(token) == int(device_id)
