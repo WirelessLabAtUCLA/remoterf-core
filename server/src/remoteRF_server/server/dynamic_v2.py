@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any
 
 import numpy as np
@@ -48,6 +49,7 @@ from .v2_errors import (
     RemoteRFStaleHandleError,
     error_envelope,
 )
+from .host_dynamic_v2 import host_session_proxy
 
 _HANDLE_PREFIX_BYTES = 32
 _MAX_ASYNC_EVENTS = 256
@@ -1034,6 +1036,8 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
         try:
             if SCHEMA_VERSION not in request.schema_versions:
                 raise RemoteRFProtocolError("client did not advertise schema v2")
+            if host_session_proxy.route_for_token(request.token) is not None:
+                return host_session_proxy.get_schema(request)
             schema = session_manager.schema_for_token(request.token)
             return grpc_pb2.GetSchemaResponse(
                 schema_version=SCHEMA_VERSION,
@@ -1049,6 +1053,8 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
                 raise RemoteRFProtocolError("unsupported control protocol version")
             if request.streaming_protocol_version != STREAMING_PROTOCOL_VERSION:
                 raise RemoteRFProtocolError("unsupported streaming protocol version")
+            if host_session_proxy.route_for_token(request.token) is not None:
+                return host_session_proxy.open(request)
             session = session_manager.open(
                 request.token,
                 requested_schema_hash=request.requested_schema_hash,
@@ -1076,6 +1082,8 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
 
     def Invoke(self, request, context):
         try:
+            if host_session_proxy.is_remote_session(request.session_id):
+                return host_session_proxy.invoke(request)
             args = {}
             for item in request.args:
                 if not item.name or item.name in args:
@@ -1115,6 +1123,8 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
 
     def CloseHandle(self, request, context):
         try:
+            if host_session_proxy.is_remote_session(request.session_id):
+                return host_session_proxy.close_handle(request)
             return grpc_pb2.CloseResponse(
                 closed=session_manager.close_handle(request.session_id, request.handle)
             )
@@ -1123,6 +1133,8 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
 
     def CloseSession(self, request, context):
         try:
+            if host_session_proxy.is_remote_session(request.session_id):
+                return host_session_proxy.close_session(request)
             return grpc_pb2.CloseResponse(
                 closed=session_manager.close(request.session_id)
             )
@@ -1163,6 +1175,22 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
 
     def SampleStream(self, request_iterator, context):
         opened: tuple[DeviceSession, HandleEntry, str, int] | None = None
+        iterator = iter(request_iterator)
+        try:
+            first_request = next(iterator)
+        except StopIteration:
+            return
+
+        if host_session_proxy.is_remote_session(first_request.session_id):
+            for request in chain((first_request,), iterator):
+                try:
+                    yield host_session_proxy.sample_frame(request)
+                except Exception as exc:
+                    yield self._error_frame(request, exc)
+                    return
+            return
+
+        request_iterator = chain((first_request,), iterator)
         try:
             for request in request_iterator:
                 try:

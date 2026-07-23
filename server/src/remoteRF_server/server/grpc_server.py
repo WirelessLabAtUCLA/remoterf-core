@@ -39,6 +39,7 @@ from .dynamic_v2 import (
     SampleDataV1Servicer,
     session_manager,
 )
+from .host_dynamic_v2 import host_session_proxy
 from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import get_all_devices, get_all_devices_str
@@ -52,6 +53,7 @@ from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
+from prompt_toolkit.output import DummyOutput
 
 from ..tools.gist_status import start_status_publisher
 from .cert_provider import start_cert_provider, stop_cert_provider
@@ -101,7 +103,15 @@ def _get_port(name: str, *, default: int | None = None) -> int:
         raise SystemExit(f"{name} out of range (1..65535): {n}")
     return n
 
-session = PromptSession()
+try:
+    session = PromptSession()
+except Exception as exc:
+    if type(exc).__name__ != "NoConsoleScreenBufferError":
+        raise
+    # Importing the server in a headless process (tests, services, containers)
+    # may not provide a real console screen buffer. The interactive serve path
+    # still gets the normal output whenever one is available.
+    session = PromptSession(output=DummyOutput())
 BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
 
 from dotenv import load_dotenv, find_dotenv
@@ -185,6 +195,7 @@ class ServerRuntime:
             termination.wait(timeout=max(1.0, float(grace_sec) + 2.0))
         finally:
             session_manager.close_all()
+            host_session_proxy.close_all()
             if self.cert_server is not None:
                 stop_cert_provider(self.cert_server)
             if (
@@ -318,6 +329,7 @@ def start_server_runtime(
         stop_event.set()
         server.stop(0)
         session_manager.close_all()
+        host_session_proxy.close_all()
         if cert_server is not None:
             stop_cert_provider(cert_server)
         raise

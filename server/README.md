@@ -224,7 +224,7 @@ Some distros come with default firewall settings that block traffic on specific 
 
 ## Server Device Configuration
 
-ADALM-Pluto and local UHD B200-family inventories are supported. USRP devices
+ADALM-Pluto and local or HostRF-owned UHD B200-family inventories are supported. USRP devices
 remain registered as device type `usrp`; runtime capabilities distinguish
 `usrp2901` and `b200`.
 
@@ -290,7 +290,7 @@ schema on first startup, so clients can discover the API even when UHD is not
 installed locally. Existing custom `usrp` drivers in
 `~/.config/remoterf/drivers/` take precedence over that default.
 
-Opening a real USRP session requires the machine that owns the hardware to
+Opening a real USRP session requires the server or HostRF machine that owns the hardware to
 have the exact supported UHD Python API, UHD `4.10.0.0`, installed. The
 server does not open the device while loading inventory. It opens the
 reservation's exact `type=b200,serial=...` device only when the authenticated
@@ -359,7 +359,9 @@ receives raw binary IQ, restores the prior RX settings, and closes the remote
 stream/session. It is RX-only and does not enable transmit.
 
 Dynamic v2 control and `SampleDataV1.SampleStream` run on the existing TLS
-gRPC channel. IQ samples are carried as bounded raw binary payloads with
+gRPC channel. For HostRF-owned devices, the server proxies the same protobuf
+operations through the authenticated host tunnel and releases the remote
+session if that tunnel disconnects. IQ samples are carried as bounded raw binary payloads with
 dtype/shape/channel metadata; JSON/base64 and repeated-float sample transport
 are not used.
 

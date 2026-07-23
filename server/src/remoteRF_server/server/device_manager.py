@@ -428,6 +428,11 @@ def _driver_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _driver_normalized_sha256(path: Path) -> str:
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _managed_driver_marker(target: Path) -> Path:
     return target.with_name(f".{target.name}.remoterf-managed")
 
@@ -446,7 +451,15 @@ def _refresh_managed_driver(
     except OSError:
         return False
 
-    if target_hash != marker_hash and target_hash not in legacy_hashes:
+    try:
+        normalized_hash = _driver_normalized_sha256(target)
+    except OSError:
+        normalized_hash = ""
+    if (
+        target_hash != marker_hash
+        and normalized_hash != marker_hash
+        and target_hash not in legacy_hashes
+    ):
         return False
 
     try:
