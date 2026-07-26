@@ -57,6 +57,8 @@ _MAX_SAMPLE_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_SESSIONS = 64
 _MAX_HANDLES_PER_SESSION = 64
 _MAX_CREDITS = 64
+_RX_PREFETCH_BATCH_SAMPS = 64 * 1024
+_MAX_RX_PREFETCH_BATCHES = 16
 _SAMPLE_DTYPES = {
     "<c8": np.dtype("<c8"),
     "<c16": np.dtype("<c16"),
@@ -460,6 +462,13 @@ class HandleEntry:
     async_overflowed: bool = False
     stream_channels: list[int] = field(default_factory=list)
     cpu_format: str = ""
+    rx_prefetch: queue.Queue = field(
+        default_factory=lambda: queue.Queue(maxsize=_MAX_RX_PREFETCH_BATCHES)
+    )
+    rx_prefetch_stop: threading.Event = field(default_factory=threading.Event)
+    rx_worker: threading.Thread | None = None
+    rx_prefetch_overflowed: bool = False
+    rx_pending: tuple[np.ndarray, dict, int] | None = None
 
 
 @dataclass
@@ -507,6 +516,12 @@ class SessionManager:
             "async_queue_depth": sum(entry.async_events.qsize() for entry in handles),
             "async_queue_overflows": sum(
                 1 for entry in handles if entry.async_overflowed
+            ),
+            "rx_prefetch_queue_depth": sum(
+                entry.rx_prefetch.qsize() for entry in handles
+            ),
+            "rx_prefetch_queue_overflows": sum(
+                1 for entry in handles if entry.rx_prefetch_overflowed
             ),
         }
 
@@ -736,6 +751,95 @@ class SessionManager:
         entry.worker.start()
 
     @staticmethod
+    def _clear_rx_prefetch(entry: HandleEntry) -> None:
+        while True:
+            try:
+                entry.rx_prefetch.get_nowait()
+            except queue.Empty:
+                break
+        entry.rx_pending = None
+        entry.rx_prefetch_overflowed = False
+
+    def _start_rx_prefetch(self, session: DeviceSession, entry: HandleEntry) -> None:
+        if not entry.type_id.endswith("RXStreamer"):
+            return
+        self._stop_rx_prefetch(entry)
+        self._clear_rx_prefetch(entry)
+        entry.rx_prefetch_stop.clear()
+
+        try:
+            import uhd
+            metadata_type = uhd.types.RXMetadata
+        except Exception:
+            return
+
+        dtype = {
+            "fc32": np.dtype(np.complex64),
+            "fc64": np.dtype(np.complex128),
+            "f32": np.dtype(np.float32),
+            "f64": np.dtype(np.float64),
+            "s16": np.dtype(np.int16),
+        }.get(entry.cpu_format.lower(), np.dtype(np.complex64))
+        channels = max(1, len(entry.stream_channels))
+        batch_samps = max(
+            1,
+            min(
+                _RX_PREFETCH_BATCH_SAMPS,
+                _MAX_SAMPLE_PAYLOAD_BYTES // (dtype.itemsize * channels),
+            ),
+        )
+
+        def run():
+            buffer = np.empty((channels, batch_samps), dtype=dtype)
+            while (
+                not entry.rx_prefetch_stop.is_set()
+                and not entry.stop_event.is_set()
+                and not session.closed
+            ):
+                metadata = metadata_type()
+                try:
+                    with entry.lock:
+                        received = int(entry.value.recv(buffer, metadata, 0.1))
+                except Exception:
+                    break
+                snapshot = snapshot_native(metadata)
+                error_code = str(snapshot.get("error_code", "none")).rsplit(
+                    ".", 1
+                )[-1].lower()
+                has_error = error_code not in {"none", "error_code_none", "timeout"}
+                if received <= 0 and not has_error:
+                    continue
+                received = max(0, min(received, batch_samps))
+                chunk = (buffer[:, :received].copy(), snapshot)
+                try:
+                    entry.rx_prefetch.put_nowait(chunk)
+                except queue.Full:
+                    try:
+                        entry.rx_prefetch.get_nowait()
+                    except queue.Empty:
+                        pass
+                    entry.rx_prefetch_overflowed = True
+                    try:
+                        entry.rx_prefetch.put_nowait(chunk)
+                    except queue.Full:
+                        pass
+
+        entry.rx_worker = threading.Thread(
+            target=run,
+            name=f"remoterf-{entry.handle[:16]}-rx-prefetch",
+            daemon=True,
+        )
+        entry.rx_worker.start()
+
+    def _stop_rx_prefetch(self, entry: HandleEntry) -> None:
+        entry.rx_prefetch_stop.set()
+        worker = entry.rx_worker
+        if worker and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=0.5)
+        entry.rx_worker = None
+        self._clear_rx_prefetch(entry)
+
+    @staticmethod
     def _stop_streamer(entry: HandleEntry) -> None:
         if not entry.type_id.endswith(("RXStreamer", "TXStreamer")):
             return
@@ -774,6 +878,7 @@ class SessionManager:
             entry.closed = True
             entry.stop_event.set()
             session.handles.pop(handle, None)
+        self._stop_rx_prefetch(entry)
         self._stop_streamer(entry)
         close = getattr(entry.value, "close", None)
         if callable(close):
@@ -798,6 +903,7 @@ class SessionManager:
                 entry.closed = True
                 entry.stop_event.set()
         for entry in entries:
+            self._stop_rx_prefetch(entry)
             if entry.worker and entry.worker.is_alive():
                 entry.worker.join(timeout=0.5)
             if entry.handle != session.root_handle:
@@ -960,6 +1066,19 @@ class SessionManager:
             self._resolve_handle_argument(session, value)
             for value in positional_args
         ]
+        rx_stream_command = (
+            entry.type_id.endswith("RXStreamer")
+            and method_name == "issue_stream_cmd"
+        )
+        stream_mode = ""
+        if rx_stream_command:
+            command = (
+                native_positional[0]
+                if native_positional
+                else native_args.get("stream_cmd")
+            )
+            stream_mode = str(getattr(command, "mode", "")).rsplit(".", 1)[-1].lower()
+            self._stop_rx_prefetch(entry)
         with entry.lock:
             try:
                 result = target(*native_positional, **native_args)
@@ -970,6 +1089,8 @@ class SessionManager:
                     uhd_version=session.capabilities.get("uhd_version", ""),
                     method=method_name,
                 ) from exc
+        if rx_stream_command and stream_mode in {"start_cont", "start_continuous"}:
+            self._start_rx_prefetch(session, entry)
         self.get(session_id)
         snapshot = snapshot_native(result)
         return_type = HANDLE_METHOD_RETURN_TYPES.get(
@@ -1172,6 +1293,61 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
         with entry.lock:
             if entry.active_operation == operation_id:
                 entry.active_operation = ""
+
+    @staticmethod
+    def _recv_prefetched(entry: HandleEntry, buffer: np.ndarray, timeout: float):
+        deadline = time.monotonic() + timeout
+        count = 0
+        metadata_snapshot = {"error_code": "none"}
+        while count < buffer.shape[-1]:
+            pending = entry.rx_pending
+            if pending is None:
+                remaining = max(0.0, deadline - time.monotonic())
+                if count and remaining <= 0.0:
+                    break
+                try:
+                    samples, snapshot = entry.rx_prefetch.get(
+                        timeout=remaining if remaining > 0 else 0
+                    )
+                except queue.Empty:
+                    if count == 0:
+                        metadata_snapshot = {"error_code": "timeout"}
+                    break
+                pending = (samples, snapshot, 0)
+
+            samples, snapshot, offset = pending
+            available = samples.shape[-1] - offset
+            take = min(buffer.shape[-1] - count, available)
+            if take:
+                if buffer.ndim == 1:
+                    buffer[count : count + take] = samples[0, offset : offset + take]
+                else:
+                    buffer[:, count : count + take] = samples[:, offset : offset + take]
+                count += take
+                offset += take
+
+            error_code = str(snapshot.get("error_code", "none")).rsplit(
+                ".", 1
+            )[-1].lower()
+            has_error = error_code not in {"none", "error_code_none", "timeout"}
+            if count == take or has_error:
+                metadata_snapshot = dict(snapshot)
+            entry.rx_pending = (
+                (samples, snapshot, offset) if offset < samples.shape[-1] else None
+            )
+            if available <= 0:
+                entry.rx_pending = None
+            if has_error:
+                break
+
+        if entry.rx_prefetch_overflowed:
+            metadata_snapshot = dict(metadata_snapshot)
+            metadata_snapshot["error_code"] = "overflow"
+            metadata_snapshot["error_code_repr"] = (
+                "RemoteRF RX prefetch queue overflow"
+            )
+            entry.rx_prefetch_overflowed = False
+        return count, metadata_snapshot
 
     def SampleStream(self, request_iterator, context):
         opened: tuple[DeviceSession, HandleEntry, str, int] | None = None
@@ -1377,46 +1553,53 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                         deadline = time.monotonic() + timeout
                         count = 0
                         metadata_snapshot = snapshot_native(metadata)
-                        with entry.lock:
-                            while count < int(request.sample_count):
-                                remaining = max(0.0, deadline - time.monotonic())
-                                if count and remaining <= 0.0:
-                                    break
-                                current_metadata = (
-                                    metadata
-                                    if count == 0
-                                    else self._metadata_object(
-                                        session.schema,
-                                        "RXMetadata",
-                                        request.metadata_json,
+                        if entry.rx_worker and entry.rx_worker.is_alive():
+                            count, metadata_snapshot = self._recv_prefetched(
+                                entry,
+                                buffer,
+                                timeout,
+                            )
+                        else:
+                            with entry.lock:
+                                while count < int(request.sample_count):
+                                    remaining = max(0.0, deadline - time.monotonic())
+                                    if count and remaining <= 0.0:
+                                        break
+                                    current_metadata = (
+                                        metadata
+                                        if count == 0
+                                        else self._metadata_object(
+                                            session.schema,
+                                            "RXMetadata",
+                                            request.metadata_json,
+                                        )
                                     )
-                                )
-                                target = buffer[..., count:]
-                                received = int(
-                                    entry.value.recv(
-                                        target,
-                                        current_metadata,
-                                        timeout if count == 0 else remaining,
+                                    target = buffer[..., count:]
+                                    received = int(
+                                        entry.value.recv(
+                                            target,
+                                            current_metadata,
+                                            timeout if count == 0 else remaining,
+                                        )
                                     )
-                                )
-                                if received < 0 or received > target.shape[-1]:
-                                    raise RemoteRFProtocolError(
-                                        "native RX returned an invalid sample count"
-                                    )
-                                current_snapshot = snapshot_native(current_metadata)
-                                error_code = str(
-                                    current_snapshot.get("error_code", "none")
-                                ).rsplit(".", 1)[-1].lower()
-                                has_error = error_code not in {
-                                    "none",
-                                    "error_code_none",
-                                }
-                                if count == 0 or has_error:
-                                    metadata = current_metadata
-                                    metadata_snapshot = current_snapshot
-                                count += received
-                                if received == 0 or has_error:
-                                    break
+                                    if received < 0 or received > target.shape[-1]:
+                                        raise RemoteRFProtocolError(
+                                            "native RX returned an invalid sample count"
+                                        )
+                                    current_snapshot = snapshot_native(current_metadata)
+                                    error_code = str(
+                                        current_snapshot.get("error_code", "none")
+                                    ).rsplit(".", 1)[-1].lower()
+                                    has_error = error_code not in {
+                                        "none",
+                                        "error_code_none",
+                                    }
+                                    if count == 0 or has_error:
+                                        metadata = current_metadata
+                                        metadata_snapshot = current_snapshot
+                                    count += received
+                                    if received == 0 or has_error:
+                                        break
                         session_manager.get(session.session_id)
                         if count < 0 or count > int(request.sample_count):
                             raise RemoteRFProtocolError(
@@ -1424,12 +1607,15 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                             )
                         sliced = buffer[..., :count] if buffer.ndim > 1 else buffer[:count]
                         payload = np.ascontiguousarray(sliced).tobytes(order="C")
-                        time_spec = getattr(metadata, "time_spec", None)
-                        device_time = _call_value(
-                            time_spec,
-                            "get_real_secs",
-                            0.0,
-                        )
+                        time_spec = metadata_snapshot.get("time_spec")
+                        if isinstance(time_spec, Mapping):
+                            device_time = float(time_spec.get("secs", 0.0) or 0.0)
+                        else:
+                            device_time = _call_value(
+                                getattr(metadata, "time_spec", None),
+                                "get_real_secs",
+                                0.0,
+                            )
                         self._finish_operation(entry, request.operation_id)
                         yield grpc_pb2.SampleFrame(
                             session_id=session.session_id,

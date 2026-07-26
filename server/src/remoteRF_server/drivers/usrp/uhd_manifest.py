@@ -1539,7 +1539,7 @@ ERRORS = (
 )
 
 
-def build_usrp_schema_v2(driver_version: str = "0.0.3") -> dict:
+def build_usrp_schema_v2(driver_version: str = "0.0.4") -> dict:
     signatures = _signatures()
     for additions in (
         _control_signatures(),

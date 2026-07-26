@@ -529,7 +529,7 @@ class UsrpSchema(DeviceSchema):
     device_type = "usrp"
     client_class = "MultiUSRP"
     client_objects = _uhd_client_objects()
-    driver_version = "0.0.3"
+    driver_version = "0.0.4"
     session_scoped = True
 
     def __init__(self):

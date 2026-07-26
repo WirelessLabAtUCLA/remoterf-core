@@ -2,6 +2,8 @@ import json
 import os
 import sys
 import tempfile
+import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +27,7 @@ from remoteRF_server.drivers.usrp.uhd_manifest import (
 )
 from remoteRF_server.server.dynamic_v2 import (
     DynamicControlV2Servicer,
+    HandleEntry,
     SampleDataV1Servicer,
     SessionManager,
 )
@@ -567,6 +570,90 @@ class DynamicV2ServerTests(unittest.TestCase):
             )
             manager.close(session.session_id)
 
+    def test_rx_prefetch_coalesces_batches_and_preserves_remainder(self):
+        entry = HandleEntry(
+            handle="rx",
+            type_id="uhd.rx_streamer.RXStreamer",
+            value=object(),
+            parent=None,
+            generation=1,
+        )
+        entry.rx_prefetch.put(
+            (np.array([[1, 2, 3]], dtype=np.complex64), {"error_code": "none"})
+        )
+        entry.rx_prefetch.put(
+            (np.array([[4, 5]], dtype=np.complex64), {"error_code": "none"})
+        )
+        first = np.empty((1, 4), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(entry, first, 0.1)
+        self.assertEqual(count, 4)
+        self.assertEqual(metadata["error_code"], "none")
+        np.testing.assert_array_equal(first, [[1, 2, 3, 4]])
+
+        second = np.empty((1, 1), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(entry, second, 0.1)
+        self.assertEqual(count, 1)
+        self.assertEqual(metadata["error_code"], "none")
+        np.testing.assert_array_equal(second, [[5]])
+
+    def test_rx_prefetch_reports_server_queue_overflow(self):
+        entry = HandleEntry(
+            handle="rx",
+            type_id="uhd.rx_streamer.RXStreamer",
+            value=object(),
+            parent=None,
+            generation=1,
+        )
+        entry.rx_prefetch.put(
+            (np.array([[1]], dtype=np.complex64), {"error_code": "none"})
+        )
+        entry.rx_prefetch_overflowed = True
+        buffer = np.empty((1, 1), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(entry, buffer, 0.1)
+        self.assertEqual(count, 1)
+        self.assertEqual(metadata["error_code"], "overflow")
+        self.assertIn("prefetch queue", metadata["error_code_repr"])
+        self.assertFalse(entry.rx_prefetch_overflowed)
+
+    def test_rx_prefetch_worker_drains_native_stream_until_stopped(self):
+        class StreamingRX:
+            def __init__(self):
+                self.calls = 0
+
+            def recv(self, buffer, metadata, timeout):
+                self.calls += 1
+                buffer[...] = self.calls
+                metadata.error_code = "none"
+                time.sleep(0.001)
+                return buffer.shape[-1]
+
+        streamer = StreamingRX()
+        entry = HandleEntry(
+            handle="rx",
+            type_id="uhd.rx_streamer.RXStreamer",
+            value=streamer,
+            parent=None,
+            generation=1,
+            stream_channels=[0],
+            cpu_format="fc32",
+        )
+        session = types.SimpleNamespace(closed=False)
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        manager = SessionManager()
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            manager._start_rx_prefetch(session, entry)
+            deadline = time.monotonic() + 1.0
+            while entry.rx_prefetch.empty() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(entry.rx_prefetch.empty())
+            self.assertGreater(streamer.calls, 0)
+            manager._stop_rx_prefetch(entry)
+        self.assertIsNone(entry.rx_worker)
+        self.assertTrue(entry.rx_prefetch_stop.is_set())
+        self.assertTrue(entry.rx_prefetch.empty())
+
     def test_reservation_loss_closes_session(self):
         inventory = FakeInventorySchema()
         context = {
@@ -658,6 +745,8 @@ class DynamicV2ServerTests(unittest.TestCase):
                     "handles": 3,
                     "async_queue_depth": 0,
                     "async_queue_overflows": 0,
+                    "rx_prefetch_queue_depth": 0,
+                    "rx_prefetch_queue_overflows": 0,
                 },
             )
             self.assertEqual(manager.close_all(), 1)
