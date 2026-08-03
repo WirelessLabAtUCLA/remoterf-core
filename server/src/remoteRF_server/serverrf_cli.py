@@ -16,6 +16,11 @@ import hashlib
 import getpass
 import yaml
 
+from remoteRF_server.drivers.usrp.profiles import (
+    get_usrp_profile,
+    inventory_for_profile,
+)
+
 def _x509_notafter_utc(cert_path: Path) -> Optional[datetime]:
     # openssl output: notAfter=Feb 16 23:12:02 2027 GMT
     rc, out = _run_capture(["openssl", "x509", "-in", str(cert_path), "-noout", "-enddate"])
@@ -266,7 +271,12 @@ def print_help() -> None:
         "\n"
         "Device options:\n"
         "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
-        "  --add --usrp <id:name:serial>       Add a serial-bound B200/USRP-2901\n"
+        "  --add --usrp-2901 <id:name:serial>  Add a serial-bound NI USRP-2901\n"
+        "  --add --usrp2901 <id:name:serial>   Legacy alias for --usrp-2901\n"
+        "  --add --usrp <id:name:serial>       Legacy alias for --usrp-2901\n"
+        "  --add --usrp-n210 <id:name:addr>    Add an address-bound N210\n"
+        "  --add --usrp-profile <id:name:profile:selector>\n"
+        "                                      Add any registered USRP profile\n"
         "  --remove <id>                       Remove device\n"
         "  --edit-name <id> <name>             Override device name\n"
         "  --show | -s                         Show all devices\n"
@@ -314,7 +324,9 @@ def print_help() -> None:
         "  serverrf --host --wipe -y\n"
         "\n"
         "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
-        "  serverrf --device --add --usrp 1:usrp2901_lab:31A2B3C\n"
+        "  serverrf --device --add --usrp-2901 1:usrp2901_lab:31A2B3C\n"
+        "  serverrf --device --add --usrp-n210 2:n210_lab:192.168.137.21\n"
+        "  serverrf --device --add --usrp-profile 3:x310_lab:x3xx:192.168.10.2\n"
         "  serverrf --device --show\n"
         "  serverrf --device --wipe -y\n"
         "\n"
@@ -773,6 +785,31 @@ def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, st
 def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
     return _parse_serial_add_spec(tok, serial_label="iio_serial")
 
+
+def _parse_address_add_spec(tok: str) -> Tuple[int, str, str]:
+    gid, name, address = _parse_serial_add_spec(tok, serial_label="addr")
+    if not _is_ip_address(address):
+        raise ValueError("addr must be an IPv4 or IPv6 address")
+    return gid, name, address
+
+
+def _parse_usrp_profile_add_spec(tok: str) -> Tuple[int, str, str, str]:
+    parts = [part.strip() for part in (tok or "").split(":", 3)]
+    if len(parts) != 4:
+        raise ValueError("Expected <gid:name:profile:selector>")
+    gid_s, name, profile_name, selector = parts
+    gid = int(gid_s)
+    if gid < 0:
+        raise ValueError("gid must be >= 0")
+    if not name:
+        raise ValueError("name is empty")
+    if not selector:
+        raise ValueError("selector is empty")
+    profile = get_usrp_profile(profile_name)
+    if profile.selector == "address" and not _is_ip_address(selector):
+        raise ValueError("selector must be an IPv4 or IPv6 address")
+    return gid, name, profile.profile_id, selector
+
 def _device_edit_name(global_id_str: str, new_name: str) -> int:
     try:
         gid = int((global_id_str or "").strip())
@@ -818,12 +855,19 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
                 init = item.get("init") or {}
                 if not isinstance(init, dict):
                     raise ValueError(f"device {gid} init must be a mapping")
-                ident = str(init.get("serial") or "").strip()
+                address = str(init.get("addr") or "").strip()
+                serial = str(init.get("serial") or "").strip()
+                device_args = str(init.get("args") or "").strip()
+                ident = address or serial or device_args
                 recs[gid] = {
                     "TYPE": dtype,
                     "NAME": str(item.get("name") or f"device-{gid}").strip(),
                     "IDENT_KIND": (
-                        "iio_serial"
+                        "address"
+                        if address
+                        else "device_args"
+                        if device_args
+                        else "iio_serial"
                         if dtype in {"pluto", "adalm_pluto"}
                         else "serial"
                     ),
@@ -857,7 +901,17 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
             init = {}
         init = dict(init)
         if ident:
-            init["serial"] = ident
+            ident_kind = str(fields.get("IDENT_KIND") or "")
+            if ident_kind == "address":
+                init["addr"] = ident
+                init.pop("serial", None)
+                init.pop("args", None)
+            elif ident_kind == "device_args":
+                init["args"] = ident
+                init.pop("addr", None)
+                init.pop("serial", None)
+            else:
+                init["serial"] = ident
         devices.append(
             {
                 "device_id": int(gid),
@@ -939,10 +993,91 @@ def _device_add_usrp(spec: str) -> int:
         "NAME": name,
         "IDENT_KIND": "serial",
         "IDENT": serial,
-        "INIT": {"serial": serial},
+        "INIT": inventory_for_profile("usrp2901", serial),
     }
     _write_device_records(recs)
     print(f"Added device: {gid} type=usrp name={name} serial={serial}")
+    return 0
+
+
+def _device_add_usrp_n210(spec: str) -> int:
+    try:
+        gid, name, address = _parse_address_add_spec(spec)
+    except Exception as exc:
+        print(f"ERROR: invalid usrp-n210 spec: {exc}", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+    for other_gid, record in recs.items():
+        if (
+            str(record.get("IDENT_KIND") or "") == "address"
+            and str(record.get("IDENT") or "") == address
+        ):
+            print(f"ERROR: address already used by global_id={other_gid}", file=sys.stderr)
+            return 2
+
+    recs[gid] = {
+        "TYPE": "usrp",
+        "NAME": name,
+        "IDENT_KIND": "address",
+        "IDENT": address,
+        "INIT": inventory_for_profile("n210", address),
+    }
+    _write_device_records(recs)
+    print(f"Added device: {gid} type=usrp profile=n210 addr={address}")
+    return 0
+
+
+def _device_add_usrp_profile(spec: str) -> int:
+    try:
+        gid, name, profile_name, selector = _parse_usrp_profile_add_spec(spec)
+        profile = get_usrp_profile(profile_name)
+        init = inventory_for_profile(profile_name, selector)
+    except Exception as exc:
+        print(f"ERROR: invalid usrp-profile spec: {exc}", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+    for other_gid, record in recs.items():
+        if (
+            str(record.get("IDENT_KIND") or "") == profile.selector
+            and str(record.get("IDENT") or "") == selector
+        ):
+            print(
+                f"ERROR: {profile.selector} already used by global_id={other_gid}",
+                file=sys.stderr,
+            )
+            return 2
+
+    recs[gid] = {
+        "TYPE": "usrp",
+        "NAME": name,
+        "IDENT_KIND": profile.selector,
+        "IDENT": selector,
+        "INIT": init,
+    }
+    _write_device_records(recs)
+    print(
+        f"Added device: {gid} type=usrp profile={profile.profile_id} "
+        f"{profile.selector}={selector}"
+    )
     return 0
 
 
@@ -1310,16 +1445,16 @@ def main() -> int:
 
         if device_mode and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
-                print("ERROR: missing device type after --device --add (expected --pluto or --usrp)", file=sys.stderr)
+                print("ERROR: missing device type after --device --add (expected --pluto, --usrp-2901, --usrp-n210, or --usrp-profile)", file=sys.stderr)
                 return 2
             dt = argv[i + 1].strip()
-            if dt not in ("--pluto", "--usrp"):
-                print("ERROR: device type must be --pluto or --usrp", file=sys.stderr)
+            if dt not in ("--pluto", "--usrp-2901", "--usrp2901", "--usrp", "--usrp-n210", "--usrp-profile"):
+                print("ERROR: device type must be --pluto, --usrp-2901, --usrp-n210, or --usrp-profile", file=sys.stderr)
                 return 2
             if i + 2 >= len(argv):
                 print(f"ERROR: missing spec after --device --add {dt}", file=sys.stderr)
                 return 2
-            device_add_type = dt[2:]
+            device_add_type = "usrp2901" if dt in ("--usrp-2901", "--usrp2901", "--usrp") else dt[2:]
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
@@ -1559,8 +1694,18 @@ def main() -> int:
             if rc != 0:
                 return rc
             did_any = True
-        elif device_add_type == "usrp" and device_add_spec is not None:
+        elif device_add_type == "usrp2901" and device_add_spec is not None:
             rc = _device_add_usrp(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+        elif device_add_type == "usrp-n210" and device_add_spec is not None:
+            rc = _device_add_usrp_n210(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+        elif device_add_type == "usrp-profile" and device_add_spec is not None:
+            rc = _device_add_usrp_profile(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

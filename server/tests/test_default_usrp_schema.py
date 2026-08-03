@@ -70,6 +70,7 @@ class DefaultUsrpSchemaTests(unittest.TestCase):
             """
             from remoteRF_server.common.idl.schema import get_driver_class
             from remoteRF_server.common.utils import get_drivers_dir
+            from remoteRF_server import serverrf_cli
             from remoteRF_server.server import device_manager
 
             seeded = get_drivers_dir() / "usrp_schema.py"
@@ -84,8 +85,31 @@ class DefaultUsrpSchemaTests(unittest.TestCase):
             dynamic = schema.get_idl_v2()
             assert dynamic["schema_version"] == "2.0"
             assert dynamic["device_type"] == "usrp"
+            assert dynamic["driver_version"] == "0.0.7"
             assert dynamic["native_api"]["version"] == "4.10.0.0"
+            assert "n210" in dynamic["hardware_profiles"]
+            assert "usrp2" in dynamic["hardware_profiles"]
+            assert "transport_address" in dynamic["capability_fields"]
+            assert "stream_format_capabilities" in dynamic["capability_fields"]
+            assert "device_profile" in dynamic["capability_fields"]
+            assert any(
+                item["profile_id"] == "usrp2901"
+                and item["support_level"] == "qualified_native"
+                for item in dynamic["hardware_profile_definitions"]
+            )
             assert len(dynamic["methods"]) >= 140
+
+            assert serverrf_cli._device_add_usrp_n210(
+                "8:Native N210:192.168.137.21"
+            ) == 0
+            n210 = serverrf_cli._read_device_records()[8]
+            assert n210["TYPE"] == "usrp"
+            assert n210["IDENT_KIND"] == "address"
+            assert n210["INIT"] == {
+                "profile": "n210",
+                "type": "usrp2",
+                "addr": "192.168.137.21",
+            }
 
             try:
                 schema.open_native_device()

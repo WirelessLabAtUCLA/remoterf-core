@@ -224,9 +224,9 @@ Some distros come with default firewall settings that block traffic on specific 
 
 ## Server Device Configuration
 
-ADALM-Pluto and local or HostRF-owned UHD B200-family inventories are supported. USRP devices
-remain registered as device type `usrp`; runtime capabilities distinguish
-`usrp2901` and `b200`.
+ADALM-Pluto and local or HostRF-owned UHD inventories are supported. Every USRP
+remains registered as device type `usrp`; a structured profile selects the UHD
+transport and runtime capabilities report the model actually opened.
 
 To connect plutos to the server:
 
@@ -283,7 +283,34 @@ serverrf -d --edit-name 0 "New Name"
 
 Note that all device and server config parameters need a 'restart' to take affect (ctrl + c -> serverrf -s).
 
-### NI USRP-2901 / B200-family
+### Structured USRP profiles
+
+The NI USRP-2901 and USRP N210 are hardware-qualified native profiles in the
+packaged RemoteRF server and client. They do not require a custom schema in
+<code>~/.config/remoterf/drivers/</code>. A fresh server installs one shared
+<code>usrp</code> schema for both devices and for generic UHD families.
+
+Profiles are data, not separate drivers. Each entry declares its canonical ID,
+aliases, UHD family/type, transport, selector, qualification level, and live
+identity match terms. The current registry contains:
+
+| Profile | Transport | Support level | Examples |
+| --- | --- | --- | --- |
+| `usrp2901` | USB | `qualified_native` | NI USRP-2901 |
+| `n210` | Ethernet | `qualified_native` | USRP N210 |
+| `b2xx` | USB | `generic_uhd` | B200, B210, B200mini, B205mini |
+| `n2xx` | Ethernet | `generic_uhd` | N200 and unqualified N2xx variants |
+| `x3xx` | Ethernet | `generic_uhd` | X300, X310 |
+| `n3xx` | Ethernet | `generic_uhd` | N300, N310, N320, N321 |
+| `x4xx` | Ethernet | `generic_uhd` | X410, X440 |
+| `e3xx` | Embedded | `generic_uhd` | E310, E320 |
+| `generic_usrp` | Runtime-detected | `generic_uhd` | UHD fallback |
+
+`generic_uhd` means the device uses the same native `uhd.usrp.MultiUSRP`
+control and streaming path, but RemoteRF has not yet run that model's physical
+qualification suite. Frequency ranges, gains, channels, sensors, clocks, and
+OTW support are still read/probed from the live device instead of copied from
+the profile.
 
 The server automatically installs and registers its complete USRP v1/v2
 schema on first startup, so clients can discover the API even when UHD is not
@@ -296,12 +323,34 @@ server does not open the device while loading inventory. It opens the
 reservation's exact `type=b200,serial=...` device only when the authenticated
 client opens a v2 session.
 
-Add a serial-bound device:
+Add a qualified serial-bound NI USRP-2901:
 
 ```bash
-serverrf --device --add --usrp 7:usrp2901_lab:31A2B3C
+serverrf --device --add --usrp-2901 7:usrp2901_lab:31A2B3C
 serverrf --device --show
 ```
+
+The older `--usrp2901` and `--usrp` spellings remain accepted as aliases for
+`--usrp-2901` so existing provisioning scripts continue to work.
+
+Add a qualified address-bound N210 on a dedicated Ethernet interface:
+
+```bash
+serverrf --device --add --usrp-n210 8:n210_lab:192.168.137.21
+serverrf --device --show
+```
+
+Add another registered family through the generic profile command:
+
+```bash
+serverrf --device --add --usrp-profile \
+  9:x310_lab:x3xx:192.168.10.2
+```
+
+The final value is interpreted according to the profile's `selector`: serial
+for USB profiles, address for network profiles, or raw UHD device arguments for
+the generic/embedded profiles. Alias names such as `x310`, `b210`, and `usrp2`
+are normalized to their canonical family profile.
 
 The canonical inventory is `~/.config/remoterf/devices.yml`:
 
@@ -311,8 +360,39 @@ devices:
     device_type: usrp
     name: usrp2901_lab
     init:
+      profile: usrp2901
+      type: b200
       serial: 31A2B3C
+  - device_id: 8
+    device_type: usrp
+    name: n210_lab
+    init:
+      profile: n210
+      type: usrp2
+      addr: 192.168.137.21
 ```
+
+The NI USRP-2901 inventory is constrained to `type=b200,serial=...`. The N210
+inventory is independently constrained to `type=usrp2,addr=...`, preventing a
+reservation from opening a different UHD transport. All profiles publish the
+same generated `uhd.usrp.MultiUSRP` API. `device_profile` contains the resolved
+structured definition, while `profile_resolution` shows whether it came from
+live native identity or inventory and flags a configured/live profile mismatch.
+
+To add a newly qualified USRP model, add one `USRPProfile` entry in
+`remoteRF_server/drivers/usrp/profiles.py`, give it identity terms and the
+correct UHD selector/type, and add a read-only hardware qualification test.
+No new server driver, gRPC service, or client API implementation is required.
+
+When a USRP session opens, RemoteRF asks native UHD to construct inactive RX
+streamers for UHD 4.10's default, `sc16`, `sc12`, and `sc8` wire formats. No
+stream command is issued and no samples are received. Successful probes are
+cached for that hardware session, populate `stream_format_capabilities.rx`,
+and determine the backward-compatible `supported_otw_formats` list. TX formats
+are not probed during capability discovery. Set
+`REMOTERF_USRP_PROBE_RX_OTW_FORMATS=0` before starting the server to disable
+the RX probe; clients may still leave `StreamArgs.otw_format` empty and let UHD
+select its default.
 
 All USRP operations exposed by the Dynamic v2 schema are available without a
 separate policy file. This includes transmit controls, transmit streaming,

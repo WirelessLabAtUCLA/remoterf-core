@@ -302,11 +302,13 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
             init = {}
 
         serial = str(init.get("serial") or "").strip()
+        address = str(init.get("addr") or "").strip()
+        device_args = str(init.get("args") or "").strip()
 
         recs[gid] = {
             "TYPE": dtype,
             "NAME": name,
-            "IDENT": serial,
+            "IDENT": address or serial or device_args,
             "INIT": init,
         }
 

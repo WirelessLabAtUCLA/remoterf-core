@@ -30,6 +30,7 @@ from remoteRF_server.server.dynamic_v2 import (
     HandleEntry,
     SampleDataV1Servicer,
     SessionManager,
+    snapshot_native,
 )
 from remoteRF_server.server.v2_errors import (
     RemoteRFOverloadError,
@@ -64,6 +65,20 @@ class FakeRXMetadata:
 
 class FakeNativeDevice:
     pass
+
+
+class Fake_meta_range:
+    def __iter__(self):
+        raise TypeError("this PyUHD build does not expose range iteration")
+
+    def start(self):
+        return 42e6
+
+    def stop(self):
+        return 6.008e9
+
+    def step(self):
+        return 0.25
 
 
 class FakeProperty:
@@ -142,6 +157,25 @@ class FakeInventorySchema:
 
 
 class DynamicV2ServerTests(unittest.TestCase):
+    def test_non_iterable_meta_range_preserves_aggregate_interval(self):
+        snapshot = snapshot_native(Fake_meta_range())
+
+        self.assertEqual(snapshot["__uhd_type__"], "MetaRange")
+        self.assertEqual(snapshot["start"], 42e6)
+        self.assertEqual(snapshot["stop"], 6.008e9)
+        self.assertEqual(snapshot["step"], 0.25)
+        self.assertEqual(
+            snapshot["ranges"],
+            [
+                {
+                    "__uhd_type__": "Range",
+                    "start": 42e6,
+                    "stop": 6.008e9,
+                    "step": 0.25,
+                }
+            ],
+        )
+
     def test_usrp_console_logging_is_forced_off_without_remoterf_opt_in(self):
         with patch.dict(
             os.environ,
@@ -165,6 +199,24 @@ class DynamicV2ServerTests(unittest.TestCase):
         self.assertEqual(schema["schema_version"], "2.0")
         self.assertGreaterEqual(len(schema["methods"]), 140)
         self.assertIn("usrp2901", schema["hardware_profiles"])
+        self.assertIn("n210", schema["hardware_profiles"])
+        definitions = {
+            item["profile_id"]: item
+            for item in schema["hardware_profile_definitions"]
+        }
+        self.assertEqual(
+            definitions["usrp2901"]["support_level"],
+            "qualified_native",
+        )
+        self.assertEqual(
+            definitions["n210"]["support_level"],
+            "qualified_native",
+        )
+        self.assertEqual(definitions["x3xx"]["support_level"], "generic_uhd")
+        self.assertIn("device_profile", schema["capability_fields"])
+        self.assertIn("profile_resolution", schema["capability_fields"])
+        self.assertIn("transport_address", schema["capability_fields"])
+        self.assertIn("stream_format_capabilities", schema["capability_fields"])
         self.assertNotIn("deferred", schema["coverage"].values())
         self.assertIn(
             "unsupported_by_hardware_native_equivalent",
@@ -984,6 +1036,103 @@ class DynamicV2ServerTests(unittest.TestCase):
                 self.assertEqual(records[7]["IDENT"], "31A2B3C")
                 self.assertFalse(Path(tmp, "devices.env").exists())
 
+    def test_usrp2901_cli_flag_and_legacy_usrp_alias_share_the_same_handler(self):
+        for option in ("--usrp-2901", "--usrp2901", "--usrp"):
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as tmp:
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"REMOTERF_CONFIG_DIR": tmp},
+                        clear=False,
+                    ),
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "serverrf",
+                            "--device",
+                            "--add",
+                            option,
+                            "7:lab_usrp:31A2B3C",
+                        ],
+                    ),
+                ):
+                    self.assertEqual(serverrf_cli.main(), 0)
+                    record = serverrf_cli._read_device_records()[7]
+                    self.assertEqual(record["TYPE"], "usrp")
+                    self.assertEqual(record["IDENT_KIND"], "serial")
+                    self.assertEqual(record["IDENT"], "31A2B3C")
+                    self.assertEqual(record["INIT"]["profile"], "usrp2901")
+
+    def test_n210_cli_writes_address_bound_usrp_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"REMOTERF_CONFIG_DIR": tmp},
+                clear=False,
+            ):
+                self.assertEqual(
+                    serverrf_cli._device_add_usrp_n210(
+                        "8:lab_n210:192.168.137.21"
+                    ),
+                    0,
+                )
+                inventory = Path(tmp, "devices.yml")
+                text = inventory.read_text(encoding="utf-8")
+                self.assertIn("device_type: usrp", text)
+                self.assertIn("type: usrp2", text)
+                self.assertIn("addr: 192.168.137.21", text)
+                self.assertNotIn("serial:", text)
+                records = serverrf_cli._read_device_records()
+                self.assertEqual(records[8]["TYPE"], "usrp")
+                self.assertEqual(records[8]["IDENT_KIND"], "address")
+                self.assertEqual(records[8]["IDENT"], "192.168.137.21")
+                self.assertEqual(
+                    records[8]["INIT"],
+                    {
+                        "profile": "n210",
+                        "type": "usrp2",
+                        "addr": "192.168.137.21",
+                    },
+                )
+
+    def test_generic_usrp_profile_cli_writes_structured_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"REMOTERF_CONFIG_DIR": tmp},
+                clear=False,
+            ):
+                self.assertEqual(
+                    serverrf_cli._device_add_usrp_profile(
+                        "9:lab_x310:x310:192.168.10.2"
+                    ),
+                    0,
+                )
+                records = serverrf_cli._read_device_records()
+                self.assertEqual(records[9]["IDENT_KIND"], "address")
+                self.assertEqual(
+                    records[9]["INIT"],
+                    {
+                        "profile": "x3xx",
+                        "type": "x300",
+                        "addr": "192.168.10.2",
+                    },
+                )
+
+    def test_n210_cli_rejects_non_ip_address(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"REMOTERF_CONFIG_DIR": tmp},
+                clear=False,
+            ):
+                self.assertEqual(
+                    serverrf_cli._device_add_usrp_n210("8:lab_n210:not-an-ip"),
+                    2,
+                )
+                self.assertFalse(Path(tmp, "devices.yml").exists())
+
     def test_pluto_cli_uses_registered_adalm_pluto_device_type(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -1042,7 +1191,11 @@ class DynamicV2ServerTests(unittest.TestCase):
                                 "device_id": 7,
                                 "device_type": "usrp",
                                 "name": "lab_usrp",
-                                "init": {"serial": "31A2B3C"},
+                                "init": {
+                                    "profile": "usrp2901",
+                                    "type": "b200",
+                                    "serial": "31A2B3C",
+                                },
                             },
                         ]
                     },

@@ -41,6 +41,13 @@ class UHD410USRP2901HardwareTests(unittest.TestCase):
     def test_identity_versions_and_transport_capabilities(self):
         capabilities = self.schema.get_capabilities_v2()
         self.assertEqual(capabilities["hardware_profile"], "usrp2901")
+        self.assertEqual(
+            capabilities["device_profile"]["support_level"],
+            "qualified_native",
+        )
+        self.assertTrue(
+            capabilities["profile_resolution"]["requested_profile_matches"]
+        )
         self.assertEqual(capabilities["native_product"], "B210")
         self.assertEqual(capabilities["native_name"], "NI2901")
         self.assertEqual(capabilities["native_serial"], SERIAL)
@@ -53,6 +60,11 @@ class UHD410USRP2901HardwareTests(unittest.TestCase):
         self.assertTrue(capabilities["usb_speed"])
         self.assertEqual(capabilities["rx_channel_count"], 2)
         self.assertEqual(capabilities["tx_channel_count"], 2)
+        self.assertEqual(
+            capabilities["stream_format_capabilities"]["rx"]["status"],
+            "runtime_probed",
+        )
+        self.assertIn("sc16", capabilities["supported_otw_formats"])
         self.assertTrue(
             capabilities["advanced_interfaces"]["property_tree"]
         )

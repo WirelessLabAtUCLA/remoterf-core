@@ -395,6 +395,41 @@ class DeviceSchemaTests(unittest.TestCase):
             device.args,
             "type=b200,serial=31A2B3C,num_recv_frames=256",
         )
+        device = usrp_schema._connect_usrp(addr="192.168.137.21")
+        self.assertEqual(
+            device.args,
+            "type=usrp2,addr=192.168.137.21,num_recv_frames=256",
+        )
+        device = usrp_schema._connect_usrp(
+            type="usrp2",
+            addr="192.168.137.21",
+        )
+        self.assertEqual(
+            device.args,
+            "type=usrp2,addr=192.168.137.21,num_recv_frames=256",
+        )
+        device = usrp_schema._connect_usrp(
+            profile="x310",
+            addr="192.168.10.2",
+        )
+        self.assertEqual(
+            device.args,
+            "type=x300,addr=192.168.10.2,num_recv_frames=256",
+        )
+        with self.assertRaisesRegex(ValueError, "requires UHD type"):
+            usrp_schema._connect_usrp(
+                profile="n210",
+                type="b200",
+                addr="192.168.137.21",
+            )
+        device = usrp_schema._connect_usrp(
+            profile="e320",
+            args="addr=192.168.20.2",
+        )
+        self.assertEqual(
+            device.args,
+            "type=e3xx,addr=192.168.20.2,num_recv_frames=256",
+        )
         device = usrp_schema._connect_usrp(
             args="type=b200,serial=31A2B3C,num_recv_frames=64"
         )
@@ -499,6 +534,139 @@ class DeviceSchemaTests(unittest.TestCase):
                 "__uhd_type__": "StreamCMD",
                 "mode": "not_a_mode",
             })
+
+    def test_usrp_capabilities_runtime_probe_rx_otw_formats_once(self):
+        from remoteRF_server.drivers.usrp import usrp_schema
+
+        class StreamArgs:
+            def __init__(self, cpu_format, otw_format):
+                self.cpu_format = cpu_format
+                self.otw_format = otw_format
+                self.channels = []
+
+        class Streamer:
+            def __init__(self, max_num_samps):
+                self.max_num_samps = max_num_samps
+
+            def get_max_num_samps(self):
+                return self.max_num_samps
+
+        class Device:
+            def __init__(self):
+                self.rx_stream_requests = []
+
+            def get_rx_num_channels(self):
+                return 1
+
+            def get_tx_num_channels(self):
+                return 1
+
+            def get_usrp_rx_info(self, chan):
+                return {
+                    "mboard_name": "N210",
+                    "mboard_id": "N210r4",
+                    "mboard_serial": "30FB628",
+                }
+
+            def get_usrp_tx_info(self, chan):
+                return self.get_usrp_rx_info(chan)
+
+            def get_rx_stream(self, stream_args):
+                request = (
+                    stream_args.cpu_format,
+                    stream_args.otw_format,
+                    tuple(stream_args.channels),
+                )
+                self.rx_stream_requests.append(request)
+                if stream_args.otw_format == "sc12":
+                    raise RuntimeError(
+                        "USRP RX cannot handle requested wire format: sc12"
+                    )
+                return Streamer(
+                    726 if stream_args.otw_format == "sc8" else 363
+                )
+
+        fake_uhd = types.SimpleNamespace(
+            usrp=types.SimpleNamespace(StreamArgs=StreamArgs),
+            get_version_string=lambda: "4.10.0.0",
+            get_abi_string=lambda: "test-abi",
+        )
+        usrp_schema.uhd = fake_uhd
+        device = Device()
+        schema = usrp_schema.UsrpSchema()
+        schema.bind_inventory({"type": "usrp2", "addr": "192.168.137.21"})
+        schema.bind(device)
+
+        capabilities = schema.get_capabilities_v2()
+        self.assertEqual(capabilities["hardware_profile"], "n210")
+        self.assertEqual(
+            capabilities["device_profile"]["support_level"],
+            "qualified_native",
+        )
+        self.assertEqual(
+            capabilities["profile_resolution"]["source"],
+            "native_identity",
+        )
+        probe = capabilities["stream_format_capabilities"]
+        self.assertEqual(probe["rx"]["status"], "runtime_probed")
+        self.assertTrue(probe["rx"]["default"]["supported"])
+        self.assertEqual(probe["rx"]["default"]["max_num_samps"], 363)
+        self.assertEqual(
+            {
+                item["otw_format"]: item["supported"]
+                for item in probe["rx"]["formats"]
+            },
+            {"sc16": True, "sc12": False, "sc8": True},
+        )
+        self.assertEqual(capabilities["supported_otw_formats"], ["sc16", "sc8"])
+        self.assertEqual(probe["tx"]["status"], "not_probed")
+        self.assertEqual(
+            device.rx_stream_requests,
+            [
+                ("fc32", "", (0,)),
+                ("fc32", "sc16", (0,)),
+                ("fc32", "sc12", (0,)),
+                ("fc32", "sc8", (0,)),
+            ],
+        )
+
+        self.assertEqual(schema.get_capabilities_v2(), capabilities)
+        self.assertEqual(len(device.rx_stream_requests), 4)
+        self.assertFalse(hasattr(schema, "_usrp_streamers"))
+
+    def test_usrp_runtime_otw_probe_can_be_disabled(self):
+        from remoteRF_server.drivers.usrp import usrp_schema
+
+        class Device:
+            def get_rx_num_channels(self):
+                return 1
+
+            def get_tx_num_channels(self):
+                return 0
+
+            def get_usrp_rx_info(self, chan):
+                return {"mboard_name": "test", "mboard_id": "test"}
+
+            def get_rx_stream(self, stream_args):
+                raise AssertionError("disabled probe must not create a streamer")
+
+        usrp_schema.uhd = types.SimpleNamespace(
+            usrp=types.SimpleNamespace(StreamArgs=object),
+            get_version_string=lambda: "4.10.0.0",
+            get_abi_string=lambda: "test-abi",
+        )
+        schema = usrp_schema.UsrpSchema()
+        schema.bind(Device())
+
+        with patch.dict(
+            os.environ,
+            {"REMOTERF_USRP_PROBE_RX_OTW_FORMATS": "0"},
+        ):
+            capabilities = schema.get_capabilities_v2()
+
+        probe = capabilities["stream_format_capabilities"]["rx"]
+        self.assertEqual(probe["status"], "disabled")
+        self.assertEqual(capabilities["supported_otw_formats"], [])
 
     def test_usrp_streamer_lifecycle_uses_server_handles(self):
         fake_uhd = types.ModuleType("uhd")

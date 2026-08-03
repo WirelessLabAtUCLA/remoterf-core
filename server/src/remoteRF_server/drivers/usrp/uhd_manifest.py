@@ -11,6 +11,7 @@ import re
 from typing import Iterable
 
 from ...common.idl.v2 import build_schema, method, object_type, overload, parameter
+from .profiles import advertised_profile_names, profile_definitions
 
 TARGET_UHD_VERSION = "4.10.0.0"
 TARGET_API_FAMILY = "uhd-python"
@@ -1516,16 +1517,18 @@ def _property_tree_methods() -> list[dict]:
 
 
 CAPABILITY_FIELDS = (
-    "remote_device_type", "hardware_profile", "native_product", "native_name",
+    "remote_device_type", "hardware_profile", "device_profile",
+    "profile_resolution", "native_product", "native_name",
     "native_serial", "uhd_version", "uhd_abi", "firmware_version",
-    "fpga_version", "fpga_image", "transport_type", "usb_speed",
+    "fpga_version", "fpga_image", "transport_type", "transport_address", "usb_speed",
     "transport_link_rate_bps",
     "rx_channel_count", "tx_channel_count", "rx_frequency_ranges_per_channel",
     "tx_frequency_ranges_per_channel", "rx_gain_ranges_per_channel",
     "tx_gain_ranges_per_channel", "rx_bandwidth_ranges_per_channel",
     "tx_bandwidth_ranges_per_channel", "master_clock_rate_range", "time_sources",
     "clock_sources", "gpio_banks", "sensors", "supported_cpu_formats",
-    "supported_otw_formats", "maximum_remote_payload_bytes",
+    "supported_otw_formats", "stream_format_capabilities",
+    "maximum_remote_payload_bytes",
     "supported_streaming_protocol_versions",
     "remote_resource_limits", "advanced_interfaces",
 )
@@ -1539,7 +1542,7 @@ ERRORS = (
 )
 
 
-def build_usrp_schema_v2(driver_version: str = "0.0.4") -> dict:
+def build_usrp_schema_v2(driver_version: str = "0.0.7") -> dict:
     signatures = _signatures()
     for additions in (
         _control_signatures(),
@@ -1628,7 +1631,8 @@ def build_usrp_schema_v2(driver_version: str = "0.0.4") -> dict:
             "abi": "runtime-checked",
             "generator_version": "remoterf-uhd-manifest-v1",
         },
-        hardware_profiles=["usrp2901", "b200", "b210"],
+        hardware_profiles=advertised_profile_names(),
+        hardware_profile_definitions=profile_definitions(),
         objects=_objects(),
         methods=methods,
         errors=[{"code": name, "python_class": name} for name in ERRORS],

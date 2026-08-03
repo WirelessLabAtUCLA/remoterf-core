@@ -270,12 +270,27 @@ def snapshot_native(value: Any):
             ranges = [snapshot_native(item) for item in value]
         except TypeError:
             pass
+        start = snapshot_native(_call_value(value, "start"))
+        stop = snapshot_native(_call_value(value, "stop"))
+        step = snapshot_native(_call_value(value, "step"))
+        if not ranges and start is not None and stop is not None:
+            # UHD 4.10's Python MetaRange exposes aggregate methods but is not
+            # iterable on every build. Preserve that interval as one Range so
+            # clients do not decode a valid hardware range as an empty list.
+            ranges = [
+                {
+                    "__uhd_type__": "Range",
+                    "start": start,
+                    "stop": stop,
+                    "step": step,
+                }
+            ]
         return {
             "__uhd_type__": "MetaRange",
             "ranges": ranges,
-            "start": snapshot_native(_call_value(value, "start")),
-            "stop": snapshot_native(_call_value(value, "stop")),
-            "step": snapshot_native(_call_value(value, "step")),
+            "start": start,
+            "stop": stop,
+            "step": step,
         }
 
     if class_name == "range" or class_name.endswith("_range"):
