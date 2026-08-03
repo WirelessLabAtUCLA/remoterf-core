@@ -304,11 +304,16 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
         serial = str(init.get("serial") or "").strip()
         address = str(init.get("addr") or "").strip()
         device_args = str(init.get("args") or "").strip()
+        device_index = (
+            str(init.get("device_index")).strip()
+            if "device_index" in init
+            else ""
+        )
 
         recs[gid] = {
             "TYPE": dtype,
             "NAME": name,
-            "IDENT": address or serial or device_args,
+            "IDENT": address or serial or device_args or device_index,
             "INIT": init,
         }
 
@@ -547,9 +552,13 @@ def _seed_default_usrp_driver() -> None:
         ),
     )
 
+def _seed_default_rtl_sdr_driver() -> None:
+    _seed_default_driver("rtl_sdr_schema.py", "rtl_sdr")
+
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
     _seed_default_usrp_driver()
+    _seed_default_rtl_sdr_driver()
 
     try:
         from ..common.idl import pluto_schema as _  # noqa: F401
@@ -565,6 +574,11 @@ def _load_all_drivers() -> None:
         from ..drivers.usrp import usrp_schema as _  # noqa: F401
     except Exception as e:
         print(f"Warning: could not load built-in usrp driver: {e}")
+
+    try:
+        from ..drivers.rtl_sdr import rtl_sdr_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in rtl_sdr driver: {e}")
 
     results = load_drivers()
     for fname, status in results.items():
@@ -1028,6 +1042,37 @@ def reload_devices() -> None:
 
     # refresh host online/offline status after reload (best-effort)
     _sync_host_devices(force=True)
+
+
+def close_local_devices() -> int:
+    """Release server-owned native handles during an orderly shutdown."""
+    with _state_lock:
+        schemas = [
+            state.dev
+            for state in _devices.values()
+            if state.origin == "local" and state.dev is not None
+        ]
+
+    closed = 0
+    for schema in schemas:
+        native = getattr(schema, "device", None)
+        if native is None:
+            continue
+        close_native = getattr(schema, "close_native_device", None)
+        try:
+            if callable(close_native):
+                close_native()
+            else:
+                close = getattr(native, "close", None)
+                if callable(close):
+                    close()
+                bind = getattr(schema, "bind", None)
+                if callable(bind):
+                    bind(None)
+            closed += 1
+        except Exception as exc:
+            print(f"Warning: could not close local device cleanly: {exc}")
+    return closed
 
 def set_pluto(ip: str = "192.168.2.1"):
     # kept for compatibility (no-op)

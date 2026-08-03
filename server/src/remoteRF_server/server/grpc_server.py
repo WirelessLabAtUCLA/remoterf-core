@@ -42,7 +42,7 @@ from .dynamic_v2 import (
 from .host_dynamic_v2 import host_session_proxy
 from .acc_perms import perms
 from ..common.utils import *
-from .device_manager import get_all_devices, get_all_devices_str
+from .device_manager import close_local_devices, get_all_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
 from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
 
@@ -196,6 +196,7 @@ class ServerRuntime:
         finally:
             session_manager.close_all()
             host_session_proxy.close_all()
+            close_local_devices()
             if self.cert_server is not None:
                 stop_cert_provider(self.cert_server)
             if (

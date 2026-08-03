@@ -224,9 +224,10 @@ Some distros come with default firewall settings that block traffic on specific 
 
 ## Server Device Configuration
 
-ADALM-Pluto and local or HostRF-owned UHD inventories are supported. Every USRP
-remains registered as device type `usrp`; a structured profile selects the UHD
-transport and runtime capabilities report the model actually opened.
+ADALM-Pluto, RTL-SDR, and local or HostRF-owned UHD inventories are supported.
+Every USRP remains registered as device type `usrp`; a structured profile
+selects the UHD transport and runtime capabilities report the model actually
+opened.
 
 To connect plutos to the server:
 
@@ -282,6 +283,62 @@ serverrf -d --edit-name 0 "New Name"
 ```
 
 Note that all device and server config parameters need a 'restart' to take affect (ctrl + c -> serverrf -s).
+
+### RTL-SDR
+
+RTL-SDR is a packaged receive-only schema driver. The native USB library and
+Python wrapper are installed on the server that owns the dongle; clients do not
+need either dependency:
+
+```bash
+conda install -c conda-forge rtl-sdr
+python -m pip install "remoteRF-server[rtl-sdr]"
+```
+
+`pyrtlsdrlib` supplies a matching native library for PyRtlSdr. This avoids
+loading an incompatible system `librtlsdr` that is missing optional symbols.
+For RTL-SDR Blog V4 hardware, use a native library with V4/R828D support.
+
+Confirm discovery before adding the inventory entry:
+
+```bash
+rtl_test -t
+```
+
+Add by stable USB serial when possible, or by zero-based index when a device
+has no useful serial:
+
+```bash
+serverrf --device --add --rtl-sdr 4:rtl_fm:serial=00000001
+serverrf --device --add --rtl-sdr 4:rtl_fm:index=0
+serverrf --device --show
+```
+
+The canonical YAML form is:
+
+```yaml
+devices:
+  - device_id: 4
+    device_type: rtl_sdr
+    name: rtl_fm
+    init:
+      serial: "00000001"
+```
+
+The schema exposes center frequency (`center_freq`/`fc`), sample rate
+(`sample_rate`/`rs`), gain, valid gains, frequency correction, bandwidth, AGC,
+bias tee, direct sampling, offset tuning, dithering, bounded `read_samples`,
+bounded `read_bytes`, buffer reset, identity, and a runtime capability report.
+Optional native controls are probed at runtime. An unsupported control remains
+discoverable but raises a clear `NotImplementedError`; `get_capabilities()`
+lists both supported and unsupported optional controls. Remote async callbacks
+are intentionally not exposed because callbacks cannot cross an RPC boundary;
+clients perform repeated bounded synchronous reads instead.
+
+Ubuntu may load the DVB kernel driver for the dongle. A compatible
+`librtlsdr` can detach it while opening the device. If that is disabled in the
+installed native build, blacklist `dvb_usb_rtl28xxu` or unload it before
+starting RemoteRF.
 
 ### Structured USRP profiles
 
