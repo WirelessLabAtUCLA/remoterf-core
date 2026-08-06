@@ -92,8 +92,12 @@ mamba create -n remoterf -y -c conda-forge -c defaults  python=3.10 pip setuptoo
 
 conda activate remoterf
 python -m pip install -U pip
-python -m pip install pyadi-iio remoterf-server
+python -m pip install remoterf-server
 ```
+
+The base `remoterf-server` package installs the Python runtimes for every
+packaged device driver, including ADALM-Pluto, RTL-SDR, and HackRF. No device
+extras are required.
 
 ## Server Config
 
@@ -286,13 +290,13 @@ Note that all device and server config parameters need a 'restart' to take affec
 
 ### RTL-SDR
 
-RTL-SDR is a packaged receive-only schema driver. The native USB library and
-Python wrapper are installed on the server that owns the dongle; clients do not
-need either dependency:
+RTL-SDR is a packaged receive-only schema driver. Its Python wrapper and
+packaged native library are required dependencies of `remoterf-server`; clients
+do not need either dependency. Install the optional command-line tools only if
+you want to run the local `rtl_test` diagnostic:
 
 ```bash
 conda install -c conda-forge rtl-sdr
-python -m pip install "remoteRF-server[rtl-sdr]"
 ```
 
 `pyrtlsdrlib` supplies a matching native library for PyRtlSdr. This avoids
@@ -328,10 +332,9 @@ devices:
 The schema exposes center frequency (`center_freq`/`fc`), sample rate
 (`sample_rate`/`rs`), gain, valid gains, frequency correction, bandwidth, AGC,
 bias tee, direct sampling, offset tuning, dithering, bounded `read_samples`,
-bounded `read_bytes`, buffer reset, identity, and a runtime capability report.
+bounded `read_bytes`, buffer reset, and identity.
 Optional native controls are probed at runtime. An unsupported control remains
-discoverable but raises a clear `NotImplementedError`; `get_capabilities()`
-lists both supported and unsupported optional controls. Remote async callbacks
+discoverable but raises a clear `NotImplementedError`. Remote async callbacks
 are intentionally not exposed because callbacks cannot cross an RPC boundary;
 clients perform repeated bounded synchronous reads instead.
 
@@ -340,12 +343,42 @@ Ubuntu may load the DVB kernel driver for the dongle. A compatible
 installed native build, blacklist `dvb_usb_rtl28xxu` or unload it before
 starting RemoteRF.
 
+### HackRF
+
+HackRF is a packaged schema driver backed by `pyhackrf2`, which is installed by
+the base `remoterf-server` package. Install the native HackRF runtime and tools
+on the server that owns the radio:
+
+```bash
+sudo apt-get install hackrf
+hackrf_info
+```
+
+Add each device to `~/.config/remoterf/devices.yml` by stable serial when
+possible:
+
+```yaml
+devices:
+  - device_id: 10
+    device_type: hackrf
+    name: HackRF One
+    init:
+      serial: "0000000000000000719031ac235bb14a"
+```
+
+The generated `HackRF` client exposes center frequency, sample rate, filter
+bandwidth, LNA/VGA/TXVGA gains, front-end amplifier state, bias tee state,
+receive sample-count limit, bounded synchronous IQ reads, TX-buffer loading,
+enumeration, and serial-number access. The wrapper also compensates for the
+recursive LNA getter and stale amplifier state in `pyhackrf2` 1.0.3.
+
 ### Structured USRP profiles
 
-The NI USRP-2901 and USRP N210 are hardware-qualified native profiles in the
-packaged RemoteRF server and client. They do not require a custom schema in
+The NI USRP-2901, Ettus Research USRP B205-mini, and USRP N210 are
+hardware-qualified native profiles in the packaged RemoteRF server and client.
+They do not require a custom schema in
 <code>~/.config/remoterf/drivers/</code>. A fresh server installs one shared
-<code>usrp</code> schema for both devices and for generic UHD families.
+<code>usrp</code> schema for all of them and for generic UHD families.
 
 Profiles are data, not separate drivers. Each entry declares its canonical ID,
 aliases, UHD family/type, transport, selector, qualification level, and live
@@ -354,8 +387,9 @@ identity match terms. The current registry contains:
 | Profile | Transport | Support level | Examples |
 | --- | --- | --- | --- |
 | `usrp2901` | USB | `qualified_native` | NI USRP-2901 |
+| `b205mini` | USB | `qualified_native` | Ettus Research USRP B205-mini/B205mini-i |
 | `n210` | Ethernet | `qualified_native` | USRP N210 |
-| `b2xx` | USB | `generic_uhd` | B200, B210, B200mini, B205mini |
+| `b2xx` | USB | `generic_uhd` | B200, B210, B200mini |
 | `n2xx` | Ethernet | `generic_uhd` | N200 and unqualified N2xx variants |
 | `x3xx` | Ethernet | `generic_uhd` | X300, X310 |
 | `n3xx` | Ethernet | `generic_uhd` | N300, N310, N320, N321 |
@@ -390,6 +424,17 @@ serverrf --device --show
 The older `--usrp2901` and `--usrp` spellings remain accepted as aliases for
 `--usrp-2901` so existing provisioning scripts continue to work.
 
+Add a qualified serial-bound Ettus Research USRP B205-mini:
+
+```bash
+serverrf --device --add --usrp-b205-mini 9:b205mini_lab:31E9F48
+serverrf --device --show
+```
+
+The `--usrp-b205mini` and `--b205mini` spellings are accepted as aliases.
+Registration stores the explicit `b205mini` profile, UHD `type=b200`, and the
+device serial, so it remains distinct from an NI USRP-2901 on the same server.
+
 Add a qualified address-bound N210 on a dedicated Ethernet interface:
 
 ```bash
@@ -401,7 +446,7 @@ Add another registered family through the generic profile command:
 
 ```bash
 serverrf --device --add --usrp-profile \
-  9:x310_lab:x3xx:192.168.10.2
+  10:x310_lab:x3xx:192.168.10.2
 ```
 
 The final value is interpreted according to the profile's `selector`: serial
@@ -427,14 +472,22 @@ devices:
       profile: n210
       type: usrp2
       addr: 192.168.137.21
+  - device_id: 9
+    device_type: usrp
+    name: b205mini_lab
+    init:
+      profile: b205mini
+      type: b200
+      serial: 31E9F48
 ```
 
-The NI USRP-2901 inventory is constrained to `type=b200,serial=...`. The N210
-inventory is independently constrained to `type=usrp2,addr=...`, preventing a
-reservation from opening a different UHD transport. All profiles publish the
-same generated `uhd.usrp.MultiUSRP` API. `device_profile` contains the resolved
-structured definition, while `profile_resolution` shows whether it came from
-live native identity or inventory and flags a configured/live profile mismatch.
+The NI USRP-2901 and B205-mini inventories each use an explicit profile plus
+their unique `type=b200,serial=...` selector. The N210 inventory is independently
+constrained to `type=usrp2,addr=...`, preventing a reservation from opening a
+different UHD transport. All profiles publish the same generated
+`uhd.usrp.MultiUSRP` API. `device_profile` contains the resolved structured
+definition, while `profile_resolution` shows whether it came from live native
+identity or inventory and flags a configured/live profile mismatch.
 
 To add a newly qualified USRP model, add one `USRPProfile` entry in
 `remoteRF_server/drivers/usrp/profiles.py`, give it identity terms and the

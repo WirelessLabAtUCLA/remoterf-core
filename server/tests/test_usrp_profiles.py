@@ -23,8 +23,13 @@ class USRPProfileTests(unittest.TestCase):
             for profile in USRP_PROFILES
             if profile.support_level == QUALIFIED_NATIVE
         }
-        self.assertEqual(qualified, {"usrp2901", "n210"})
+        self.assertEqual(qualified, {"usrp2901", "b205mini", "n210"})
         self.assertEqual(get_usrp_profile("usrp-2901").profile_id, "usrp2901")
+        self.assertEqual(get_usrp_profile("b205i").profile_id, "b205mini")
+        self.assertEqual(
+            get_usrp_profile("usrp-b205-mini").profile_id,
+            "b205mini",
+        )
         self.assertEqual(get_usrp_profile("usrp2").profile_id, "n2xx")
         self.assertEqual(get_usrp_profile("x310").profile_id, "x3xx")
         self.assertEqual(get_usrp_profile("x310").support_level, GENERIC_UHD)
@@ -36,6 +41,14 @@ class USRPProfileTests(unittest.TestCase):
                 "profile": "usrp2901",
                 "type": "b200",
                 "serial": "31A2B3C",
+            },
+        )
+        self.assertEqual(
+            inventory_for_profile("b205mini", "31E9F48"),
+            {
+                "profile": "b205mini",
+                "type": "b200",
+                "serial": "31E9F48",
             },
         )
         self.assertEqual(
@@ -109,6 +122,15 @@ class USRPProfileTests(unittest.TestCase):
         self.assertEqual(profile.profile_id, "usrp2901")
         self.assertTrue(resolution["requested_profile_matches"])
 
+        profile, resolution = resolve_live_profile(
+            {"profile": "usrp2901", "type": "b200", "serial": "31E9F48"},
+            "B205mini",
+            "B205mini",
+        )
+        self.assertEqual(profile.profile_id, "b205mini")
+        self.assertEqual(resolution["source"], "native_identity")
+        self.assertFalse(resolution["requested_profile_matches"])
+
     def test_profile_definitions_are_json_safe_and_extensible(self):
         definitions = profile_definitions()
         json.dumps(definitions)
@@ -116,6 +138,8 @@ class USRPProfileTests(unittest.TestCase):
         self.assertEqual(by_id["n210"]["transport"], "ethernet")
         self.assertIn("n210", by_id["n210"]["identity_terms"])
         self.assertEqual(by_id["usrp2901"]["support_level"], QUALIFIED_NATIVE)
+        self.assertEqual(by_id["b205mini"]["support_level"], QUALIFIED_NATIVE)
+        self.assertEqual(by_id["b205mini"]["transport"], "usb")
         self.assertIn("x4xx", by_id)
         self.assertIn("generic_usrp", by_id)
 

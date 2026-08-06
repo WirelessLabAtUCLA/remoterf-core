@@ -597,7 +597,7 @@ class DeviceSchemaTests(unittest.TestCase):
         schema.bind_inventory({"type": "usrp2", "addr": "192.168.137.21"})
         schema.bind(device)
 
-        capabilities = schema.get_capabilities_v2()
+        capabilities = schema.build_session_metadata_v2()
         self.assertEqual(capabilities["hardware_profile"], "n210")
         self.assertEqual(
             capabilities["device_profile"]["support_level"],
@@ -630,9 +630,95 @@ class DeviceSchemaTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(schema.get_capabilities_v2(), capabilities)
+        self.assertEqual(schema.build_session_metadata_v2(), capabilities)
         self.assertEqual(len(device.rx_stream_requests), 4)
         self.assertFalse(hasattr(schema, "_usrp_streamers"))
+
+    def test_b205mini_capabilities_use_live_single_channel_identity(self):
+        from remoteRF_server.drivers.usrp import usrp_schema
+
+        class Property:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class Tree:
+            values = {
+                "/mboards/0/fw_version": "8.0",
+                "/mboards/0/fpga_version": "7.0",
+                "/mboards/0/usb_version": "3",
+            }
+
+            def access_str(self, path):
+                if path not in self.values:
+                    raise KeyError(path)
+                return Property(self.values[path])
+
+        class Device:
+            def get_rx_num_channels(self):
+                return 1
+
+            def get_tx_num_channels(self):
+                return 1
+
+            def get_usrp_rx_info(self, chan):
+                return {
+                    "mboard_name": "B205mini",
+                    "mboard_id": "B205mini",
+                    "mboard_serial": "31E9F48",
+                }
+
+            def get_usrp_tx_info(self, chan):
+                return self.get_usrp_rx_info(chan)
+
+            def get_tree(self):
+                return Tree()
+
+        fake_uhd = types.SimpleNamespace(
+            get_version_string=lambda: "4.10.0.0",
+            get_abi_string=lambda: "test-abi",
+        )
+        schema = usrp_schema.UsrpSchema()
+        schema.bind_inventory({
+            "profile": "b205mini",
+            "type": "b200",
+            "serial": "31E9F48",
+        })
+        schema.bind(Device())
+
+        with (
+            patch.object(usrp_schema, "uhd", fake_uhd),
+            patch.dict(
+                os.environ,
+                {"REMOTERF_USRP_PROBE_RX_OTW_FORMATS": "0"},
+                clear=False,
+            ),
+        ):
+            capabilities = schema.build_session_metadata_v2()
+
+        self.assertEqual(capabilities["hardware_profile"], "b205mini")
+        self.assertEqual(capabilities["native_name"], "B205mini")
+        self.assertEqual(capabilities["native_product"], "B205mini")
+        self.assertEqual(capabilities["native_serial"], "31E9F48")
+        self.assertEqual(capabilities["rx_channel_count"], 1)
+        self.assertEqual(capabilities["tx_channel_count"], 1)
+        self.assertEqual(capabilities["transport_type"], "usb")
+        self.assertEqual(capabilities["usb_speed"], "3")
+        self.assertEqual(capabilities["firmware_version"], "8.0")
+        self.assertEqual(capabilities["fpga_version"], "7.0")
+        self.assertEqual(
+            capabilities["device_profile"]["support_level"],
+            "qualified_native",
+        )
+        self.assertTrue(
+            capabilities["profile_resolution"]["requested_profile_matches"]
+        )
+        self.assertEqual(
+            capabilities["stream_format_capabilities"]["rx"]["status"],
+            "disabled",
+        )
 
     def test_usrp_runtime_otw_probe_can_be_disabled(self):
         from remoteRF_server.drivers.usrp import usrp_schema
@@ -662,7 +748,7 @@ class DeviceSchemaTests(unittest.TestCase):
             os.environ,
             {"REMOTERF_USRP_PROBE_RX_OTW_FORMATS": "0"},
         ):
-            capabilities = schema.get_capabilities_v2()
+            capabilities = schema.build_session_metadata_v2()
 
         probe = capabilities["stream_format_capabilities"]["rx"]
         self.assertEqual(probe["status"], "disabled")

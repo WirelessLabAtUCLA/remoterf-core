@@ -74,6 +74,27 @@ USRP_PROFILES: tuple[USRPProfile, ...] = (
         notes="Qualified against the native UHD B210-compatible implementation.",
     ),
     USRPProfile(
+        profile_id="b205mini",
+        display_name="Ettus Research USRP B205-mini",
+        family="b2xx",
+        transport="usb",
+        support_level=QUALIFIED_NATIVE,
+        selector="serial",
+        uhd_device_type="b200",
+        aliases=(
+            "b205-mini",
+            "usrp-b205-mini",
+            "b205mini-i",
+            "b205i",
+        ),
+        identity_terms=("b205mini", "b205-mini", "b205i"),
+        qualified_models=("USRP B205-mini", "USRP B205mini-i"),
+        notes=(
+            "Qualified as the single-channel B2xx-mini implementation over "
+            "USB 3 with the native UHD driver."
+        ),
+    ),
+    USRPProfile(
         profile_id="n210",
         display_name="USRP N210",
         family="n2xx",
@@ -95,8 +116,8 @@ USRP_PROFILES: tuple[USRPProfile, ...] = (
         support_level=GENERIC_UHD,
         selector="serial",
         uhd_device_type="b200",
-        aliases=("b200", "b210", "b200mini", "b205mini"),
-        identity_terms=("b200", "b210", "b200mini", "b205mini"),
+        aliases=("b200", "b210", "b200mini"),
+        identity_terms=("b200", "b210", "b200mini"),
         notes="Uses the shared UHD API but requires model-specific qualification.",
     ),
     USRPProfile(

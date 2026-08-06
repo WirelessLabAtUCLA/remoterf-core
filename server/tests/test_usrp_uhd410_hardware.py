@@ -39,7 +39,7 @@ class UHD410USRP2901HardwareTests(unittest.TestCase):
         cls.schema.close_native_device()
 
     def test_identity_versions_and_transport_capabilities(self):
-        capabilities = self.schema.get_capabilities_v2()
+        capabilities = self.schema.build_session_metadata_v2()
         self.assertEqual(capabilities["hardware_profile"], "usrp2901")
         self.assertEqual(
             capabilities["device_profile"]["support_level"],

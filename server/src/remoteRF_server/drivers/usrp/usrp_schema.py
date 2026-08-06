@@ -730,7 +730,7 @@ class UsrpSchema(DeviceSchema):
                 return str(value)
         return ""
 
-    def get_capabilities_v2(self):
+    def build_session_metadata_v2(self):
         device = self.device
         if device is None:
             raise RuntimeError("USRP session is not open")

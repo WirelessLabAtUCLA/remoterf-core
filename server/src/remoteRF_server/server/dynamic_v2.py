@@ -601,7 +601,7 @@ class SessionManager:
                     "the USRP is already open through a legacy v1 session"
                 )
             live_schema = create()
-            capabilities = live_schema.get_capabilities_v2()
+            capabilities = live_schema.build_session_metadata_v2()
             capabilities["remote_resource_limits"] = {
                 "maximum_sessions": _MAX_SESSIONS,
                 "maximum_handles_per_session": _MAX_HANDLES_PER_SESSION,
@@ -1210,7 +1210,7 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
                 uhd_version=str(session.capabilities.get("uhd_version") or ""),
                 uhd_abi=str(session.capabilities.get("uhd_abi") or ""),
                 hardware_profile=str(
-                    session.capabilities.get("hardware_profile") or "usrp2901"
+                    session.capabilities.get("hardware_profile") or "generic_usrp"
                 ),
             )
         except Exception as exc:

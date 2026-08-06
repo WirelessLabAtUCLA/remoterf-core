@@ -111,6 +111,7 @@ class RtlSdrSchemaTests(unittest.TestCase):
             self.assertIn(name, idl["getters"])
         for name in ("call_read_samples", "call_read_bytes", "call_reset_buffer"):
             self.assertIn(name, idl["calls"])
+        self.assertNotIn("call_get_capabilities", idl["calls"])
         self.assertEqual(
             idl["calls"]["call_read_samples"]["args"][0]["default"],
             1024,
@@ -160,18 +161,6 @@ class RtlSdrSchemaTests(unittest.TestCase):
                 "call_read_bytes",
                 {"num_bytes": _MAX_REMOTE_PAYLOAD_BYTES + 1},
             )
-
-    def test_capabilities_describe_receive_only_runtime(self):
-        schema, _adapter, _native = _bound_schema()
-
-        capabilities = schema.dispatch("call_get_capabilities", {})
-
-        self.assertEqual(capabilities["remote_device_type"], "rtl_sdr")
-        self.assertTrue(capabilities["receive_only"])
-        self.assertEqual(capabilities["device_index"], 2)
-        self.assertEqual(capabilities["serial_number"], "00000002")
-        self.assertEqual(capabilities["sample_dtype"], "complex64")
-        self.assertFalse(capabilities["supports_async_callbacks"])
 
     def test_connector_resolves_serial_before_opening_device(self):
         class ConstructorFake(FakeRtlSdr):

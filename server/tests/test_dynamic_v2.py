@@ -122,7 +122,7 @@ class FakeLiveSchema:
         self.calls = []
         self.tree = FakePropertyTree()
 
-    def get_capabilities_v2(self, policy_restrictions=None):
+    def build_session_metadata_v2(self, policy_restrictions=None):
         return {
             "hardware_profile": "usrp2901",
             "uhd_version": TARGET_UHD_VERSION,
@@ -199,6 +199,8 @@ class DynamicV2ServerTests(unittest.TestCase):
         self.assertEqual(schema["schema_version"], "2.0")
         self.assertGreaterEqual(len(schema["methods"]), 140)
         self.assertIn("usrp2901", schema["hardware_profiles"])
+        self.assertIn("b205mini", schema["hardware_profiles"])
+        self.assertIn("b205i", schema["hardware_profiles"])
         self.assertIn("n210", schema["hardware_profiles"])
         definitions = {
             item["profile_id"]: item
@@ -206,6 +208,10 @@ class DynamicV2ServerTests(unittest.TestCase):
         }
         self.assertEqual(
             definitions["usrp2901"]["support_level"],
+            "qualified_native",
+        )
+        self.assertEqual(
+            definitions["b205mini"]["support_level"],
             "qualified_native",
         )
         self.assertEqual(
@@ -1096,6 +1102,42 @@ class DynamicV2ServerTests(unittest.TestCase):
                     },
                 )
 
+    def test_b205mini_cli_writes_distinct_serial_bound_inventory(self):
+        options = ("--usrp-b205-mini", "--usrp-b205mini", "--b205mini")
+        for option in options:
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as tmp:
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"REMOTERF_CONFIG_DIR": tmp},
+                        clear=False,
+                    ),
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "serverrf",
+                            "--device",
+                            "--add",
+                            option,
+                            "9:b205mini_lab:31E9F48",
+                        ],
+                    ),
+                ):
+                    self.assertEqual(serverrf_cli.main(), 0)
+                    record = serverrf_cli._read_device_records()[9]
+                    self.assertEqual(record["TYPE"], "usrp")
+                    self.assertEqual(record["IDENT_KIND"], "serial")
+                    self.assertEqual(record["IDENT"], "31E9F48")
+                    self.assertEqual(
+                        record["INIT"],
+                        {
+                            "profile": "b205mini",
+                            "type": "b200",
+                            "serial": "31E9F48",
+                        },
+                    )
+
     def test_generic_usrp_profile_cli_writes_structured_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -1153,6 +1195,58 @@ class DynamicV2ServerTests(unittest.TestCase):
                 self.assertEqual(records[1]["IDENT"], "104473f6")
                 self.assertEqual(records[1]["IDENT_KIND"], "iio_serial")
                 self.assertFalse(Path(tmp, "devices.env").exists())
+
+    def test_pluto_mimo_cli_enables_all_channels_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(
+                    os.environ,
+                    {"REMOTERF_CONFIG_DIR": tmp},
+                    clear=False,
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "serverrf",
+                        "--device",
+                        "--add",
+                        "--pluto-mimo",
+                        "2:Pluto MIMO Bench:104473f6",
+                    ],
+                ),
+            ):
+                self.assertEqual(serverrf_cli.main(), 0)
+                record = serverrf_cli._read_device_records()[2]
+                self.assertEqual(record["TYPE"], "adalm_pluto_mimo")
+                self.assertEqual(record["IDENT_KIND"], "iio_serial")
+                self.assertEqual(record["IDENT"], "104473f6")
+                self.assertEqual(
+                    record["INIT"],
+                    {
+                        "serial": "104473f6",
+                        "rx_enabled_channels": [0, 1],
+                        "tx_enabled_channels": [0, 1],
+                    },
+                )
+
+    def test_pluto_mimo_cli_rejects_serial_already_used_by_pluto(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {"REMOTERF_CONFIG_DIR": tmp},
+                clear=False,
+            ):
+                self.assertEqual(
+                    serverrf_cli._device_add_pluto("1:Pluto A:104473f6"),
+                    0,
+                )
+                self.assertEqual(
+                    serverrf_cli._device_add_pluto_mimo(
+                        "2:Pluto MIMO Bench:104473f6"
+                    ),
+                    2,
+                )
 
     def test_device_cli_migrates_legacy_env_inventory_to_yaml(self):
         with tempfile.TemporaryDirectory() as tmp:

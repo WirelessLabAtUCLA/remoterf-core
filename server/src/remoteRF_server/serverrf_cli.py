@@ -271,10 +271,14 @@ def print_help() -> None:
         "\n"
         "Device options:\n"
         "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
+        "  --add --pluto-mimo <id:name:iio_serial>\n"
+        "                                      Add an ADALM-Pluto MIMO (all channels enabled)\n"
         "  --add --rtl-sdr <id:name:selector>   Add an RTL-SDR by serial or index=N\n"
         "  --add --usrp-2901 <id:name:serial>  Add a serial-bound NI USRP-2901\n"
         "  --add --usrp2901 <id:name:serial>   Legacy alias for --usrp-2901\n"
         "  --add --usrp <id:name:serial>       Legacy alias for --usrp-2901\n"
+        "  --add --usrp-b205-mini <id:name:serial>\n"
+        "                                      Add a serial-bound USRP B205-mini\n"
         "  --add --usrp-n210 <id:name:addr>    Add an address-bound N210\n"
         "  --add --usrp-profile <id:name:profile:selector>\n"
         "                                      Add any registered USRP profile\n"
@@ -325,10 +329,12 @@ def print_help() -> None:
         "  serverrf --host --wipe -y\n"
         "\n"
         "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
+        "  serverrf --device --add --pluto-mimo 1:pluto_mimo:104473f6\n"
         "  serverrf --device --add --rtl-sdr 4:rtl_fm:serial=00000001\n"
         "  serverrf --device --add --usrp-2901 1:usrp2901_lab:31A2B3C\n"
+        "  serverrf --device --add --usrp-b205-mini 3:b205mini_lab:31E9F48\n"
         "  serverrf --device --add --usrp-n210 2:n210_lab:192.168.137.21\n"
-        "  serverrf --device --add --usrp-profile 3:x310_lab:x3xx:192.168.10.2\n"
+        "  serverrf --device --add --usrp-profile 4:x310_lab:x3xx:192.168.10.2\n"
         "  serverrf --device --show\n"
         "  serverrf --device --wipe -y\n"
         "\n"
@@ -895,7 +901,7 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
                         else "device_index"
                         if device_index
                         else "iio_serial"
-                        if dtype in {"pluto", "adalm_pluto"}
+                        if dtype in {"pluto", "adalm_pluto", "adalm_pluto_mimo"}
                         else "serial"
                     ),
                     "IDENT": ident,
@@ -999,6 +1005,54 @@ def _device_add_pluto(spec: str) -> int:
     _write_device_records(recs)
 
     print(f"Added device: {gid} type=adalm_pluto name={name} iio_serial={iio_serial}")
+    return 0
+
+
+def _device_add_pluto_mimo(spec: str) -> int:
+    try:
+        gid, name, iio_serial = _parse_pluto_add_spec(spec)
+    except Exception as exc:
+        print(f"ERROR: invalid pluto-mimo spec: {exc}", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+
+    for other_gid, record in recs.items():
+        if (
+            record.get("IDENT_KIND", "") == "iio_serial"
+            and record.get("IDENT", "") == iio_serial
+        ):
+            print(
+                f"ERROR: iio_serial already used by global_id={other_gid}",
+                file=sys.stderr,
+            )
+            return 2
+
+    recs[gid] = {
+        "TYPE": "adalm_pluto_mimo",
+        "NAME": name,
+        "IDENT_KIND": "iio_serial",
+        "IDENT": iio_serial,
+        "INIT": {
+            "rx_enabled_channels": [0, 1],
+            "tx_enabled_channels": [0, 1],
+        },
+    }
+    _write_device_records(recs)
+
+    print(
+        f"Added device: {gid} type=adalm_pluto_mimo name={name} "
+        f"iio_serial={iio_serial} rx_channels=0,1 tx_channels=0,1"
+    )
     return 0
 
 
@@ -1117,6 +1171,18 @@ def _device_add_usrp_n210(spec: str) -> int:
     _write_device_records(recs)
     print(f"Added device: {gid} type=usrp profile=n210 addr={address}")
     return 0
+
+
+def _device_add_usrp_b205mini(spec: str) -> int:
+    try:
+        gid, name, serial = _parse_serial_add_spec(
+            spec,
+            serial_label="serial",
+        )
+    except Exception as exc:
+        print(f"ERROR: invalid usrp-b205-mini spec: {exc}", file=sys.stderr)
+        return 2
+    return _device_add_usrp_profile(f"{gid}:{name}:b205mini:{serial}")
 
 
 def _device_add_usrp_profile(spec: str) -> int:
@@ -1527,16 +1593,43 @@ def main() -> int:
 
         if device_mode and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
-                print("ERROR: missing device type after --device --add (expected --pluto, --rtl-sdr, --usrp-2901, --usrp-n210, or --usrp-profile)", file=sys.stderr)
+                print(
+                    "ERROR: missing device type after --device --add "
+                    "(expected --pluto, --pluto-mimo, --rtl-sdr, --usrp-2901, "
+                    "--usrp-b205-mini, --usrp-n210, or --usrp-profile)",
+                    file=sys.stderr,
+                )
                 return 2
             dt = argv[i + 1].strip()
-            if dt not in ("--pluto", "--rtl-sdr", "--usrp-2901", "--usrp2901", "--usrp", "--usrp-n210", "--usrp-profile"):
-                print("ERROR: device type must be --pluto, --rtl-sdr, --usrp-2901, --usrp-n210, or --usrp-profile", file=sys.stderr)
+            if dt not in (
+                "--pluto",
+                "--pluto-mimo",
+                "--rtl-sdr",
+                "--usrp-2901",
+                "--usrp2901",
+                "--usrp",
+                "--usrp-b205-mini",
+                "--usrp-b205mini",
+                "--b205mini",
+                "--usrp-n210",
+                "--usrp-profile",
+            ):
+                print(
+                    "ERROR: device type must be --pluto, --pluto-mimo, --rtl-sdr, "
+                    "--usrp-2901, --usrp-b205-mini, --usrp-n210, or "
+                    "--usrp-profile",
+                    file=sys.stderr,
+                )
                 return 2
             if i + 2 >= len(argv):
                 print(f"ERROR: missing spec after --device --add {dt}", file=sys.stderr)
                 return 2
-            device_add_type = "usrp2901" if dt in ("--usrp-2901", "--usrp2901", "--usrp") else dt[2:]
+            if dt in ("--usrp-2901", "--usrp2901", "--usrp"):
+                device_add_type = "usrp2901"
+            elif dt in ("--usrp-b205-mini", "--usrp-b205mini", "--b205mini"):
+                device_add_type = "usrp-b205-mini"
+            else:
+                device_add_type = dt[2:]
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
@@ -1776,6 +1869,11 @@ def main() -> int:
             if rc != 0:
                 return rc
             did_any = True
+        elif device_add_type == "pluto-mimo" and device_add_spec is not None:
+            rc = _device_add_pluto_mimo(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
         elif device_add_type == "rtl-sdr" and device_add_spec is not None:
             rc = _device_add_rtl_sdr(device_add_spec)
             if rc != 0:
@@ -1783,6 +1881,11 @@ def main() -> int:
             did_any = True
         elif device_add_type == "usrp2901" and device_add_spec is not None:
             rc = _device_add_usrp(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+        elif device_add_type == "usrp-b205-mini" and device_add_spec is not None:
+            rc = _device_add_usrp_b205mini(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

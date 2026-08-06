@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import inspect
-from importlib import metadata
 from typing import Any
 
 import numpy as np
@@ -11,14 +10,6 @@ from remoteRF_server.common.idl import DeviceSchema, idl_expose, idl_register
 
 _MAX_REMOTE_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_COMPLEX64_SAMPLES = _MAX_REMOTE_PAYLOAD_BYTES // np.dtype(np.complex64).itemsize
-
-
-def _pyrtlsdr_version() -> str:
-    try:
-        return metadata.version("pyrtlsdr")
-    except metadata.PackageNotFoundError:
-        return ""
-
 
 def _require_rtlsdr():
     try:
@@ -334,52 +325,3 @@ class RtlSdrSchema(DeviceSchema):
                 f"short RTL-SDR byte read: requested {count}, received {len(payload)}"
             )
         return payload
-
-    @idl_expose(kind="call")
-    def call_get_capabilities(self):
-        """Return runtime identity, controls, and RemoteRF transport limits."""
-        manufacturer, product, usb_serial = self.device.usb_strings
-        optional_controls = {
-            "bias_tee": "set_bias_tee",
-            "direct_sampling": "set_direct_sampling",
-            "offset_tuning": "set_offset_tuning",
-            "dithering": "set_dithering",
-        }
-        controls = [
-            "center_freq",
-            "sample_rate",
-            "gain",
-            "freq_correction",
-            "bandwidth",
-            "agc_mode",
-        ]
-        controls.extend(
-            control
-            for control, method in optional_controls.items()
-            if callable(getattr(self._native, method, None))
-        )
-        return {
-            "remote_device_type": "rtl_sdr",
-            "hardware_profile": "rtl2832u",
-            "receive_only": True,
-            "device_index": int(self.device.device_index),
-            "serial_number": self.device.serial_number or usb_serial,
-            "manufacturer": manufacturer,
-            "product": product,
-            "tuner_type": self._native.get_tuner_type(),
-            "pyrtlsdr_version": _pyrtlsdr_version(),
-            "valid_gains_db": [float(value) for value in self._native.valid_gains_db],
-            "sample_dtype": "complex64",
-            "maximum_remote_payload_bytes": _MAX_REMOTE_PAYLOAD_BYTES,
-            "maximum_read_samples": _MAX_COMPLEX64_SAMPLES,
-            "supports_async_callbacks": False,
-            "supports_reset_buffer": callable(
-                getattr(self._native, "reset_buffer", None)
-            ),
-            "controls": controls,
-            "unsupported_optional_controls": sorted(
-                control
-                for control, method in optional_controls.items()
-                if not callable(getattr(self._native, method, None))
-            ),
-        }

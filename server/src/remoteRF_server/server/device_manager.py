@@ -555,10 +555,24 @@ def _seed_default_usrp_driver() -> None:
 def _seed_default_rtl_sdr_driver() -> None:
     _seed_default_driver("rtl_sdr_schema.py", "rtl_sdr")
 
+
+def _seed_default_hackrf_driver() -> None:
+    _seed_default_driver(
+        "hackrf_schema.py",
+        "hackrf",
+        legacy_hashes=(
+            # The original downloadable 0.0.3 website plugin. Exact matches
+            # are safe to promote to the managed built-in schema.
+            "65c4ef33f530fd43ed88aa445f7088e92a6c0eb662007a2a05bc7d2395fde64c",
+        ),
+    )
+
+
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
     _seed_default_usrp_driver()
     _seed_default_rtl_sdr_driver()
+    _seed_default_hackrf_driver()
 
     try:
         from ..common.idl import pluto_schema as _  # noqa: F401
@@ -579,6 +593,11 @@ def _load_all_drivers() -> None:
         from ..drivers.rtl_sdr import rtl_sdr_schema as _  # noqa: F401
     except Exception as e:
         print(f"Warning: could not load built-in rtl_sdr driver: {e}")
+
+    try:
+        from ..drivers.hackrf import hackrf_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in hackrf driver: {e}")
 
     results = load_drivers()
     for fname, status in results.items():
