@@ -94,8 +94,12 @@ mamba create -n hostrf -y -c conda-forge -c defaults  python=3.10 pip setuptools
 
 conda activate hostrf
 python -m pip install -U pip
-python -m pip install pyadi-iio remoterf-host
+python -m pip install remoterf-host
 ```
+
+The base `remoterf-host` package installs the Python runtimes for every
+packaged device driver, including ADALM-Pluto, RTL-SDR, and HackRF. No device
+extras are required.
 
 ```bash
 sudo reboot now
@@ -220,20 +224,26 @@ Run to start the host. You should be able to see host on the server if setup pro
 hostrf --serve
 ```
 
-### 4) Connect an NI USRP-2901 / B200-family device
+### 4) Connect USRP devices
 
-The machine connected to the radio must provide the UHD `4.10.0.0` Python
-module. HostRF publishes the full USRP schema even when UHD is unavailable, but
-opening a real Dynamic v2 session requires that exact supported UHD API.
+The NI USRP-2901, Ettus Research USRP B205-mini, and USRP N210 use the same
+session-scoped UHD driver and Dynamic v2 interface. The machine connected to
+the radio must provide the UHD `4.10.0.0` Python module. HostRF publishes the
+schema without UHD installed, but opening a hardware session requires that
+supported UHD API.
 
-Add a serial-bound inventory entry:
+Register each model with an explicit profile and stable selector:
 
 ```bash
-hostrf --device --add --usrp 7:usrp2901_lab:31A2B3C
+hostrf --device --add --usrp-2901 7:usrp2901_lab:31A2B3C
+hostrf --device --add --usrp-b205-mini 8:b205mini_lab:31E9F48
+hostrf --device --add --usrp-n210 9:n210_lab:192.168.10.2
 hostrf --device --show
 ```
 
-Equivalent `devices.yml`:
+`--usrp` and `--usrp2901` remain aliases for `--usrp-2901`.
+
+The resulting inventory constrains the devices as follows:
 
 ```yaml
 devices:
@@ -241,13 +251,72 @@ devices:
     device_type: usrp
     name: usrp2901_lab
     init:
+      profile: usrp2901
+      type: b200
       serial: 31A2B3C
+  - device_id: 8
+    device_type: usrp
+    name: b205mini_lab
+    init:
+      profile: b205mini
+      type: b200
+      serial: 31E9F48
+  - device_id: 9
+    device_type: usrp
+    name: n210_lab
+    init:
+      profile: n210
+      type: usrp2
+      addr: 192.168.10.2
 ```
 
-Run `hostrf --serve` after the RemoteRF server has been upgraded with tunneled
-Dynamic v2 support. Control calls, opaque handles, and `SampleDataV1` binary IQ
-frames then use the existing authenticated host tunnel. HostRF closes native
-USRP sessions automatically when a reservation ends or the tunnel disconnects.
+For the N210, configure the host network interface so the radio address is
+reachable before starting HostRF. Control calls, opaque handles, and binary IQ
+frames use the authenticated host tunnel. Native UHD sessions close when a
+reservation ends or the tunnel disconnects.
 
-Custom `usrp` schemas under `~/.config/remoterf/drivers/` take precedence over
-the packaged default. No `usrp_policy.yml` file is required.
+### 5) Connect RTL-SDR
+
+The base HostRF package includes the RTL-SDR Python wrapper and packaged native
+library. Install the command-line tools only if you want the local `rtl_test`
+diagnostic:
+
+```bash
+sudo apt-get install rtl-sdr
+rtl_test
+```
+
+Register by stable serial when possible, or by zero-based device index:
+
+```bash
+hostrf --device --add --rtl-sdr 10:rtl_fm:serial=00000001
+hostrf --device --add --rtl-sdr 11:rtl_backup:index=1
+```
+
+The remote client exposes PyRtlSdr-style tuning, gain, optional tuner controls,
+buffer reset, and bounded synchronous sample/byte reads. Asynchronous callbacks
+are not exposed across the RPC boundary.
+
+### 6) Connect HackRF
+
+The base HostRF package includes the HackRF Python binding. Install the native
+libhackrf runtime and tools on the host machine:
+
+```bash
+sudo apt-get install hackrf
+hackrf_info
+```
+
+Register by serial or device index:
+
+```bash
+hostrf --device --add --hackrf 12:hackrf_lab:serial=0000000000000000719031ac235bb14a
+hostrf --device --add --hackrf 13:hackrf_backup:index=1
+```
+
+The remote client exposes tuning, sample rate, filter bandwidth, LNA/VGA/TX
+gain, amplifier and bias-tee state, bounded synchronous IQ reads, and TX-buffer
+loading.
+
+Custom schemas under `~/.config/remoterf/drivers/` take precedence over the
+packaged defaults. No `usrp_policy.yml` file is required.

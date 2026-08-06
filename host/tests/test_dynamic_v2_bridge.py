@@ -44,7 +44,7 @@ class FakeLiveSchema:
         self.device = object()
         self.closed = False
 
-    def get_capabilities_v2(self, policy_restrictions=None):
+    def build_session_metadata_v2(self, policy_restrictions=None):
         return {
             "hardware_profile": "usrp2901",
             "uhd_version": TARGET_UHD_VERSION,

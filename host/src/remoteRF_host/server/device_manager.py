@@ -68,8 +68,19 @@ def _reload_signature() -> tuple:
 
 
 def _infer_ident(init: Dict[str, Any]) -> str:
-    for key in ("serial", "usb", "ip", "uri", "address"):
-        value = str(init.get(key) or "").strip()
+    for key in (
+        "serial",
+        "addr",
+        "address",
+        "device_index",
+        "args",
+        "usb",
+        "ip",
+        "uri",
+    ):
+        if key not in init or init.get(key) is None:
+            continue
+        value = str(init.get(key)).strip()
         if value:
             return value
     return ""
@@ -194,12 +205,17 @@ def _managed_driver_marker(target: Path) -> Path:
     return target.with_name(f".{target.name}.remoterf-managed")
 
 
-def _seed_default_usrp_driver() -> None:
-    """Install/refresh the packaged USRP schema without replacing custom drivers."""
+def _seed_default_driver(
+    filename: str,
+    device_type: str,
+    source: Path,
+    *,
+    legacy_hashes: tuple[str, ...] = (),
+) -> None:
+    """Install/refresh one packaged schema without replacing custom drivers."""
     drivers_dir = get_drivers_dir()
     drivers_dir.mkdir(parents=True, exist_ok=True)
-    target = drivers_dir / "usrp_schema.py"
-    source = Path(__file__).resolve().parents[1] / "drivers" / "usrp" / "usrp_schema.py"
+    target = drivers_dir / filename
 
     if target.exists() or target.is_symlink():
         marker = _managed_driver_marker(target)
@@ -207,7 +223,11 @@ def _seed_default_usrp_driver() -> None:
             target_hash = _driver_sha256(target)
             marker_hash = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
             normalized_hash = _driver_normalized_sha256(target)
-            if target_hash != marker_hash and normalized_hash != marker_hash:
+            if (
+                target_hash != marker_hash
+                and normalized_hash != marker_hash
+                and target_hash not in legacy_hashes
+            ):
                 return
             source_hash = _driver_sha256(source)
             if target_hash != source_hash:
@@ -218,11 +238,14 @@ def _seed_default_usrp_driver() -> None:
         return
 
     for driver_file in drivers_dir.glob("*.py"):
-        if _driver_registers_type(driver_file, "usrp"):
+        if _driver_registers_type(driver_file, device_type):
             return
 
     if not source.is_file():
-        warn(f"Packaged USRP schema is missing: {source}", component="hostrf.device_manager")
+        warn(
+            f"Packaged {device_type} schema is missing: {source}",
+            component="hostrf.device_manager",
+        )
         return
 
     try:
@@ -232,12 +255,55 @@ def _seed_default_usrp_driver() -> None:
             encoding="utf-8",
         )
     except OSError as exc:
-        warn(f"Could not install default USRP schema: {exc}", component="hostrf.device_manager")
+        warn(
+            f"Could not install default {device_type} schema: {exc}",
+            component="hostrf.device_manager",
+        )
+
+
+def _packaged_schema_path(driver_dir: str, filename: str) -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "drivers"
+        / driver_dir
+        / filename
+    )
+
+
+def _seed_default_usrp_driver() -> None:
+    _seed_default_driver(
+        "usrp_schema.py",
+        "usrp",
+        _packaged_schema_path("usrp", "usrp_schema.py"),
+    )
+
+
+def _seed_default_rtl_sdr_driver() -> None:
+    _seed_default_driver(
+        "rtl_sdr_schema.py",
+        "rtl_sdr",
+        _packaged_schema_path("rtl_sdr", "rtl_sdr_schema.py"),
+    )
+
+
+def _seed_default_hackrf_driver() -> None:
+    _seed_default_driver(
+        "hackrf_schema.py",
+        "hackrf",
+        _packaged_schema_path("hackrf", "hackrf_schema.py"),
+        legacy_hashes=(
+            "65c4ef33f530fd43ed88aa445f7088e92a6c0eb662007a2a05bc7d2395fde64c",
+        ),
+    )
 
 
 def _load_all_drivers(required_types: set[str]) -> None:
     if "usrp" in required_types:
         _seed_default_usrp_driver()
+    if "rtl_sdr" in required_types:
+        _seed_default_rtl_sdr_driver()
+    if "hackrf" in required_types:
+        _seed_default_hackrf_driver()
 
     if {"adalm_pluto", "pluto"} & required_types:
         try:
@@ -256,6 +322,18 @@ def _load_all_drivers(required_types: set[str]) -> None:
             from ..drivers.usrp import usrp_schema as _  # noqa: F401
         except Exception as e:
             warn(f"Could not load built-in USRP driver: {e}", component="hostrf.device_manager")
+
+    if "rtl_sdr" in required_types:
+        try:
+            from ..drivers.rtl_sdr import rtl_sdr_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in RTL-SDR driver: {e}", component="hostrf.device_manager")
+
+    if "hackrf" in required_types:
+        try:
+            from ..drivers.hackrf import hackrf_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in HackRF driver: {e}", component="hostrf.device_manager")
 
     results = load_drivers()
     for fname, status in results.items():

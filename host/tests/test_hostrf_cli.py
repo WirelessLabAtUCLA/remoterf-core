@@ -109,7 +109,11 @@ class HostRfCliTests(unittest.TestCase):
                 "device_id": 7,
                 "device_type": "usrp",
                 "name": "usrp2901_lab",
-                "init": {"serial": "31A2B3C"},
+                "init": {
+                    "profile": "usrp2901",
+                    "type": "b200",
+                    "serial": "31A2B3C",
+                },
             }],
         )
 
@@ -120,6 +124,73 @@ class HostRfCliTests(unittest.TestCase):
             "7: type=usrp name=usrp2901_lab serial=31A2B3C",
             out,
         )
+
+    def test_device_mode_adds_all_new_host_radio_inventories(self) -> None:
+        cases = (
+            (
+                "--usrp-b205-mini",
+                "8:b205mini_lab:31E9F48",
+                8,
+                "usrp",
+                {
+                    "profile": "b205mini",
+                    "type": "b200",
+                    "serial": "31E9F48",
+                },
+            ),
+            (
+                "--usrp-n210",
+                "9:n210_lab:192.168.10.2",
+                9,
+                "usrp",
+                {
+                    "profile": "n210",
+                    "type": "usrp2",
+                    "addr": "192.168.10.2",
+                },
+            ),
+            (
+                "--rtl-sdr",
+                "10:rtl_fm:serial=00000001",
+                10,
+                "rtl_sdr",
+                {"serial": "00000001"},
+            ),
+            (
+                "--hackrf",
+                "11:hackrf_lab:index=0",
+                11,
+                "hackrf",
+                {"device_index": 0},
+            ),
+        )
+
+        for flag, spec, gid, device_type, expected_init in cases:
+            with self.subTest(flag=flag):
+                rc, _out, err = self.run_cli(
+                    "--device", "--add", flag, spec
+                )
+                self.assertEqual(rc, 0)
+                self.assertEqual(err, "")
+                records = json.loads(
+                    (self.host_dir / "devices.yml").read_text(encoding="utf-8")
+                )["devices"]
+                record = next(item for item in records if item["device_id"] == gid)
+                self.assertEqual(record["device_type"], device_type)
+                self.assertEqual(record["init"], expected_init)
+
+        rc, out, err = self.run_cli("--device", "--show")
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("9: type=usrp name=n210_lab addr=192.168.10.2", out)
+        self.assertIn("11: type=hackrf name=hackrf_lab device_index=0", out)
+
+    def test_n210_cli_rejects_non_ip_selector(self) -> None:
+        rc, _out, err = self.run_cli(
+            "--device", "--add", "--usrp-n210", "9:n210_lab:not-an-ip"
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("addr must be an IPv4 or IPv6 address", err)
 
     def test_device_show_creates_empty_devices_config_on_first_run(self) -> None:
         devices_yml = self.host_dir / "devices.yml"

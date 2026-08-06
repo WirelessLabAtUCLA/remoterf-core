@@ -6,12 +6,14 @@ import sys
 import shutil
 import os
 import json
+import ipaddress
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
 from .common.idl.schema import ensure_default_driver_files
 from .common.utils.db_location import get_devices_config_path, get_host_config_dir, get_remoterf_root
+from .drivers.usrp.profiles import inventory_for_profile
 
 BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
 
@@ -68,7 +70,12 @@ def print_help() -> None:
         "\n"
         "Device options:\n"
         "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
-        "  --add --usrp <id:name:serial>        Add a serial-bound USRP-2901/B200\n"
+        "  --add --usrp-2901 <id:name:serial>   Add a serial-bound NI USRP-2901\n"
+        "  --add --usrp-b205-mini <id:name:serial>\n"
+        "                                       Add a serial-bound USRP B205-mini\n"
+        "  --add --usrp-n210 <id:name:addr>     Add an address-bound USRP N210\n"
+        "  --add --rtl-sdr <id:name:selector>   Add by serial=... or index=N\n"
+        "  --add --hackrf <id:name:selector>    Add by serial=... or index=N\n"
         "  --remove <id>                       Remove device\n"
         "  --edit-name <id> <name>             Override device NAME for existing device\n"
         "  --show | -s                         Show all devices\n"
@@ -91,7 +98,11 @@ def print_help() -> None:
         "  hostrf --host --wipe -y\n"
         "\n"
         "  hostrf --device --add --pluto 0:pluto_aaa:123123\n"
-        "  hostrf --device --add --usrp 7:usrp2901_lab:31A2B3C\n"
+        "  hostrf --device --add --usrp-2901 7:usrp2901_lab:31A2B3C\n"
+        "  hostrf --device --add --usrp-b205-mini 8:b205mini_lab:31E9F48\n"
+        "  hostrf --device --add --usrp-n210 9:n210_lab:192.168.10.2\n"
+        "  hostrf --device --add --rtl-sdr 10:rtl_fm:serial=00000001\n"
+        "  hostrf --device --add --hackrf 11:hackrf_lab:index=0\n"
         "  hostrf --device --edit-name 0 \"New Pluto Name\"\n"
         "  hostrf --device --remove 0\n"
         "  hostrf --device --show\n"
@@ -164,28 +175,56 @@ def _redact(s: str) -> str:
 #         serial: 123123
 # -----------------------------
 
-def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
-    # <gid:name:iio_serial>
-    parts = [p.strip() for p in (tok or "").split(":")]
+def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, str]:
+    parts = [p.strip() for p in (tok or "").split(":", 2)]
     if len(parts) != 3:
-        raise ValueError("Expected <gid:name:iio_serial>")
-    gid_s, name, iio_serial = parts
+        raise ValueError(f"Expected <gid:name:{serial_label}>")
+    gid_s, name, serial = parts
     gid = int(gid_s)
     if gid < 0:
         raise ValueError("gid must be >= 0")
     if not name:
         raise ValueError("name is empty")
-    if not iio_serial:
-        raise ValueError("iio_serial is empty")
-    return gid, name, iio_serial
+    if not serial:
+        raise ValueError(f"{serial_label} is empty")
+    return gid, name, serial
+
+
+def _parse_pluto_add_spec(tok: str) -> Tuple[int, str, str]:
+    return _parse_serial_add_spec(tok, serial_label="iio_serial")
 
 
 def _parse_usrp_add_spec(tok: str) -> Tuple[int, str, str]:
+    return _parse_serial_add_spec(tok, serial_label="serial")
+
+
+def _parse_address_add_spec(tok: str) -> Tuple[int, str, str]:
+    gid, name, address = _parse_serial_add_spec(tok, serial_label="addr")
     try:
-        gid, name, serial = _parse_pluto_add_spec(tok)
+        ipaddress.ip_address(address)
     except ValueError as exc:
-        raise ValueError("Expected <gid:name:serial>") from exc
-    return gid, name, serial
+        raise ValueError("addr must be an IPv4 or IPv6 address") from exc
+    return gid, name, address
+
+
+def _parse_index_or_serial_add_spec(
+    tok: str,
+) -> Tuple[int, str, str, str | int]:
+    gid, name, selector = _parse_serial_add_spec(tok, serial_label="selector")
+    if selector.startswith("index="):
+        raw_index = selector.partition("=")[2].strip()
+        try:
+            device_index = int(raw_index)
+        except ValueError as exc:
+            raise ValueError("index selector must be an integer") from exc
+        if device_index < 0:
+            raise ValueError("index selector must be >= 0")
+        return gid, name, "device_index", device_index
+    if selector.startswith("serial="):
+        selector = selector.partition("=")[2].strip()
+    if not selector:
+        raise ValueError("serial selector is empty")
+    return gid, name, "serial", selector
 
 
 def _read_device_records() -> Dict[int, Dict[str, Any]]:
@@ -418,34 +457,107 @@ def _device_add_pluto(spec: str) -> int:
     return 0
 
 
-def _device_add_usrp(spec: str) -> int:
-    try:
-        gid, name, serial = _parse_usrp_add_spec(spec)
-    except Exception as exc:
-        print(f"ERROR: invalid usrp spec: {exc}", file=sys.stderr)
-        return 2
-
+def _device_add_inventory(
+    *,
+    gid: int,
+    name: str,
+    device_type: str,
+    init: Dict[str, Any],
+    selector_kind: str,
+    selector: str | int,
+) -> int:
     _cfg_dir().mkdir(parents=True, exist_ok=True)
     recs = _read_device_records()
     if gid in recs:
         print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
         return 2
 
+    selector_text = str(selector)
     for other_gid, record in recs.items():
-        existing_serial = str((record.get("init") or {}).get("serial", "")).strip()
-        if existing_serial and existing_serial == serial:
-            print(f"ERROR: serial already used by global_id={other_gid}", file=sys.stderr)
+        existing_init = record.get("init") or {}
+        if (
+            str(record.get("device_type") or "") == device_type
+            and selector_kind in existing_init
+            and str(existing_init.get(selector_kind)) == selector_text
+        ):
+            print(
+                f"ERROR: {device_type} {selector_kind} already used by "
+                f"global_id={other_gid}",
+                file=sys.stderr,
+            )
             return 2
 
     recs[gid] = {
         "device_id": gid,
-        "device_type": "usrp",
+        "device_type": device_type,
         "name": name,
-        "init": {"serial": serial},
+        "init": dict(init),
     }
     _write_device_records(recs)
-    print(f"Added device: {gid} type=usrp name={name} serial={serial}")
+    print(
+        f"Added device: {gid} type={device_type} name={name} "
+        f"{selector_kind}={selector}"
+    )
     return 0
+
+
+def _device_add_usrp_profile(spec: str, *, profile_name: str) -> int:
+    try:
+        if profile_name == "n210":
+            gid, name, selector = _parse_address_add_spec(spec)
+            selector_kind = "addr"
+        else:
+            gid, name, selector = _parse_usrp_add_spec(spec)
+            selector_kind = "serial"
+        init = inventory_for_profile(profile_name, selector)
+    except Exception as exc:
+        print(f"ERROR: invalid {profile_name} spec: {exc}", file=sys.stderr)
+        return 2
+
+    return _device_add_inventory(
+        gid=gid,
+        name=name,
+        device_type="usrp",
+        init=init,
+        selector_kind=selector_kind,
+        selector=selector,
+    )
+
+
+def _device_add_usrp(spec: str) -> int:
+    return _device_add_usrp_profile(spec, profile_name="usrp2901")
+
+
+def _device_add_usrp_b205mini(spec: str) -> int:
+    return _device_add_usrp_profile(spec, profile_name="b205mini")
+
+
+def _device_add_usrp_n210(spec: str) -> int:
+    return _device_add_usrp_profile(spec, profile_name="n210")
+
+
+def _device_add_index_or_serial(spec: str, *, device_type: str) -> int:
+    try:
+        gid, name, selector_kind, selector = _parse_index_or_serial_add_spec(spec)
+    except Exception as exc:
+        print(f"ERROR: invalid {device_type} spec: {exc}", file=sys.stderr)
+        return 2
+    return _device_add_inventory(
+        gid=gid,
+        name=name,
+        device_type=device_type,
+        init={selector_kind: selector},
+        selector_kind=selector_kind,
+        selector=selector,
+    )
+
+
+def _device_add_rtl_sdr(spec: str) -> int:
+    return _device_add_index_or_serial(spec, device_type="rtl_sdr")
+
+
+def _device_add_hackrf(spec: str) -> int:
+    return _device_add_index_or_serial(spec, device_type="hackrf")
 
 def _device_edit_name(global_id_str: str, new_name: str) -> int:
     try:
@@ -504,9 +616,18 @@ def _device_show() -> int:
         dtype = r.get("device_type", "")
         name = r.get("name", "")
         init = r.get("init") or {}
-        serial = init.get("serial", "")
-        serial_label = "iio_serial" if dtype in {"adalm_pluto", "pluto"} else "serial"
-        print(f"  {gid}: type={dtype} name={name} {serial_label}={serial}")
+        if "addr" in init:
+            selector_label, selector = "addr", init.get("addr")
+        elif "device_index" in init:
+            selector_label, selector = "device_index", init.get("device_index")
+        else:
+            selector_label = (
+                "iio_serial"
+                if dtype in {"adalm_pluto", "pluto"}
+                else "serial"
+            )
+            selector = init.get("serial", "")
+        print(f"  {gid}: type={dtype} name={name} {selector_label}={selector}")
     return 0
 
 def _wipe_all(*, yes: bool) -> int:
@@ -758,16 +879,37 @@ def main() -> int:
 
         if device_mode and tok in ("--add", "-add", "-a"):
             if i + 1 >= len(argv):
-                print("ERROR: missing device type after --device --add (expected --pluto or --usrp)", file=sys.stderr)
+                print(
+                    "ERROR: missing device type after --device --add "
+                    "(expected --pluto, --usrp-2901, --usrp-b205-mini, "
+                    "--usrp-n210, --rtl-sdr, or --hackrf)",
+                    file=sys.stderr,
+                )
                 return 2
             dt = argv[i + 1].strip()
-            if dt not in ("--pluto", "--usrp"):
-                print("ERROR: device type must be --pluto or --usrp", file=sys.stderr)
+            device_type_aliases = {
+                "--pluto": "pluto",
+                "--usrp": "usrp2901",
+                "--usrp-2901": "usrp2901",
+                "--usrp2901": "usrp2901",
+                "--usrp-b205-mini": "usrp-b205-mini",
+                "--usrp-b205mini": "usrp-b205-mini",
+                "--b205mini": "usrp-b205-mini",
+                "--usrp-n210": "usrp-n210",
+                "--rtl-sdr": "rtl-sdr",
+                "--hackrf": "hackrf",
+            }
+            if dt not in device_type_aliases:
+                print(
+                    "ERROR: device type must be --pluto, --usrp-2901, "
+                    "--usrp-b205-mini, --usrp-n210, --rtl-sdr, or --hackrf",
+                    file=sys.stderr,
+                )
                 return 2
             if i + 2 >= len(argv):
                 print(f"ERROR: missing spec after --device --add {dt}", file=sys.stderr)
                 return 2
-            device_add_type = dt.removeprefix("--")
+            device_add_type = device_type_aliases[dt]
             device_add_spec = argv[i + 2].strip()
             i += 3
             continue
@@ -862,8 +1004,32 @@ def main() -> int:
                 return rc
             did_any = True
 
-        if device_add_type == "usrp" and device_add_spec is not None:
+        if device_add_type == "usrp2901" and device_add_spec is not None:
             rc = _device_add_usrp(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "usrp-b205-mini" and device_add_spec is not None:
+            rc = _device_add_usrp_b205mini(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "usrp-n210" and device_add_spec is not None:
+            rc = _device_add_usrp_n210(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "rtl-sdr" and device_add_spec is not None:
+            rc = _device_add_rtl_sdr(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "hackrf" and device_add_spec is not None:
+            rc = _device_add_hackrf(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

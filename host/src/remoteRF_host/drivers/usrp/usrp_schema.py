@@ -2,6 +2,11 @@
 
 from remoteRF_host.common.idl import DeviceSchema, idl_client, idl_expose, idl_register
 from remoteRF_host.drivers.usrp.uhd_manifest import build_usrp_schema_v2
+from remoteRF_host.drivers.usrp.profiles import (
+    infer_inventory_profile,
+    resolve_live_profile,
+    validate_profile_inventory,
+)
 
 c = idl_client
 
@@ -34,6 +39,12 @@ _STREAM_USAGE = (
     "If using the generated client directly, first call get_rx_stream/get_tx_stream "
     "and then pass {'handle': streamer_payload['handle'], ...} to stream_* calls."
 )
+
+# UHD 4.10's public API documents these OTW tokens, but does not expose a
+# per-device enumeration call.  They are candidates only: support is decided
+# by asking the connected device to construct an inactive native RX streamer.
+_UHD_OTW_FORMAT_CANDIDATES = ("sc16", "sc12", "sc8")
+_OTW_PROBE_CPU_FORMAT = "fc32"
 
 
 def _require_uhd():
@@ -91,6 +102,8 @@ def _remote_transport_args(value):
 def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
     uhd_module = _require_uhd()
     args = args or kwargs.pop("device_args", None) or kwargs.pop("init_args", None)
+    type_hint = kwargs.pop("type", None) or kwargs.pop("device_type", None)
+    profile_name = kwargs.pop("profile", None)
 
     if args is None and _looks_like_device_args(serial):
         args = serial
@@ -101,9 +114,17 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
         addr = None
 
     if args is None:
-        # The inventory is intentionally constrained to the B200 family so a
-        # serial cannot accidentally select a different UHD transport/device.
-        parts = ["type=b200"]
+        inventory = {
+            "profile": profile_name,
+            "type": type_hint,
+            "serial": serial,
+            "addr": addr,
+        }
+        profile = infer_inventory_profile(inventory)
+        if profile_name:
+            validate_profile_inventory(profile, inventory)
+        resolved_type = type_hint or profile.uhd_device_type
+        parts = [f"type={resolved_type}"] if resolved_type else []
         if serial:
             parts.append(f"serial={serial}")
         if addr:
@@ -112,6 +133,22 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
             if value is not None:
                 parts.append(f"{key}={value}")
         args = ",".join(parts)
+    elif profile_name:
+        inventory = {
+            "profile": profile_name,
+            "type": type_hint,
+            "args": args,
+        }
+        profile = infer_inventory_profile(inventory)
+        validate_profile_inventory(profile, inventory)
+        arg_text = _device_args(args).strip().strip(",")
+        arg_keys = {
+            item.split("=", 1)[0].strip().lower()
+            for item in arg_text.split(",")
+            if "=" in item
+        }
+        if profile.uhd_device_type and "type" not in arg_keys:
+            args = f"type={profile.uhd_device_type},{arg_text}"
 
     args = _remote_transport_args(args)
     dev = uhd_module.usrp.MultiUSRP(args)
@@ -529,7 +566,7 @@ class UsrpSchema(DeviceSchema):
     device_type = "usrp"
     client_class = "MultiUSRP"
     client_objects = _uhd_client_objects()
-    driver_version = "0.0.3"
+    driver_version = "0.0.7"
     session_scoped = True
 
     def __init__(self):
@@ -574,6 +611,102 @@ class UsrpSchema(DeviceSchema):
     def get_idl_v2(self):
         return build_usrp_schema_v2(self.driver_version)
 
+    def _probe_rx_stream_formats(self, rx_count):
+        """Ask native UHD which RX OTW formats this live device accepts.
+
+        Streamers are constructed and immediately released without issuing a
+        stream command or receiving samples.  The result is cached because
+        streamer construction configures native transport/DSP resources and
+        should happen only while the newly opened session is otherwise idle.
+        """
+        cached = getattr(self, "_rx_stream_format_probe_cache", None)
+        if cached is not None:
+            return cached
+
+        channels = [0] if rx_count else []
+        result = {
+            "status": "runtime_probed" if channels else "unavailable",
+            "method": "native_rx_streamer_creation",
+            "cpu_format": _OTW_PROBE_CPU_FORMAT,
+            "channels": channels,
+            "default": None,
+            "formats": [],
+        }
+        if not channels:
+            result["reason"] = "device_has_no_rx_channels"
+            self._rx_stream_format_probe_cache = result
+            return result
+
+        probe_enabled = str(
+            os.getenv("REMOTERF_USRP_PROBE_RX_OTW_FORMATS", "1")
+        ).strip().lower()
+        if probe_enabled in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            result["status"] = "disabled"
+            result["reason"] = "REMOTERF_USRP_PROBE_RX_OTW_FORMATS"
+            self._rx_stream_format_probe_cache = result
+            return result
+
+        if getattr(self, "_usrp_streamers", None):
+            result["status"] = "skipped"
+            result["reason"] = "active_remote_streamers"
+            self._rx_stream_format_probe_cache = result
+            return result
+
+        stream_args_type = getattr(
+            getattr(_require_uhd(), "usrp", None),
+            "StreamArgs",
+            None,
+        )
+        native_get_rx_stream = getattr(self.device, "get_rx_stream", None)
+        if stream_args_type is None or not callable(native_get_rx_stream):
+            result["status"] = "unavailable"
+            result["reason"] = "native_rx_streamer_api_missing"
+            self._rx_stream_format_probe_cache = result
+            return result
+
+        def attempt(otw_format):
+            entry = {
+                "otw_format": otw_format,
+                "supported": False,
+                "max_num_samps": None,
+            }
+            streamer = None
+            try:
+                stream_args = stream_args_type(
+                    _OTW_PROBE_CPU_FORMAT,
+                    otw_format,
+                )
+                stream_args.channels = list(channels)
+                streamer = native_get_rx_stream(stream_args)
+                entry["supported"] = True
+                get_max_num_samps = getattr(streamer, "get_max_num_samps", None)
+                if callable(get_max_num_samps):
+                    try:
+                        entry["max_num_samps"] = int(get_max_num_samps())
+                    except Exception:
+                        pass
+            except Exception as exc:
+                entry["native_error_type"] = type(exc).__name__
+                entry["native_error"] = str(exc)[:1024]
+            finally:
+                # Native UHD streamers have no close() method. Dropping the
+                # final Python reference releases their transport resources.
+                streamer = None
+            return entry
+
+        result["default"] = attempt("")
+        result["formats"] = [
+            attempt(otw_format)
+            for otw_format in _UHD_OTW_FORMAT_CANDIDATES
+        ]
+        self._rx_stream_format_probe_cache = result
+        return result
+
     def invoke_native(self, method_name, args, positional_args=None):
         """Invoke a pinned UHD member while reconstructing tagged value inputs."""
         if self.device is None:
@@ -597,7 +730,7 @@ class UsrpSchema(DeviceSchema):
                 return str(value)
         return ""
 
-    def get_capabilities_v2(self):
+    def build_session_metadata_v2(self):
         device = self.device
         if device is None:
             raise RuntimeError("USRP session is not open")
@@ -623,12 +756,14 @@ class UsrpSchema(DeviceSchema):
             or call("get_mboard_name", 0, default="")
         )
         product_text = str(product or "")
-        identity_lower = f"{native_name} {product_text}".lower()
-        hardware_profile = (
-            "usrp2901"
-            if "2901" in identity_lower or "ni usrp" in identity_lower
-            else "b200"
+        profile, profile_resolution = resolve_live_profile(
+            self._inventory,
+            native_name,
+            product_text,
+            info.get("rx_subdev_name"),
+            info.get("tx_subdev_name"),
         )
+        hardware_profile = profile.profile_id
         serial = (
             self._inventory.get("serial")
             or info.get("mboard_serial")
@@ -651,13 +786,42 @@ class UsrpSchema(DeviceSchema):
         fpga_version = str(tree_scalar("/mboards/0/fpga_version"))
         usb_version = str(tree_scalar("/mboards/0/usb_version"))
         link_rate = tree_scalar("/mboards/0/link_max_rate")
+        transport_is_network = (
+            profile.transport == "ethernet"
+            or bool(self._inventory.get("addr"))
+        )
+        transport_address = str(self._inventory.get("addr") or "")
+        if transport_is_network and not link_rate and profile.default_link_rate_bps:
+            link_rate = profile.default_link_rate_bps
+        if transport_is_network:
+            transport_type = "ethernet"
+        elif profile.transport != "runtime_detected":
+            transport_type = profile.transport
+        else:
+            transport_type = "usb" if usb_version else "unknown"
 
         def ranges(method_name, count):
             return [call(method_name, chan, default=None) for chan in range(count)]
 
+        rx_format_probe = self._probe_rx_stream_formats(rx_count)
+        supported_otw_formats = [
+            str(entry["otw_format"])
+            for entry in rx_format_probe.get("formats", [])
+            if entry.get("supported") and entry.get("otw_format")
+        ]
+        stream_format_capabilities = {
+            "rx": rx_format_probe,
+            "tx": {
+                "status": "not_probed",
+                "reason": "tx_capability_probe_requires_explicit_admin_qualification",
+            },
+        }
+
         return {
             "remote_device_type": "usrp",
             "hardware_profile": hardware_profile,
+            "device_profile": profile.public_definition(),
+            "profile_resolution": profile_resolution,
             "native_product": product_text,
             "native_name": native_name,
             "native_serial": str(serial),
@@ -666,8 +830,9 @@ class UsrpSchema(DeviceSchema):
             "firmware_version": firmware_version,
             "fpga_version": fpga_version,
             "fpga_image": fpga_version,
-            "transport_type": "usb",
-            "usb_speed": usb_version,
+            "transport_type": transport_type,
+            "transport_address": transport_address,
+            "usb_speed": "" if transport_is_network else usb_version,
             "transport_link_rate_bps": link_rate,
             "rx_channel_count": rx_count,
             "tx_channel_count": tx_count,
@@ -683,7 +848,8 @@ class UsrpSchema(DeviceSchema):
             "gpio_banks": call("get_gpio_banks", 0, default=[]),
             "sensors": call("get_mboard_sensor_names", 0, default=[]),
             "supported_cpu_formats": ["fc32", "fc64", "sc16"],
-            "supported_otw_formats": ["sc16", "sc12", "sc8"],
+            "supported_otw_formats": supported_otw_formats,
+            "stream_format_capabilities": stream_format_capabilities,
             "advanced_interfaces": {
                 "property_tree": tree is not None,
                 "filters": True,

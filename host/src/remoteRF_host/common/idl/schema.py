@@ -480,15 +480,20 @@ def install_server_import_compat() -> None:
         host_manifest = importlib.import_module(
             "remoteRF_host.drivers.usrp.uhd_manifest"
         )
+        host_profiles = importlib.import_module(
+            "remoteRF_host.drivers.usrp.profiles"
+        )
     except Exception:
         pass
     else:
         sys.modules["remoteRF_server.drivers"] = host_drivers
         sys.modules["remoteRF_server.drivers.usrp"] = host_usrp
         sys.modules["remoteRF_server.drivers.usrp.uhd_manifest"] = host_manifest
+        sys.modules["remoteRF_server.drivers.usrp.profiles"] = host_profiles
         setattr(server_pkg, "drivers", host_drivers)
         setattr(host_drivers, "usrp", host_usrp)
         setattr(host_usrp, "uhd_manifest", host_manifest)
+        setattr(host_usrp, "profiles", host_profiles)
 
 
 def load_drivers() -> Dict[str, str]:

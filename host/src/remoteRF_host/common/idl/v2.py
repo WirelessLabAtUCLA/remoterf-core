@@ -166,6 +166,7 @@ def build_schema(
     capability_fields: Iterable[str],
     coverage: Mapping[str, str],
     deprecations: Iterable[Mapping[str, Any]] = (),
+    hardware_profile_definitions: Iterable[Mapping[str, Any]] = (),
 ) -> dict:
     body = {
         "schema_version": SCHEMA_VERSION,
@@ -174,6 +175,9 @@ def build_schema(
         "driver_version": str(driver_version),
         "native_api": dict(native_api),
         "hardware_profiles": [str(item) for item in hardware_profiles],
+        "hardware_profile_definitions": [
+            dict(item) for item in hardware_profile_definitions
+        ],
         "protocols": {
             "control": [CONTROL_PROTOCOL_VERSION],
             "streaming": [STREAMING_PROTOCOL_VERSION],
@@ -203,6 +207,22 @@ def validate_schema(schema: Mapping[str, Any]) -> None:
         or keyword.iskeyword(client_class)
     ):
         raise ValueError("device_type and client_class must be identifiers")
+
+    advertised_profiles = {
+        str(item) for item in schema.get("hardware_profiles", ())
+    }
+    profile_ids: set[str] = set()
+    for entry in schema.get("hardware_profile_definitions", ()):
+        profile_id = str(entry.get("profile_id") or "")
+        if not profile_id or profile_id in profile_ids:
+            raise ValueError(
+                f"duplicate or missing hardware profile definition: {profile_id!r}"
+            )
+        if profile_id not in advertised_profiles:
+            raise ValueError(
+                f"hardware profile definition {profile_id!r} is not advertised"
+            )
+        profile_ids.add(profile_id)
 
     object_paths: set[str] = set()
     for entry in schema.get("objects", ()):
