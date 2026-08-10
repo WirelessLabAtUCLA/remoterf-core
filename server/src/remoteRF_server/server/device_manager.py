@@ -568,11 +568,16 @@ def _seed_default_hackrf_driver() -> None:
     )
 
 
+def _seed_default_ti_mmwave_driver() -> None:
+    _seed_default_driver("ti_mmwave_schema.py", "ti_mmwave")
+
+
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
     _seed_default_usrp_driver()
     _seed_default_rtl_sdr_driver()
     _seed_default_hackrf_driver()
+    _seed_default_ti_mmwave_driver()
 
     try:
         from ..common.idl import pluto_schema as _  # noqa: F401
@@ -598,6 +603,11 @@ def _load_all_drivers() -> None:
         from ..drivers.hackrf import hackrf_schema as _  # noqa: F401
     except Exception as e:
         print(f"Warning: could not load built-in hackrf driver: {e}")
+
+    try:
+        from ..drivers.ti_mmwave import ti_mmwave_schema as _  # noqa: F401
+    except Exception as e:
+        print(f"Warning: could not load built-in TI mmWave driver: {e}")
 
     results = load_drivers()
     for fname, status in results.items():

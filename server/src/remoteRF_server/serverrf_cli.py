@@ -274,6 +274,8 @@ def print_help() -> None:
         "  --add --pluto-mimo <id:name:iio_serial>\n"
         "                                      Add an ADALM-Pluto MIMO (all channels enabled)\n"
         "  --add --rtl-sdr <id:name:selector>   Add an RTL-SDR by serial or index=N\n"
+        "  --add --ti-mmwave <id:name:cp2105_serial>\n"
+        "                                      Add a TI mmWave dual-UART radar\n"
         "  --add --usrp-2901 <id:name:serial>  Add a serial-bound NI USRP-2901\n"
         "  --add --usrp2901 <id:name:serial>   Legacy alias for --usrp-2901\n"
         "  --add --usrp <id:name:serial>       Legacy alias for --usrp-2901\n"
@@ -331,6 +333,7 @@ def print_help() -> None:
         "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
         "  serverrf --device --add --pluto-mimo 1:pluto_mimo:104473f6\n"
         "  serverrf --device --add --rtl-sdr 4:rtl_fm:serial=00000001\n"
+        "  serverrf --device --add --ti-mmwave 5:ti_radar:00DF4F69\n"
         "  serverrf --device --add --usrp-2901 1:usrp2901_lab:31A2B3C\n"
         "  serverrf --device --add --usrp-b205-mini 3:b205mini_lab:31E9F48\n"
         "  serverrf --device --add --usrp-n210 2:n210_lab:192.168.137.21\n"
@@ -1101,6 +1104,58 @@ def _device_add_rtl_sdr(spec: str) -> int:
     return 0
 
 
+def _device_add_ti_mmwave(spec: str) -> int:
+    try:
+        gid, name, serial = _parse_serial_add_spec(
+            spec,
+            serial_label="cp2105_serial",
+        )
+    except Exception as exc:
+        print(f"ERROR: invalid ti-mmwave spec: {exc}", file=sys.stderr)
+        return 2
+
+    _cfg_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+
+    for other_gid, record in recs.items():
+        if (
+            str(record.get("TYPE") or "") == "ti_mmwave"
+            and str(record.get("IDENT") or "") == serial
+        ):
+            print(
+                f"ERROR: TI mmWave serial already used by global_id={other_gid}",
+                file=sys.stderr,
+            )
+            return 2
+
+    recs[gid] = {
+        "TYPE": "ti_mmwave",
+        "NAME": name,
+        "IDENT_KIND": "serial",
+        "IDENT": serial,
+        "INIT": {
+            "serial": serial,
+            "firmware_profile": "xwr68xx_oob_sdk3",
+            "cli_baud": 115200,
+            "data_baud": 921600,
+            "frame_queue_depth": 8,
+        },
+    }
+    _write_device_records(recs)
+    print(
+        f"Added device: {gid} type=ti_mmwave name={name} "
+        f"cp2105_serial={serial}"
+    )
+    return 0
+
+
 def _device_add_usrp(spec: str) -> int:
     try:
         gid, name, serial = _parse_serial_add_spec(spec, serial_label="serial")
@@ -1595,7 +1650,8 @@ def main() -> int:
             if i + 1 >= len(argv):
                 print(
                     "ERROR: missing device type after --device --add "
-                    "(expected --pluto, --pluto-mimo, --rtl-sdr, --usrp-2901, "
+                    "(expected --pluto, --pluto-mimo, --rtl-sdr, "
+                    "--ti-mmwave, --usrp-2901, "
                     "--usrp-b205-mini, --usrp-n210, or --usrp-profile)",
                     file=sys.stderr,
                 )
@@ -1605,6 +1661,7 @@ def main() -> int:
                 "--pluto",
                 "--pluto-mimo",
                 "--rtl-sdr",
+                "--ti-mmwave",
                 "--usrp-2901",
                 "--usrp2901",
                 "--usrp",
@@ -1615,7 +1672,8 @@ def main() -> int:
                 "--usrp-profile",
             ):
                 print(
-                    "ERROR: device type must be --pluto, --pluto-mimo, --rtl-sdr, "
+                    "ERROR: device type must be --pluto, --pluto-mimo, "
+                    "--rtl-sdr, --ti-mmwave, "
                     "--usrp-2901, --usrp-b205-mini, --usrp-n210, or "
                     "--usrp-profile",
                     file=sys.stderr,
@@ -1876,6 +1934,11 @@ def main() -> int:
             did_any = True
         elif device_add_type == "rtl-sdr" and device_add_spec is not None:
             rc = _device_add_rtl_sdr(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+        elif device_add_type == "ti-mmwave" and device_add_spec is not None:
+            rc = _device_add_ti_mmwave(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

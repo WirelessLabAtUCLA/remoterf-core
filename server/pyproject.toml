@@ -20,6 +20,7 @@ dependencies = [
   "pyrtlsdr>=0.5,<0.6",
   "pyrtlsdrlib>=0.0.5,<0.1",
   "pyhackrf2>=1.0.3,<2.0",
+  "pyserial>=3.5,<4.0",
 ]
 readme = "README.md"
 

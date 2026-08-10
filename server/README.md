@@ -228,7 +228,7 @@ Some distros come with default firewall settings that block traffic on specific 
 
 ## Server Device Configuration
 
-ADALM-Pluto, RTL-SDR, and local or HostRF-owned UHD inventories are supported.
+ADALM-Pluto, RTL-SDR, TI mmWave, and local or HostRF-owned UHD inventories are supported.
 Every USRP remains registered as device type `usrp`; a structured profile
 selects the UHD transport and runtime capabilities report the model actually
 opened.
@@ -371,6 +371,67 @@ bandwidth, LNA/VGA/TXVGA gains, front-end amplifier state, bias tee state,
 receive sample-count limit, bounded synchronous IQ reads, TX-buffer loading,
 enumeration, and serial-number access. The wrapper also compensates for the
 recursive LNA getter and stale amplifier state in `pyhackrf2` 1.0.3.
+
+### TI mmWave radar
+
+The packaged `ti_mmwave` v1 schema initially targets xWR68xx out-of-box demo
+firmware using a Silicon Labs CP2105 dual-UART bridge. Runtime control uses the
+Enhanced interface at 115200 baud. Binary TLV output uses the Standard
+interface at 921600 baud. `pyserial` is installed with `remoterf-server`.
+
+On macOS, install the official
+[Silicon Labs CP210x VCP driver](https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers)
+first. Reconnect the radar and verify that two serial device nodes exist:
+
+```bash
+ls /dev/cu.*
+python -m serial.tools.list_ports -v
+```
+
+Add the device by the stable CP2105 bridge serial printed by the second command:
+
+```bash
+serverrf --device --add --ti-mmwave 20:ti_radar:00DF4F69
+serverrf --device --show
+```
+
+The canonical inventory supports explicit port overrides when an operating
+system does not publish the Enhanced/Standard interface names:
+
+```yaml
+devices:
+  - device_id: 20
+    device_type: ti_mmwave
+    name: ti_radar
+    init:
+      serial: "00DF4F69"
+      firmware_profile: xwr68xx_oob_sdk3
+      cli_baud: 115200
+      data_baud: 921600
+      frame_queue_depth: 8
+      # cli_port: /dev/cu.SLAB_USBtoUART-enhanced
+      # data_port: /dev/cu.SLAB_USBtoUART-standard
+```
+
+RemoteRF owns both UART handles while the server is running. The schema exposes
+runtime CLI commands, ordered `.cfg` application, sensor start/stop, version
+query, queue health, and bounded complete-frame reads. Firmware flashing and
+board SOP-mode changes are intentionally outside the remote API.
+
+Unit tests do not require hardware. After both UARTs enumerate, run the opt-in
+hardware smoke test without starting `serverrf` or another serial application:
+
+```bash
+REMOTERF_TI_MMWAVE_SERIAL=00DF4F69 \
+  python -m unittest tests.test_ti_mmwave_hardware
+```
+
+If interface-name discovery is unavailable, also set
+`REMOTERF_TI_MMWAVE_CLI_PORT` and `REMOTERF_TI_MMWAVE_DATA_PORT`.
+To extend the smoke test through configuration, sensor start, and one complete
+binary frame, set `REMOTERF_TI_MMWAVE_CONFIG` to a board-compatible TI `.cfg`
+file. `REMOTERF_TI_MMWAVE_FRAME_TIMEOUT` optionally changes the five-second
+frame deadline.
 
 ### Structured USRP profiles
 
