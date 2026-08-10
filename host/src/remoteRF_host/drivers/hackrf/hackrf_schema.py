@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import numpy as np
@@ -117,6 +118,18 @@ def _bounded_sample_count(value: Any) -> int:
     return count
 
 
+def _correct_pyhackrf2_iq(samples: Any) -> np.ndarray:
+    """Undo pyhackrf2 1.0.3's erroneous post-conversion ``- (1+1j)``."""
+    values = np.asarray(samples, dtype=np.complex64)
+    try:
+        affected = version("pyhackrf2") == "1.0.3"
+    except PackageNotFoundError:
+        affected = False
+    if affected:
+        values = values + np.complex64(1.0 + 1.0j)
+    return values
+
+
 def _complex_to_iq_bytes(value: Any) -> bytearray:
     arr = np.asarray(value)
     if arr.size == 0:
@@ -158,7 +171,7 @@ class HackRFSchema(DeviceSchema):
 
     device_type = "hackrf"
     client_class = "HackRF"
-    driver_version = "0.1.0"
+    driver_version = "0.1.1"
 
     @staticmethod
     def make_device(**kwargs):
@@ -259,7 +272,7 @@ class HackRFSchema(DeviceSchema):
     def call_read_samples(self, num_samples=131072):
         """Synchronously read a bounded complex64 IQ array."""
         count = _bounded_sample_count(num_samples)
-        samples = np.asarray(self.device.read_samples(count), dtype=np.complex64)
+        samples = _correct_pyhackrf2_iq(self.device.read_samples(count))
         if samples.size != count:
             raise RuntimeError(
                 f"short HackRF read: requested {count}, received {samples.size}"
@@ -270,8 +283,30 @@ class HackRFSchema(DeviceSchema):
     def call_load_tx_iq(self, samples):
         """Convert normalized IQ samples and load the native transmit buffer."""
         payload = _complex_to_iq_bytes(samples)
+        if not payload:
+            raise ValueError("TX IQ input must contain at least one sample")
         self.device.buffer = payload
         return len(payload)
+
+    @idl_expose(kind="call")
+    def call_start_tx(self):
+        """Start transmitting the IQ bytes previously loaded with load_tx_iq()."""
+        payload_bytes = len(self.device.buffer)
+        if payload_bytes <= 0:
+            raise RuntimeError("load TX IQ samples before starting transmission")
+        self.device.start_tx()
+        return payload_bytes
+
+    @idl_expose(kind="call")
+    def call_stop_tx(self):
+        """Stop an active HackRF transmission."""
+        self.device.stop_tx()
+
+    @idl_expose(kind="call")
+    def call_clear_buffer(self):
+        """Clear any captured or queued IQ bytes while the radio is idle."""
+        self.device.buffer = bytearray()
+        return 0
 
     @idl_expose(kind="call")
     def call_enumerate(self):

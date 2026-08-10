@@ -12,7 +12,7 @@ from remoteRF_host.drivers.usrp.uhd_manifest import (
     TARGET_UHD_VERSION,
     build_usrp_schema_v2,
 )
-from remoteRF_host.server.dynamic_v2 import session_manager
+from remoteRF_host.server.dynamic_v2 import session_manager, snapshot_native
 from remoteRF_host.server.dynamic_v2_bridge import run_bridge
 
 
@@ -37,6 +37,20 @@ class FakeRXStreamer:
         buffer[..., :2] = np.array([1 + 2j, 3 + 4j], dtype=buffer.dtype)
         metadata.error_code = "none"
         return 2
+
+
+class FakeMetaRange:
+    def __iter__(self):
+        raise TypeError("this PyUHD build does not expose range iteration")
+
+    def start(self):
+        return 42e6
+
+    def stop(self):
+        return 6.008e9
+
+    def step(self):
+        return 0.25
 
 
 class FakeLiveSchema:
@@ -163,6 +177,25 @@ class DynamicV2BridgeTests(unittest.TestCase):
         )
         self.assertTrue(closed.closed)
         self.assertTrue(self.inventory.live.closed)
+
+    def test_non_iterable_meta_range_preserves_aggregate_interval(self):
+        snapshot = snapshot_native(FakeMetaRange())
+
+        self.assertEqual(snapshot["__uhd_type__"], "MetaRange")
+        self.assertEqual(snapshot["start"], 42e6)
+        self.assertEqual(snapshot["stop"], 6.008e9)
+        self.assertEqual(snapshot["step"], 0.25)
+        self.assertEqual(
+            snapshot["ranges"],
+            [
+                {
+                    "__uhd_type__": "Range",
+                    "start": 42e6,
+                    "stop": 6.008e9,
+                    "step": 0.25,
+                }
+            ],
+        )
 
     def test_rx_sample_frames_keep_binary_payloads_across_tunnel_calls(self):
         opened = self.open_session()

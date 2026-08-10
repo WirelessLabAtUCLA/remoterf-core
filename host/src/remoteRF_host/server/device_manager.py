@@ -297,6 +297,14 @@ def _seed_default_hackrf_driver() -> None:
     )
 
 
+def _seed_default_ti_mmwave_driver() -> None:
+    _seed_default_driver(
+        "ti_mmwave_schema.py",
+        "ti_mmwave",
+        _packaged_schema_path("ti_mmwave", "ti_mmwave_schema.py"),
+    )
+
+
 def _load_all_drivers(required_types: set[str]) -> None:
     if "usrp" in required_types:
         _seed_default_usrp_driver()
@@ -304,6 +312,8 @@ def _load_all_drivers(required_types: set[str]) -> None:
         _seed_default_rtl_sdr_driver()
     if "hackrf" in required_types:
         _seed_default_hackrf_driver()
+    if "ti_mmwave" in required_types:
+        _seed_default_ti_mmwave_driver()
 
     if {"adalm_pluto", "pluto"} & required_types:
         try:
@@ -335,6 +345,12 @@ def _load_all_drivers(required_types: set[str]) -> None:
         except Exception as e:
             warn(f"Could not load built-in HackRF driver: {e}", component="hostrf.device_manager")
 
+    if "ti_mmwave" in required_types:
+        try:
+            from ..drivers.ti_mmwave import ti_mmwave_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in TI mmWave driver: {e}", component="hostrf.device_manager")
+
     results = load_drivers()
     for fname, status in results.items():
         if status != "ok":
@@ -352,6 +368,10 @@ def reload_devices(*, force: bool = False) -> bool:
     records = _load_device_records()
     required_types = {str(rec.get("TYPE") or "").strip().lower() for rec in records.values()}
     _load_all_drivers(required_types)
+    # Seeding a newly required packaged driver changes the driver-directory
+    # signature. Cache the post-seed state so the tunnel agent does not
+    # immediately reload and attempt to open the same USB radio twice.
+    sig = _reload_signature()
 
     tmp_devices: Dict[int, _DeviceState] = {}
     tmp_info: Dict[int, str] = {}

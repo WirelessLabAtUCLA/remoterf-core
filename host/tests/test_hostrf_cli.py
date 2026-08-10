@@ -163,6 +163,19 @@ class HostRfCliTests(unittest.TestCase):
                 "hackrf",
                 {"device_index": 0},
             ),
+            (
+                "--ti-mmwave",
+                "12:ti_xwr68xx:00DF4F69",
+                12,
+                "ti_mmwave",
+                {
+                    "serial": "00DF4F69",
+                    "firmware_profile": "xwr68xx_oob_sdk3",
+                    "cli_baud": 115200,
+                    "data_baud": 921600,
+                    "frame_queue_depth": 8,
+                },
+            ),
         )
 
         for flag, spec, gid, device_type, expected_init in cases:
@@ -184,6 +197,7 @@ class HostRfCliTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("9: type=usrp name=n210_lab addr=192.168.10.2", out)
         self.assertIn("11: type=hackrf name=hackrf_lab device_index=0", out)
+        self.assertIn("12: type=ti_mmwave name=ti_xwr68xx serial=00DF4F69", out)
 
     def test_n210_cli_rejects_non_ip_selector(self) -> None:
         rc, _out, err = self.run_cli(

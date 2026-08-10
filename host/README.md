@@ -318,5 +318,28 @@ The remote client exposes tuning, sample rate, filter bandwidth, LNA/VGA/TX
 gain, amplifier and bias-tee state, bounded synchronous IQ reads, and TX-buffer
 loading.
 
+### 7) Connect a TI xWR68xx mmWave radar
+
+TI mmWave SDK 3 out-of-box firmware uses the radar board's Silicon Labs CP2105
+bridge as two UARTs: Enhanced for the 115200-baud CLI and Standard for the
+921600-baud binary data stream. Install the Python transport and confirm that
+both interfaces are visible:
+
+```bash
+python -m pip install "pyserial>=3.5,<4"
+python -m serial.tools.list_ports -v
+```
+
+On macOS, install the Silicon Labs CP210x VCP driver if the CP2105 appears in
+USB inventory but does not expose both `/dev/cu.*` nodes. Add the radar by
+its CP2105 serial and an unused global device ID:
+
+```bash
+hostrf --device --add --ti-mmwave 14:ti_xwr68xx:00DF4F69
+```
+
+The HostRF schema discovers both interfaces from that serial, keeps a bounded
+complete-frame queue, and exposes raw packets for client-side TI TLV decoding.
+
 Custom schemas under `~/.config/remoterf/drivers/` take precedence over the
 packaged defaults. No `usrp_policy.yml` file is required.

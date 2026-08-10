@@ -76,6 +76,7 @@ def print_help() -> None:
         "  --add --usrp-n210 <id:name:addr>     Add an address-bound USRP N210\n"
         "  --add --rtl-sdr <id:name:selector>   Add by serial=... or index=N\n"
         "  --add --hackrf <id:name:selector>    Add by serial=... or index=N\n"
+        "  --add --ti-mmwave <id:name:serial>   Add a TI xWR mmWave radar\n"
         "  --remove <id>                       Remove device\n"
         "  --edit-name <id> <name>             Override device NAME for existing device\n"
         "  --show | -s                         Show all devices\n"
@@ -103,6 +104,7 @@ def print_help() -> None:
         "  hostrf --device --add --usrp-n210 9:n210_lab:192.168.10.2\n"
         "  hostrf --device --add --rtl-sdr 10:rtl_fm:serial=00000001\n"
         "  hostrf --device --add --hackrf 11:hackrf_lab:index=0\n"
+        "  hostrf --device --add --ti-mmwave 12:ti_xwr68xx:00DF4F69\n"
         "  hostrf --device --edit-name 0 \"New Pluto Name\"\n"
         "  hostrf --device --remove 0\n"
         "  hostrf --device --show\n"
@@ -559,6 +561,29 @@ def _device_add_rtl_sdr(spec: str) -> int:
 def _device_add_hackrf(spec: str) -> int:
     return _device_add_index_or_serial(spec, device_type="hackrf")
 
+
+def _device_add_ti_mmwave(spec: str) -> int:
+    try:
+        gid, name, serial = _parse_usrp_add_spec(spec)
+    except Exception as exc:
+        print(f"ERROR: invalid ti_mmwave spec: {exc}", file=sys.stderr)
+        return 2
+    return _device_add_inventory(
+        gid=gid,
+        name=name,
+        device_type="ti_mmwave",
+        init={
+            "serial": serial,
+            "firmware_profile": "xwr68xx_oob_sdk3",
+            "cli_baud": 115200,
+            "data_baud": 921600,
+            "frame_queue_depth": 8,
+        },
+        selector_kind="serial",
+        selector=serial,
+    )
+
+
 def _device_edit_name(global_id_str: str, new_name: str) -> int:
     try:
         gid = int((global_id_str or "").strip())
@@ -882,7 +907,7 @@ def main() -> int:
                 print(
                     "ERROR: missing device type after --device --add "
                     "(expected --pluto, --usrp-2901, --usrp-b205-mini, "
-                    "--usrp-n210, --rtl-sdr, or --hackrf)",
+                    "--usrp-n210, --rtl-sdr, --hackrf, or --ti-mmwave)",
                     file=sys.stderr,
                 )
                 return 2
@@ -898,11 +923,14 @@ def main() -> int:
                 "--usrp-n210": "usrp-n210",
                 "--rtl-sdr": "rtl-sdr",
                 "--hackrf": "hackrf",
+                "--ti-mmwave": "ti-mmwave",
+                "--ti-radar": "ti-mmwave",
             }
             if dt not in device_type_aliases:
                 print(
                     "ERROR: device type must be --pluto, --usrp-2901, "
-                    "--usrp-b205-mini, --usrp-n210, --rtl-sdr, or --hackrf",
+                    "--usrp-b205-mini, --usrp-n210, --rtl-sdr, --hackrf, "
+                    "or --ti-mmwave",
                     file=sys.stderr,
                 )
                 return 2
@@ -1030,6 +1058,12 @@ def main() -> int:
 
         if device_add_type == "hackrf" and device_add_spec is not None:
             rc = _device_add_hackrf(device_add_spec)
+            if rc != 0:
+                return rc
+            did_any = True
+
+        if device_add_type == "ti-mmwave" and device_add_spec is not None:
+            rc = _device_add_ti_mmwave(device_add_spec)
             if rc != 0:
                 return rc
             did_any = True

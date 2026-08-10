@@ -18,7 +18,7 @@ class DeviceManagerRadioTests(unittest.TestCase):
             temp = Path(raw_temp)
             blocker = temp / "blocker"
             blocker.mkdir()
-            for module_name in ("pyhackrf2", "rtlsdr", "uhd"):
+            for module_name in ("pyhackrf2", "rtlsdr", "serial", "uhd"):
                 (blocker / f"{module_name}.py").write_text(
                     f"raise ImportError('{module_name} deliberately unavailable')\n",
                     encoding="utf-8",
@@ -73,6 +73,18 @@ class DeviceManagerRadioTests(unittest.TestCase):
                                 "name": "hackrf",
                                 "init": {"serial": "HACKRF-SERIAL"},
                             },
+                            {
+                                "device_id": 6,
+                                "device_type": "ti_mmwave",
+                                "name": "ti-radar",
+                                "init": {
+                                    "serial": "00DF4F69",
+                                    "firmware_profile": "xwr68xx_oob_sdk3",
+                                    "cli_baud": 115200,
+                                    "data_baud": 921600,
+                                    "frame_queue_depth": 8,
+                                },
+                            },
                         ]
                     }
                 ),
@@ -93,7 +105,7 @@ class DeviceManagerRadioTests(unittest.TestCase):
                         from remoteRF_host.server import device_manager
 
                         configured = device_manager.get_configured_devices()
-                        assert set(configured) == {1, 2, 3, 4, 5}
+                        assert set(configured) == {1, 2, 3, 4, 5, 6}
                         assert configured[3]["ident"] == "192.168.10.2"
                         assert configured[4]["ident"] == "0"
 
@@ -101,6 +113,7 @@ class DeviceManagerRadioTests(unittest.TestCase):
                             "usrp_schema.py",
                             "rtl_sdr_schema.py",
                             "hackrf_schema.py",
+                            "ti_mmwave_schema.py",
                         ):
                             assert (device_manager.get_drivers_dir() / filename).is_file()
 
@@ -108,6 +121,7 @@ class DeviceManagerRadioTests(unittest.TestCase):
                             ("usrp", "MultiUSRP"),
                             ("rtl_sdr", "RtlSdr"),
                             ("hackrf", "HackRF"),
+                            ("ti_mmwave", "TiMmWave"),
                         ):
                             schema = get_driver_class(device_type)()
                             assert schema.get_idl()["client_class"] == client_class
