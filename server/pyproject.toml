@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "remoteRF-server"
 version = "1.0.15"
 description = "RemoteRF server-side control package"
+license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.10"
 dependencies = [
   "grpcio>=1.78.1,<2.0.0",
@@ -23,6 +24,11 @@ dependencies = [
   "pyserial>=3.5,<4.0",
 ]
 readme = "README.md"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: OS Independent",
+]
 
 [project.scripts]
 # RRRFserver = "remoteRF_server.server.grpc_server:main"
