@@ -309,13 +309,11 @@ def edit_user_group_local(session) -> None:
             return None  # cancelled
         if s == "":
             return ""    # unchanged
-        if s.lower() in {"all", "*"}:
-            return []
         parts = [p for p in s.replace(",", " ").split() if p]
         try:
             vals = [int(p) for p in parts]
         except ValueError:
-            print("Invalid list. Use e.g. '0,1,2' or '0 1 2' or 'all'.")
+            print("Invalid list. Use e.g. '0,1,2' or '0 1 2'.")
             return _prompt_devices_optional(msg)
         if any(v < 0 for v in vals):
             print("Device IDs must be >= 0.")
@@ -354,7 +352,7 @@ def edit_user_group_local(session) -> None:
         group_name = None
 
     devices_whitelist = _prompt_devices_optional(
-        "New devices whitelist (e.g. 0,1,2 | 'all' => [] | Enter unchanged, c cancel): "
+        "New devices whitelist (e.g. 0,1,2 | Enter unchanged, c cancel): "
     )
     if devices_whitelist is None:
         return
@@ -394,7 +392,7 @@ def edit_user_group_local(session) -> None:
     def _fmt_devices(v: Optional[List[int]]) -> str:
         if v is None:
             return "(unchanged)"
-        return "ALL([])" if len(v) == 0 else ",".join(map(str, v))
+        return ",".join(map(str, v))
 
     print("\nAbout to edit user group:")
     print(f"  group_id                : {group_id}")
