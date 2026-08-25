@@ -21,7 +21,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="remoterf",
-    version="2.0.10",
+    version="2.0.11",
     author="Ethan Ge",
     author_email="84103791+ethange1@users.noreply.github.com",
     description="A python API to remotely access signal centric hardware. Client-side only! Courtesy of Wireless Lab @ UCLA & Prof. Ian Roberts.",
