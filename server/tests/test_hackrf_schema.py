@@ -30,6 +30,7 @@ import numpy as np
 from remoteRF_server.drivers.hackrf.hackrf_schema import (
     HackRFSchema,
     _MAX_COMPLEX64_SAMPLES,
+    _correct_pyhackrf2_iq,
     connect_hackrf,
 )
 
@@ -46,6 +47,8 @@ class FakeHackRF:
         self.bias_tee_on = False
         self.sample_count_limit = 0
         self.buffer = bytearray()
+        self.tx_started = False
+        self.tx_stop_count = 0
 
     @property
     def lna_gain(self):
@@ -71,6 +74,13 @@ class FakeHackRF:
     def get_serial_no(self):
         return "SERIAL0"
 
+    def start_tx(self):
+        self.tx_started = True
+
+    def stop_tx(self):
+        self.tx_started = False
+        self.tx_stop_count += 1
+
 
 def _bound_schema():
     native = FakeHackRF()
@@ -80,6 +90,22 @@ def _bound_schema():
 
 
 class HackRFSchemaTests(unittest.TestCase):
+    def test_corrects_pyhackrf2_103_iq_dc_offset_only_for_affected_version(self):
+        shifted = np.array([-1.5 - 0.5j, -0.75 - 1.25j], dtype=np.complex64)
+        with patch(
+            "remoteRF_server.drivers.hackrf.hackrf_schema.version",
+            return_value="1.0.3",
+        ):
+            corrected = _correct_pyhackrf2_iq(shifted)
+        np.testing.assert_allclose(corrected, shifted + np.complex64(1 + 1j))
+
+        with patch(
+            "remoteRF_server.drivers.hackrf.hackrf_schema.version",
+            return_value="1.0.4",
+        ):
+            unchanged = _correct_pyhackrf2_iq(shifted)
+        np.testing.assert_array_equal(unchanged, shifted)
+
     def test_idl_publishes_six_new_control_pairs(self):
         idl = HackRFSchema().get_idl()
 
@@ -102,6 +128,9 @@ class HackRFSchemaTests(unittest.TestCase):
         for name in (
             "call_read_samples",
             "call_load_tx_iq",
+            "call_start_tx",
+            "call_stop_tx",
+            "call_clear_buffer",
             "call_enumerate",
             "call_get_serial_no",
         ):
@@ -156,9 +185,21 @@ class HackRFSchemaTests(unittest.TestCase):
         self.assertEqual(written, 6)
         self.assertEqual(native.buffer, bytearray([127, 0, 0, 127, 129, 129]))
 
+        self.assertEqual(schema.dispatch("call_start_tx", {}), 6)
+        self.assertTrue(native.tx_started)
+        self.assertIsNone(schema.dispatch("call_stop_tx", {}))
+        self.assertFalse(native.tx_started)
+        self.assertEqual(native.tx_stop_count, 1)
+        self.assertEqual(schema.dispatch("call_clear_buffer", {}), 0)
+        self.assertEqual(native.buffer, bytearray())
+
         for value in (0, -1, _MAX_COMPLEX64_SAMPLES + 1):
             with self.subTest(samples=value), self.assertRaises(ValueError):
                 schema.dispatch("call_read_samples", {"num_samples": value})
+        with self.assertRaises(ValueError):
+            schema.dispatch("call_load_tx_iq", {"samples": np.array([], dtype=np.complex64)})
+        with self.assertRaises(RuntimeError):
+            schema.dispatch("call_start_tx", {})
         with self.assertRaises(ValueError):
             schema.dispatch("set_sample_count_limit", {"value": -1})
         with self.assertRaises(ValueError):
@@ -238,6 +279,9 @@ class DefaultHackRFSchemaTests(unittest.TestCase):
                         assert idl["client_class"] == "HackRF"
                         assert "get_lna_gain" in idl["getters"]
                         assert "set_bias_tee_on" in idl["setters"]
+                        assert "call_start_tx" in idl["calls"]
+                        assert "call_stop_tx" in idl["calls"]
+                        assert "call_clear_buffer" in idl["calls"]
 
                         try:
                             schema.make_device(device_index=0)

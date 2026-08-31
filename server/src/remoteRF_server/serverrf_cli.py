@@ -186,7 +186,7 @@ def _tos_ack_path() -> Path:
 
 _TOS_VERSION = "2026"
 _TOS_URL = "https://remoterf.net/tos"
-BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
+BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
 
 def _tos_acknowledged() -> bool:

@@ -127,7 +127,7 @@ except Exception as exc:
     # may not provide a real console screen buffer. The interactive serve path
     # still gets the normal output whenever one is available.
     session = PromptSession(output=DummyOutput())
-BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
+BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
 from dotenv import load_dotenv, find_dotenv
 dotenv_path = find_dotenv('.env.server')
