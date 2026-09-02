@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
@@ -35,6 +36,17 @@ from remoteRF_server.drivers.hackrf.hackrf_schema import (
 )
 
 
+class _FakeTransfer(ctypes.Structure):
+    _fields_ = [
+        ("buffer", ctypes.POINTER(ctypes.c_byte)),
+        ("buffer_length", ctypes.c_int),
+        ("valid_length", ctypes.c_int),
+    ]
+
+
+_FakeTxCallback = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(_FakeTransfer))
+
+
 class FakeHackRF:
     def __init__(self):
         self.center_freq = 100_000_000
@@ -49,6 +61,7 @@ class FakeHackRF:
         self.buffer = bytearray()
         self.tx_started = False
         self.tx_stop_count = 0
+        self._cfunc_tx_callback = _FakeTxCallback(lambda _transfer: 0)
 
     @property
     def lna_gain(self):
@@ -128,9 +141,13 @@ class HackRFSchemaTests(unittest.TestCase):
         for name in (
             "call_read_samples",
             "call_load_tx_iq",
+            "call_setup",
+            "call_set_freq",
+            "call_set_sample_rate",
             "call_start_tx",
             "call_stop_tx",
             "call_clear_buffer",
+            "call_close",
             "call_enumerate",
             "call_get_serial_no",
         ):
@@ -144,6 +161,7 @@ class HackRFSchemaTests(unittest.TestCase):
     def test_dispatch_controls_and_pyhackrf_tracking_workarounds(self):
         schema, native = _bound_schema()
 
+        self.assertIsNone(schema.dispatch("call_setup", {}))
         schema.dispatch("set_center_freq", {"value": "433200000"})
         schema.dispatch("set_sample_rate", {"value": 10_000_000})
         schema.dispatch("set_filter_bandwidth", {"value": 7_300_000})
@@ -165,6 +183,11 @@ class HackRFSchemaTests(unittest.TestCase):
         self.assertEqual(schema.dispatch("get_sample_count_limit", {}), 65_536)
         self.assertTrue(native._amplifier_on)
 
+        self.assertIsNone(schema.dispatch("call_set_freq", {"value": 915_000_000}))
+        self.assertIsNone(schema.dispatch("call_set_sample_rate", {"value": 2_000_000}))
+        self.assertEqual(schema.dispatch("get_center_freq", {}), 915_000_000)
+        self.assertEqual(schema.dispatch("get_sample_rate", {}), 2_000_000)
+
     def test_iq_calls_are_wire_safe_and_bounded(self):
         schema, native = _bound_schema()
 
@@ -185,12 +208,42 @@ class HackRFSchemaTests(unittest.TestCase):
         self.assertEqual(written, 6)
         self.assertEqual(native.buffer, bytearray([127, 0, 0, 127, 129, 129]))
 
+        transfer_buffer = (ctypes.c_byte * 10)()
+        transfer = _FakeTransfer(
+            ctypes.cast(transfer_buffer, ctypes.POINTER(ctypes.c_byte)),
+            10,
+            0,
+        )
+        self.assertEqual(native._cfunc_tx_callback(ctypes.byref(transfer)), 0)
+        self.assertEqual(transfer.valid_length, 10)
+        self.assertEqual(
+            ctypes.string_at(transfer_buffer, 10),
+            bytes([127, 0, 0, 127, 129, 129, 127, 0, 0, 127]),
+        )
+
         self.assertEqual(schema.dispatch("call_start_tx", {}), 6)
         self.assertTrue(native.tx_started)
+        with self.assertRaisesRegex(RuntimeError, "already active"):
+            schema.dispatch("call_start_tx", {})
+        with self.assertRaisesRegex(RuntimeError, "stop HackRF TX"):
+            schema.dispatch("call_clear_buffer", {})
         self.assertIsNone(schema.dispatch("call_stop_tx", {}))
         self.assertFalse(native.tx_started)
         self.assertEqual(native.tx_stop_count, 1)
+        self.assertIsNone(schema.dispatch("call_stop_tx", {}))
+        self.assertEqual(native.tx_stop_count, 1)
         self.assertEqual(schema.dispatch("call_clear_buffer", {}), 0)
+        self.assertEqual(native.buffer, bytearray())
+
+        raw_iq = np.array([127, 0, -128, 127], dtype=np.int8)
+        self.assertEqual(
+            schema.dispatch("call_load_tx_iq", {"samples": raw_iq}),
+            raw_iq.nbytes,
+        )
+        self.assertEqual(native.buffer, bytearray([127, 0, 128, 127]))
+        schema.dispatch("call_start_tx", {})
+        self.assertIsNone(schema.dispatch("call_close", {}))
+        self.assertFalse(native.tx_started)
         self.assertEqual(native.buffer, bytearray())
 
         for value in (0, -1, _MAX_COMPLEX64_SAMPLES + 1):
@@ -198,6 +251,11 @@ class HackRFSchemaTests(unittest.TestCase):
                 schema.dispatch("call_read_samples", {"num_samples": value})
         with self.assertRaises(ValueError):
             schema.dispatch("call_load_tx_iq", {"samples": np.array([], dtype=np.complex64)})
+        with self.assertRaisesRegex(ValueError, "I/Q pairs"):
+            schema.dispatch(
+                "call_load_tx_iq",
+                {"samples": np.array([1, 2, 3], dtype=np.int8)},
+            )
         with self.assertRaises(RuntimeError):
             schema.dispatch("call_start_tx", {})
         with self.assertRaises(ValueError):

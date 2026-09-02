@@ -16,6 +16,7 @@
 """Native HackRF controls exposed through the RemoteRF schema system."""
 from __future__ import annotations
 
+import ctypes
 import json
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
@@ -151,10 +152,29 @@ def _complex_to_iq_bytes(value: Any) -> bytearray:
         return bytearray()
 
     if not np.iscomplexobj(arr):
+        # Match the common libhackrf Python binding convention: a signed int8
+        # array is already interleaved I/Q bytes and must not be normalized or
+        # scaled again.  A two-column int8 array is the same representation in
+        # a more convenient shape.
+        if arr.dtype == np.dtype(np.int8):
+            if arr.ndim == 2 and arr.shape[-1] == 2:
+                arr = arr.reshape(-1)
+            if arr.ndim == 1:
+                if arr.size % 2:
+                    raise ValueError("interleaved int8 TX IQ must contain I/Q pairs")
+                if arr.nbytes > _MAX_REMOTE_PAYLOAD_BYTES:
+                    raise ValueError(
+                        "interleaved int8 TX IQ exceeds the RemoteRF limit of "
+                        f"{_MAX_REMOTE_PAYLOAD_BYTES} bytes"
+                    )
+                return bytearray(np.ascontiguousarray(arr).tobytes())
         if arr.ndim == 2 and arr.shape[-1] == 2:
             arr = arr[:, 0].astype(np.float32) + 1j * arr[:, 1].astype(np.float32)
         else:
-            raise ValueError("TX IQ input must be a complex array or an Nx2 I/Q array")
+            raise ValueError(
+                "TX IQ input must be normalized complex samples, an Nx2 I/Q array, "
+                "or interleaved signed int8 I/Q bytes"
+            )
 
     arr = np.asarray(arr, dtype=np.complex64).reshape(-1)
     if arr.size > _MAX_COMPLEX64_SAMPLES:
@@ -171,6 +191,56 @@ def _complex_to_iq_bytes(value: Any) -> bytearray:
     out[0::2] = np.round(i * 127.0).astype(np.int8)
     out[1::2] = np.round(q * 127.0).astype(np.int8)
     return bytearray(out.tobytes())
+
+
+def _install_safe_tx_callback(device: Any) -> None:
+    """Replace pyhackrf2's unsafe TX callback with one that fills libhackrf memory.
+
+    pyhackrf2 1.0.3 replaces ``transfer.buffer`` with a pointer to a temporary
+    Python ``bytearray``.  libhackrf owns that buffer and continues using it
+    after the callback returns, so replacing it permits a use-after-free and
+    can crash the process.  This callback leaves the C-owned pointer intact,
+    copies a retained cyclic payload into it, and keeps streaming until the
+    caller explicitly invokes ``stop_tx``.
+    """
+    if getattr(device, "_remoterf_safe_tx_callback_installed", False):
+        return
+
+    existing_callback = getattr(device, "_cfunc_tx_callback", None)
+    if existing_callback is None:
+        # Non-pyhackrf2 test doubles and compatible implementations may offer
+        # start_tx without exposing their private ctypes callback.
+        return
+
+    callback_type = type(existing_callback)
+
+    def _tx_callback(transfer_pointer) -> int:
+        try:
+            transfer = transfer_pointer.contents
+            payload = getattr(device, "_remoterf_tx_payload", b"")
+            buffer_length = int(transfer.buffer_length)
+            if not payload or buffer_length <= 0:
+                transfer.valid_length = 0
+                return 1
+
+            # libhackrf supplies a C-owned buffer for every async USB
+            # transfer. Fill it completely by repeating the user payload, so
+            # it remains valid until the USB layer releases it.
+            repeats = (buffer_length + len(payload) - 1) // len(payload)
+            block = (payload * repeats)[:buffer_length]
+            ctypes.memmove(transfer.buffer, block, buffer_length)
+            transfer.valid_length = buffer_length
+            return 0
+        except BaseException:
+            # Never let a Python exception unwind through a ctypes callback.
+            return 1
+
+    safe_callback = callback_type(_tx_callback)
+    # Keep the ctypes function object strongly referenced for the lifetime of
+    # the device; otherwise its callback trampoline could itself be collected.
+    device._remoterf_safe_tx_callback = safe_callback
+    device._remoterf_safe_tx_callback_installed = True
+    device._cfunc_tx_callback = safe_callback
 
 
 def _tracked_property(device, public_name: str, private_name: str):
@@ -296,32 +366,71 @@ class HackRFSchema(DeviceSchema):
 
     @idl_expose(kind="call")
     def call_load_tx_iq(self, samples):
-        """Convert normalized IQ samples and load the native transmit buffer."""
+        """Load normalized complex or native interleaved signed-int8 TX IQ."""
         payload = _complex_to_iq_bytes(samples)
         if not payload:
             raise ValueError("TX IQ input must contain at least one sample")
         self.device.buffer = payload
+        self.device._remoterf_tx_payload = bytes(payload)
+        _install_safe_tx_callback(self.device)
         return len(payload)
+
+    @idl_expose(kind="call")
+    def call_setup(self):
+        """Confirm the already-managed remote HackRF is ready for use."""
+        # The RemoteRF server owns the physical device for its whole lifetime,
+        # so there is no native setup action to repeat for each client.
+        return None
+
+    @idl_expose(kind="call")
+    def call_set_freq(self, value):
+        """Compatibility alias for setting the center frequency in Hz."""
+        self.set_center_freq(value)
+
+    @idl_expose(kind="call")
+    def call_set_sample_rate(self, value):
+        """Compatibility alias for setting the complex sample rate in Hz."""
+        self.set_sample_rate(value)
 
     @idl_expose(kind="call")
     def call_start_tx(self):
         """Start transmitting the IQ bytes previously loaded with load_tx_iq()."""
+        if getattr(self.device, "_remoterf_tx_active", False):
+            raise RuntimeError("HackRF TX is already active; stop it before starting again")
         payload_bytes = len(self.device.buffer)
         if payload_bytes <= 0:
             raise RuntimeError("load TX IQ samples before starting transmission")
         self.device.start_tx()
+        self.device._remoterf_tx_active = True
         return payload_bytes
 
     @idl_expose(kind="call")
     def call_stop_tx(self):
         """Stop an active HackRF transmission."""
-        self.device.stop_tx()
+        if not getattr(self.device, "_remoterf_tx_active", False):
+            return
+        try:
+            self.device.stop_tx()
+        finally:
+            self.device._remoterf_tx_active = False
 
     @idl_expose(kind="call")
     def call_clear_buffer(self):
         """Clear any captured or queued IQ bytes while the radio is idle."""
+        if getattr(self.device, "_remoterf_tx_active", False):
+            raise RuntimeError("stop HackRF TX before clearing its buffer")
         self.device.buffer = bytearray()
+        self.device._remoterf_tx_payload = b""
         return 0
+
+    @idl_expose(kind="call")
+    def call_close(self):
+        """Safely end this remote TX use without closing the server-owned radio."""
+        self.call_stop_tx()
+        self.call_clear_buffer()
+        # Calling pyhackrf2.close() here can tear down the shared production
+        # device and has been observed to crash its native libhackrf path.
+        return None
 
     @idl_expose(kind="call")
     def call_enumerate(self):
