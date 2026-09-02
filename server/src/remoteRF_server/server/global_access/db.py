@@ -27,7 +27,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -216,7 +216,11 @@ class GlobalDB:
         self, *, mapping_id: int, local_account_id: int, minutes: int
     ) -> tuple[str, datetime]:
         salt, hashed, token = generate_token(length=32)
-        now = datetime.now()
+        # The gRPC contract serializes this value with a trailing ``Z``. Keep
+        # the SQLite representation naive for compatibility with the existing
+        # database schema, but make that naive value explicitly UTC so the
+        # wire representation cannot label local wall-clock time as UTC.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         from datetime import timedelta
 
         expires_at = now + timedelta(minutes=minutes)
@@ -230,7 +234,7 @@ class GlobalDB:
 
     @db_connection
     def validate_session(self, *, token: str) -> Optional[dict]:
-        now = datetime.now()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         self.cursor.execute(
             "SELECT session_salt, session_hash, mapping_id, local_account_id, "
             "expires_at, revoked_at FROM GlobalLocalSessions "

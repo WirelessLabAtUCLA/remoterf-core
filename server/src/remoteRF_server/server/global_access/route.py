@@ -72,7 +72,10 @@ def build_route_payload(route: RouteConfig, *, ca_crt_path: Path, server_crt_pat
         )
 
     return {
-        "kind": route.kind,
+        # Match RemoteRF Global's DeploymentRouteRequest exactly. The
+        # connector is the deployment-side contract owner here; accepting a
+        # server-side default would hide a future route-kind drift.
+        "route_kind": route.kind,
         "grpc_endpoint": route.grpc_endpoint,
         "certificate_endpoint": route.certificate_endpoint,
         "tls_server_name": route.tls_server_name,

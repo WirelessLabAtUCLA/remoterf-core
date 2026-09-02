@@ -102,6 +102,7 @@ class RouteTests(unittest.TestCase):
         )
         self.assertEqual(payload["ca_sha256"], compute_ca_sha256(self.certs_dir / "ca.crt"))
         self.assertEqual(payload["grpc_endpoint"], "ucla.global.remoterf.net:61005")
+        self.assertEqual(payload["route_kind"], "tcp-relay")
 
     def test_route_never_publishes_the_lan_ip_san(self):
         payload = build_route_payload(

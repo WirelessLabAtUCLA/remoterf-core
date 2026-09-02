@@ -43,7 +43,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-PROTOCOL_VERSION = "1.0"
+# This is the RemoteRF *Global* wire version, not the Dynamic v2 streaming
+# version. Global's OpenAPI and Client route resolver both identify v1 as
+# the canonical string "1".
+PROTOCOL_VERSION = "1"
 
 PRIVATE_KEY_FILENAME = "deployment-private.pem"
 PUBLIC_KEY_FILENAME = "deployment-public.pem"
@@ -153,8 +156,11 @@ def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
 
 
 def public_key_b64(state_dir: Path) -> str:
-    """Raw 32-byte Ed25519 public key, base64url-encoded (no padding) —
-    the form suitable for a JWK 'x' field / enrollment payload."""
+    """Raw 32-byte Ed25519 public key, standard padded Base64 for enrollment.
+
+    JWK ``x`` uses unpadded base64url, but the Global enrollment contract's
+    ``public_key`` field is standard Base64 and validates it strictly.
+    """
     import base64
 
     priv = load_private_key(state_dir)
@@ -162,7 +168,7 @@ def public_key_b64(state_dir: Path) -> str:
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return base64.b64encode(raw).decode("ascii")
 
 
 def public_key_pem(state_dir: Path) -> str:

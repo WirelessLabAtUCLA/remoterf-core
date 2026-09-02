@@ -128,9 +128,11 @@ class GlobalConnector:
             raise RuntimeError("deployment is not enrolled")
 
         audience = f"{self._cfg.base_url}/v1/deployment"
-        deployment_jwt = sign_deployment_jwt(
-            priv, deployment_id=state.deployment_id, audience=audience
-        )
+
+        def new_deployment_jwt() -> str:
+            # Global consumes each connector JWT's JTI for replay protection,
+            # so route, catalog, and heartbeat must not reuse one token.
+            return sign_deployment_jwt(priv, deployment_id=state.deployment_id, audience=audience)
 
         try:
             route_payload = build_route_payload(
@@ -141,7 +143,7 @@ class GlobalConnector:
         except RouteConsistencyError as exc:
             raise GlobalApiError(str(exc)) from exc
 
-        self._client.publish_route(deployment_jwt=deployment_jwt, route_payload=route_payload)
+        self._client.publish_route(deployment_jwt=new_deployment_jwt(), route_payload=route_payload)
 
         known_ids = self._get_known_device_ids()
         catalog_payload = build_catalog_payload(self._cfg, known_device_ids=known_ids)
@@ -154,9 +156,12 @@ class GlobalConnector:
         if force or new_hash != old_hash:
             if new_hash != old_hash:
                 version += 1
-            payload_with_version = dict(catalog_payload, version=version)
+            # The Global HTTP API names this field `catalog_version`; keeping
+            # it explicit avoids FastAPI validation failures and makes stale
+            # catalog sequencing observable at the wire boundary.
+            payload_with_version = dict(catalog_payload, catalog_version=version)
             self._client.publish_catalog(
-                deployment_jwt=deployment_jwt, catalog_payload=payload_with_version
+                deployment_jwt=new_deployment_jwt(), catalog_payload=payload_with_version
             )
             db.set_catalog_state(version=version, content_hash=new_hash)
 
@@ -169,5 +174,5 @@ class GlobalConnector:
             "route_status": "ok",
             "instance_id": self._instance_id,
         }
-        self._client.heartbeat(deployment_jwt=deployment_jwt, metadata=metadata)
+        self._client.heartbeat(deployment_jwt=new_deployment_jwt(), metadata=metadata)
         audit_event("connector_heartbeat_ok", deployment_id=state.deployment_id, catalog_version=version)
