@@ -30,7 +30,7 @@ from .common.idl.schema import ensure_default_driver_files
 from .common.utils.db_location import get_devices_config_path, get_host_config_dir, get_remoterf_root
 from .drivers.usrp.profiles import inventory_for_profile
 
-BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
+BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
 # -----------------------------
 # Host config locations (~/.config/remoterf/host by default)

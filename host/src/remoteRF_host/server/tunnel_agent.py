@@ -52,7 +52,7 @@ from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
 
-BANNER_CREDIT = "Created at UCLA by E. Ge and I. Roberts."
+BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
 
 # -------------------------
