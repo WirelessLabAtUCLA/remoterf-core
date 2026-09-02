@@ -14,3 +14,4 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from . import grpc_pb2, grpc_pb2_grpc
+from . import global_auth_pb2, global_auth_pb2_grpc

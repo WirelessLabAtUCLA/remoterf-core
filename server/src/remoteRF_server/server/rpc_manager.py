@@ -115,6 +115,10 @@ class RpcManager:
             with acquire_device(api_token) as (gid, dev):
                 self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
 
+                from .global_access.operation_policy import enforce_for_legacy_rpc
+
+                enforce_for_legacy_rpc(api_token=api_token, device_id=gid, function_name=function_name)
+
                 if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
                     return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
 

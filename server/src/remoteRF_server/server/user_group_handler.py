@@ -668,6 +668,54 @@ class UserGroupHandler:
             return False
 
     @db_connection
+    def add_user_to_group_by_name(self, *, uid: int, group_name: str) -> bool:
+        """
+        Directly place uid into the group named group_name, without an
+        enrollment code. Used by RemoteRF Global (server/global_access/
+        principal_mapping.py) to assign a JIT shadow account to the
+        operator-configured public_group. Reuses the exact same
+        UsersLookup insert enroll_user_with_code performs (minus code
+        redemption) — group membership itself has always been a plain
+        (user_id, group_id) row, not something the enrollment-code
+        mechanism owns.
+        """
+        try:
+            uid = int(uid)
+            group_name = str(group_name).strip()
+            if uid < 0 or not group_name:
+                return False
+
+            self.cursor.execute(
+                "SELECT group_id FROM UserGroups WHERE group_name = ? LIMIT 1",
+                (group_name,),
+            )
+            row = self.cursor.fetchone()
+            if row is None:
+                return False
+            group_id = int(row[0])
+
+            self.cursor.execute(
+                "SELECT 1 FROM UsersLookup WHERE user_id = ? AND group_id = ? LIMIT 1",
+                (uid, group_id),
+            )
+            if self.cursor.fetchone() is None:
+                self.cursor.execute(
+                    "INSERT INTO UsersLookup (user_id, group_id) VALUES (?, ?)",
+                    (uid, group_id),
+                )
+            return True
+        except Exception:
+            return False
+
+    @db_connection
+    def group_exists(self, *, group_name: str) -> bool:
+        self.cursor.execute(
+            "SELECT 1 FROM UserGroups WHERE group_name = ? LIMIT 1",
+            (str(group_name).strip(),),
+        )
+        return self.cursor.fetchone() is not None
+
+    @db_connection
     def get_users_devices(self, *, uid: int) -> list[int]:
         # union of all devices whitelists from all groups the user is in
         try:
