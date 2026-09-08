@@ -49,5 +49,5 @@ def sign_deployment_jwt(
         "token_type": DEPLOYMENT_TOKEN_TYPE,
     }
     # PyJWT never logs the key or the encoded token; callers must not log
-    # the return value either (see connector.py / docs/remoterf-global-security.md).
+    # the return value either (see connector.py).
     return jwt.encode(claims, private_key, algorithm="EdDSA")

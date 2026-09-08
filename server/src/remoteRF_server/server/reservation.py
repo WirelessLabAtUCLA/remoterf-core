@@ -17,25 +17,29 @@ import sqlite3
 from datetime import datetime
 import time
 import sys
-import secrets
 import threading
-from pathlib import Path
-from functools import wraps
 import json
 from datetime import datetime, timedelta
 import re
+from uuid import UUID, uuid4, uuid5
 
 from ..common.utils import *
-from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter, terminate_transmitter, get_transmitter_state
-from .acc_perms import perms, userperms
+from remoterf_federation_core import (
+    canonical_uuid,
+    federated_identity,
+    federated_proxy_adapter,
+)
+from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter
+from .acc_perms import perms
 from .user_group_handler import user_group_handler
-
-import os
-import sys
-from pathlib import Path
+from .federation.migrations import (
+    FEDERATED_PASSWORD_HASH,
+    FEDERATED_PASSWORD_SALT,
+    configure_connection,
+    migrate_reservations_schema,
+)
 
 allow_connections = True
-
 
 def _parse_reservation_datetime(value) -> datetime:
     """Parse SQLite timestamps with or without fractional seconds."""
@@ -61,30 +65,7 @@ class ReservationHandler:
         self.db = sqlite3.connect(self.filepath)
         self.cursor = self.db.cursor()
 
-        self.cursor.execute('''
-        CREATE TABLE IF NOT EXISTS Accounts (
-            acc_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            email TEXT NOT NULL UNIQUE,
-            pass_salt TEXT NOT NULL,
-            pass_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-
-        # RemoteRF Global v1.0: distinguishes ordinary local accounts from
-        # JIT shadow accounts created for a Global identity (see
-        # server/global_access/principal_mapping.py). SQLite has no
-        # "ADD COLUMN IF NOT EXISTS", so this is guarded manually — the only
-        # schema change ever made to a pre-existing table in this repo.
-        # Existing rows default to 'local_password' and are completely
-        # unaffected.
-        self.cursor.execute("PRAGMA table_info(Accounts)")
-        existing_columns = {row[1] for row in self.cursor.fetchall()}
-        if "auth_type" not in existing_columns:
-            self.cursor.execute(
-                "ALTER TABLE Accounts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'local_password'"
-            )
+        migrate_reservations_schema(self.db)
 
         self.cursor.execute('''
         CREATE TABLE IF NOT EXISTS Reservations (
@@ -265,9 +246,17 @@ class ReservationHandler:
         try:
             passwords = hash_token(pw)
             self.cursor.execute('''
-            INSERT INTO Accounts (username, email, pass_salt, pass_hash, created_at) VALUES (?, ?, ?, ?, ?)
+            INSERT INTO Accounts
+            (username, email, pass_salt, pass_hash, created_at, auth_type)
+            VALUES (?, ?, ?, ?, ?, 'local_password')
             ''', (un, em, passwords[0], passwords[1], datetime.now()))
             uid = int(self.cursor.lastrowid)
+            self.cursor.execute(
+                "INSERT INTO LocalAccountSubjects "
+                "(local_account_id, subject_id, status, created_at) "
+                "VALUES (?, ?, 'active', ?)",
+                (uid, str(uuid4()), int(time.time())),
+            )
             user_group_handler.enroll_user_with_code(uid=uid, code_name=ec)
             perms.set_user(un) # set perms
             return {"UC": map_arg(f'{un}')}
@@ -315,73 +304,176 @@ class ReservationHandler:
     
     @db_connection
     def login_user(self, username, password):
-        self.cursor.execute('SELECT * FROM Accounts WHERE username = ?', (username,))
+        self.cursor.execute(
+            "SELECT acc_id, username, pass_salt, pass_hash, auth_type "
+            "FROM Accounts WHERE username = ?",
+            (username,),
+        )
         account = self.cursor.fetchone()
 
         if account is None:
             return {"UE": map_arg("Invalid login details.")}
 
-        auth_type = account[6] if len(account) > 6 else "local_password"
-
-        if auth_type == "remoterf_global":
-            # RemoteRF Global v1.0 shadow accounts never authenticate via a
-            # human-chosen password (pass_salt/pass_hash are permanently
-            # unusable junk for these accounts, see create_external_account).
-            # The client-visible "password" field instead carries the
-            # short-lived session token minted by GlobalAuthV1.ExchangeAssertion.
-            from .global_access.db import get_global_db
-
-            session = get_global_db().validate_session(token=password)
-            if session is not None and session["local_account_id"] == account[0]:
-                return {"UC": map_arg(f"{username}")}
+        state = self._account_security_state_locked(username)
+        if account[4] != "local_password" or state != "native":
             return {"UE": map_arg("Invalid login details.")}
 
-        if validate_token(account[3], account[4], password):
+        if validate_token(account[2], account[3], password):
             return {"UC": map_arg(f"{username}")}
         return {"UE": map_arg("Invalid login details.")}
 
+    def resolve_federated_account(
+        self, *, issuer_deployment_id: str, remote_subject_id: str
+    ) -> int:
+        """Allocate or exactly resolve one proxy for the canonical tuple."""
+        identity = federated_identity(issuer_deployment_id, remote_subject_id)
+        username, email = federated_proxy_adapter(
+            identity.issuer_deployment_id, identity.remote_subject_id
+        )
+        with self.lock, sqlite3.connect(
+            str(self.filepath), timeout=5.0, check_same_thread=False
+        ) as conn:
+            configure_connection(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT b.local_account_id, a.username, a.email, a.pass_salt,
+                       a.pass_hash, a.auth_type
+                FROM FederatedAccountBindings b
+                LEFT JOIN Accounts a ON a.acc_id = b.local_account_id
+                WHERE b.issuer_deployment_id = ? AND b.remote_subject_id = ?
+                """,
+                (identity.issuer_deployment_id, identity.remote_subject_id),
+            ).fetchone()
+            if row is not None:
+                if row[1:] != (
+                    username,
+                    email,
+                    FEDERATED_PASSWORD_SALT,
+                    FEDERATED_PASSWORD_HASH,
+                    "federated",
+                ):
+                    raise ValueError("federated account binding is incoherent")
+                account_id = int(row[0])
+            else:
+                collision = conn.execute(
+                    "SELECT acc_id FROM Accounts WHERE username = ? OR email = ? LIMIT 1",
+                    (username, email),
+                ).fetchone()
+                if collision is not None:
+                    raise ValueError("federated proxy adapter collision")
+                conn.execute(
+                    """
+                    INSERT INTO Accounts
+                    (username, email, pass_salt, pass_hash, created_at, auth_type)
+                    VALUES (?, ?, ?, ?, ?, 'federated')
+                    """,
+                    (
+                        username,
+                        email,
+                        FEDERATED_PASSWORD_SALT,
+                        FEDERATED_PASSWORD_HASH,
+                        datetime.now(),
+                    ),
+                )
+                account_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO FederatedAccountBindings
+                    (issuer_deployment_id, remote_subject_id, local_account_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        identity.issuer_deployment_id,
+                        identity.remote_subject_id,
+                        account_id,
+                        int(time.time()),
+                    ),
+                )
+            conn.commit()
+        # perms.db is a protected separate database. Insert-if-absent is
+        # intentionally idempotent and never resets an existing role.
+        perms.ensure_user(username)
+        return account_id
+
+    def resolve_federated_principal(
+        self,
+        *,
+        issuer_deployment_id: str,
+        remote_subject_id: str,
+        display_metadata: dict[str, str] | None = None,
+    ):
+        account_id = self.resolve_federated_account(
+            issuer_deployment_id=issuer_deployment_id,
+            remote_subject_id=remote_subject_id,
+        )
+        from .federation.principals import FederatedPrincipalStore
+
+        store = FederatedPrincipalStore(
+            self.filepath.parent / "usergroups.db",
+            reservations_path=self.filepath,
+        )
+        return store.resolve(
+            issuer_deployment_id=issuer_deployment_id,
+            remote_subject_id=remote_subject_id,
+            local_account_id=account_id,
+            display_metadata=display_metadata,
+        )
+
+    def initialize_native_subjects(self, deployment_id: str) -> dict[int, str]:
+        """Persist deterministic bootstrap subjects once for existing natives."""
+        deployment_id = canonical_uuid(deployment_id)
+        namespace = UUID(deployment_id)
+        with self.lock, sqlite3.connect(
+            str(self.filepath), timeout=5.0, check_same_thread=False
+        ) as conn:
+            configure_connection(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT a.acc_id
+                FROM Accounts a
+                LEFT JOIN FederatedAccountBindings b ON b.local_account_id = a.acc_id
+                WHERE a.auth_type = 'local_password' AND b.local_account_id IS NULL
+                ORDER BY a.acc_id
+                """
+            ).fetchall()
+            for (account_id,) in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO LocalAccountSubjects "
+                    "(local_account_id, subject_id, status, created_at) "
+                    "VALUES (?, ?, 'active', ?)",
+                    (
+                        int(account_id),
+                        str(uuid5(namespace, f"account:{int(account_id)}")),
+                        int(time.time()),
+                    ),
+                )
+            result = {
+                int(account_id): canonical_uuid(subject_id)
+                for account_id, subject_id in conn.execute(
+                    "SELECT local_account_id, subject_id FROM LocalAccountSubjects "
+                    "ORDER BY local_account_id"
+                )
+            }
+            conn.commit()
+            return result
+
     @db_connection
-    def create_external_account(self, *, username: str, auth_type: str = "remoterf_global") -> int:
-        """
-        Create a JIT shadow account for a non-local (e.g. RemoteRF Global)
-        identity. Not exposed via RPC dispatch — only called internally by
-        server/global_access/principal_mapping.py. Uses an IANA-reserved
-        '.invalid' placeholder email (RFC 2606) rather than fabricating a
-        real-looking address, and a random, immediately-discarded password
-        hash: this account can never authenticate via the normal password
-        path (see login_user's auth_type branch above).
-        """
-        if auth_type == "local_password":
-            raise ValueError("create_external_account requires a non-local auth_type")
-
-        email = f"{username}@global.invalid"
-        junk_password = secrets.token_urlsafe(32)
-        pass_salt, pass_hash = hash_token(junk_password)
-
+    def get_native_subject(self, local_account_id: int) -> str | None:
         self.cursor.execute(
-            "SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,)
+            """
+            SELECT s.subject_id
+            FROM Accounts a
+            JOIN LocalAccountSubjects s ON s.local_account_id = a.acc_id
+            LEFT JOIN FederatedAccountBindings b ON b.local_account_id = a.acc_id
+            WHERE a.acc_id = ? AND a.auth_type = 'local_password'
+              AND s.status = 'active' AND b.local_account_id IS NULL
+            """,
+            (int(local_account_id),),
         )
         row = self.cursor.fetchone()
-        if row is not None:
-            return int(row[0])
-
-        try:
-            self.cursor.execute(
-                "INSERT INTO Accounts (username, email, pass_salt, pass_hash, created_at, auth_type) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (username, email, pass_salt, pass_hash, datetime.now(), auth_type),
-            )
-            return int(self.cursor.lastrowid)
-        except sqlite3.IntegrityError:
-            # Lost a concurrent create race for the same deterministic
-            # username — fall through to whoever won.
-            self.cursor.execute(
-                "SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,)
-            )
-            row = self.cursor.fetchone()
-            if row is None:
-                raise
-            return int(row[0])
+        return canonical_uuid(row[0]) if row else None
 
     @db_connection
     def get_username_by_acc_id(self, acc_id: int) -> str | None:
@@ -392,33 +484,49 @@ class ReservationHandler:
         return row[0] if row else None
 
     @db_connection
-    def get_username_for_active_token(self, api_token: str) -> str | None:
-        """
-        Resolve a live device/reservation API token back to the owning
-        account's username, without re-deriving reservation/device-token
-        matching logic elsewhere. Used by the Global operation-policy layer
-        to decide whether a given device RPC call belongs to a Global
-        principal (see server/global_access/operation_policy.py).
-        """
-        now = datetime.now()
-        self.cursor.execute(
-            "SELECT username, salt, hash FROM Reservations WHERE start_time <= ? AND end_time > ?",
-            (now, now),
-        )
-        for username, salt, hashed in self.cursor.fetchall():
-            if salt and hashed and validate_token(salt, hashed, api_token):
-                return username
-        return None
-
-    @db_connection
-    def get_auth_type(self, username: str) -> str:
+    def get_auth_type(self, username: str) -> str | None:
         self.cursor.execute(
             "SELECT auth_type FROM Accounts WHERE username = ? LIMIT 1", (username,)
         )
         row = self.cursor.fetchone()
+        return row[0] if row is not None else None
+
+    def _account_security_state_locked(self, username: str) -> str:
+        self.cursor.execute(
+            """
+            SELECT a.auth_type, a.username, a.email, a.pass_salt, a.pass_hash,
+                   b.issuer_deployment_id, b.remote_subject_id
+            FROM Accounts a
+            LEFT JOIN FederatedAccountBindings b ON b.local_account_id = a.acc_id
+            WHERE a.username = ?
+            """,
+            (username,),
+        )
+        row = self.cursor.fetchone()
         if row is None:
-            return "local_password"
-        return row[0] or "local_password"
+            return "missing"
+        auth_type, actual_username, email, salt, hashed, issuer, subject = row
+        if auth_type == "local_password" and issuer is None and subject is None:
+            return "native"
+        if auth_type == "federated" and issuer is not None and subject is not None:
+            try:
+                expected_username, expected_email = federated_proxy_adapter(
+                    issuer, subject
+                )
+            except Exception:
+                return "incoherent"
+            if (
+                actual_username == expected_username
+                and email == expected_email
+                and salt == FEDERATED_PASSWORD_SALT
+                and hashed == FEDERATED_PASSWORD_HASH
+            ):
+                return "federated"
+        return "incoherent"
+
+    @db_connection
+    def get_account_security_state(self, username: str) -> str:
+        return self._account_security_state_locked(username)
     
     def _clean_expired_reservations(self, device_id: int):
         """Remove expired reservations from the database."""
@@ -467,6 +575,10 @@ class ReservationHandler:
         
         self._clean_expired_reservations(device_id)
         
+        security_state = self._account_security_state_locked(username)
+        if security_state in ("federated", "incoherent"):
+            return {"ace": map_arg("Federated principals cannot reserve resources.")}
+
         self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
         row = self.cursor.fetchone()
         accid = int(row[0]) if row else -1
@@ -853,6 +965,9 @@ class ReservationHandler:
             end = _parse_reservation_datetime(reservation[4])
 
             if start <= now < end:
+                security_state = self._account_security_state_locked(reservation[1])
+                if security_state in ("federated", "incoherent"):
+                    continue
                 dev_id = str(reservation[2]).strip()
 
                 # If this reservation corresponds to a local device, remove it from the "clear later" list.
@@ -881,8 +996,6 @@ reservation_handler = ReservationHandler()
 import numpy as np
 import threading
 from datetime import datetime
-from pathlib import Path
-
 # Path to your activity logs file
 LOG_PATH = get_db_dir() / "activity_logs.npy"
 log_lock = threading.Lock()

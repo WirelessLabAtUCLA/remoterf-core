@@ -29,7 +29,6 @@ server.
 from __future__ import annotations
 
 import random
-import sys
 import threading
 import uuid
 from pathlib import Path
@@ -39,6 +38,7 @@ from . import identity as identity_mod
 from .api_client import GlobalApiClient, GlobalApiError
 from .audit import audit_event
 from .catalog import build_catalog_payload, content_hash
+from .catalog_state import CatalogState
 from .config import GlobalConfig
 from .identity import PROTOCOL_VERSION
 from .jwt_tools import sign_deployment_jwt
@@ -76,6 +76,7 @@ class GlobalConnector:
         self._thread: Optional[threading.Thread] = None
         self._backoff = MIN_BACKOFF_SECONDS
         self._instance_id = str(uuid.uuid4())
+        self._catalog_state = CatalogState(self._state_dir)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -149,10 +150,7 @@ class GlobalConnector:
         catalog_payload = build_catalog_payload(self._cfg, known_device_ids=known_ids)
         new_hash = content_hash(catalog_payload)
 
-        from .db import get_global_db
-
-        db = get_global_db()
-        version, old_hash = db.get_catalog_state()
+        version, old_hash = self._catalog_state.load()
         if force or new_hash != old_hash:
             if new_hash != old_hash:
                 version += 1
@@ -163,7 +161,7 @@ class GlobalConnector:
             self._client.publish_catalog(
                 deployment_jwt=new_deployment_jwt(), catalog_payload=payload_with_version
             )
-            db.set_catalog_state(version=version, content_hash=new_hash)
+            self._catalog_state.save(version=version, content_hash=new_hash)
 
         metadata = {
             "deployment_id": state.deployment_id,

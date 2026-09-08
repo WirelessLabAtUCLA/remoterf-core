@@ -1,162 +1,381 @@
-# Copyright (C) 2026 RemoteRF
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-"""
-Covers the one existing-table schema change this feature makes
-(Accounts.auth_type) and the additive login_user/create_external_account
-behavior in reservation.py. Every ReservationHandler here is a fresh
-instance backed by an isolated temp-dir sqlite file (get_db_dir patched at
-construction time only) — the process-wide `reservation_handler` singleton
-elsewhere in the codebase is never touched by these tests.
-"""
-
 from __future__ import annotations
 
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID, uuid4, uuid5
 
+from remoterf_federation_core import federated_proxy_adapter
 from remoteRF_server.common.utils.api_token import hash_token
-from remoteRF_server.server.global_access.db import GlobalDB
-from remoteRF_server.server.reservation import ReservationHandler
+from remoteRF_server.server.acc_perms import perms_db
+from remoteRF_server.server.federation.migrations import SchemaNotReady
+from remoteRF_server.server.reservation import (
+    FEDERATED_PASSWORD_HASH,
+    FEDERATED_PASSWORD_SALT,
+    ReservationHandler,
+)
+from remoteRF_server.server.user_group_handler import UserGroupHandler
+
+DEPLOYMENT = "11111111-1111-4111-8111-111111111111"
+ISSUER = "22222222-2222-4222-8222-222222222222"
+SUBJECT = "33333333-3333-4333-8333-333333333333"
 
 
-class AccountsMigrationTests(unittest.TestCase):
+class GateCFixture(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.db_dir = Path(self._tmp.name)
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        for target in (
+            "remoteRF_server.server.reservation.get_db_dir",
+            "remoteRF_server.server.acc_perms.get_db_dir",
+            "remoteRF_server.server.user_group_handler.get_db_dir",
+        ):
+            item = patch(target, return_value=self.root)
+            item.start()
+            self.addCleanup(item.stop)
+        self.perms = perms_db()
+        self.groups = UserGroupHandler()
+        self.reservations = ReservationHandler()
+        for target, value in (
+            ("remoteRF_server.server.reservation.perms", self.perms),
+            ("remoteRF_server.server.reservation.user_group_handler", self.groups),
+        ):
+            item = patch(target, value)
+            item.start()
+            self.addCleanup(item.stop)
 
-        # Seed a pre-v1.0 Accounts table (no auth_type column at all).
-        conn = sqlite3.connect(self.db_dir / "reservations.db")
-        conn.execute(
-            """
-            CREATE TABLE Accounts (
-                acc_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                email TEXT NOT NULL UNIQUE,
-                pass_salt TEXT NOT NULL,
-                pass_hash TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    def native(self, name="alice", email="alice@example.com", password="native-secret"):
+        salt, hashed = hash_token(password)
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            conn.execute(
+                "INSERT INTO Accounts "
+                "(username,email,pass_salt,pass_hash,created_at,auth_type) "
+                "VALUES (?,?,?,?,CURRENT_TIMESTAMP,'local_password')",
+                (name, email, salt, hashed),
             )
-            """
+            return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+class NativeSubjectTests(GateCFixture):
+    def test_existing_native_id_hash_and_deterministic_subject_are_preserved(self):
+        account_id = self.native()
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            before = conn.execute(
+                "SELECT acc_id,pass_salt,pass_hash FROM Accounts WHERE acc_id=?", (account_id,)
+            ).fetchone()
+        first = self.reservations.initialize_native_subjects(DEPLOYMENT)
+        second = self.reservations.initialize_native_subjects(DEPLOYMENT)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first[account_id], str(uuid5(UUID(DEPLOYMENT), f"account:{account_id}"))
         )
-        salt, hashed = hash_token("correct horse battery staple")
-        conn.execute(
-            "INSERT INTO Accounts (username, email, pass_salt, pass_hash) VALUES (?, ?, ?, ?)",
-            ("alice", "alice@example.com", salt, hashed),
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            after = conn.execute(
+                "SELECT acc_id,pass_salt,pass_hash FROM Accounts WHERE acc_id=?", (account_id,)
+            ).fetchone()
+        self.assertEqual(after, before)
+
+    def test_rename_does_not_change_subject_and_raw_subject_update_fails(self):
+        account_id = self.native()
+        subject = self.reservations.initialize_native_subjects(DEPLOYMENT)[account_id]
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            conn.execute(
+                "UPDATE Accounts SET username='renamed', email='renamed@example.com' "
+                "WHERE acc_id=?",
+                (account_id,),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE LocalAccountSubjects SET subject_id=? WHERE local_account_id=?",
+                    (str(uuid4()), account_id),
+                )
+        self.assertEqual(self.reservations.get_native_subject(account_id), subject)
+
+    def test_new_native_account_gets_uuid4_and_recreation_gets_another_subject(self):
+        group_id = self.groups.create_user_group(
+            group_name="native", devices_whitelist=[], max_reservation_time_sec=1800,
+            max_reservations=1, lifetime_sec=0,
         )
-        conn.commit()
-        conn.close()
-
-    def _open_handler(self) -> ReservationHandler:
-        with patch("remoteRF_server.server.reservation.get_db_dir", return_value=self.db_dir):
-            return ReservationHandler()
-
-    def test_existing_account_row_is_preserved(self):
-        rh = self._open_handler()
-        usernames = [row[1] for row in rh.get_all_accounts()]
-        self.assertIn("alice", usernames)
-
-    def test_existing_account_defaults_to_local_password_auth_type(self):
-        rh = self._open_handler()
-        self.assertEqual(rh.get_auth_type("alice"), "local_password")
-
-    def test_migration_is_idempotent_across_multiple_opens(self):
-        self._open_handler()
-        rh2 = self._open_handler()  # would raise "duplicate column name" if not guarded
-        self.assertEqual(rh2.get_auth_type("alice"), "local_password")
-        self.assertEqual(len(rh2.get_all_accounts()), 1)
-
-    def test_existing_password_login_still_works_after_migration(self):
-        rh = self._open_handler()
-        result = rh.login_user("alice", "correct horse battery staple")
-        self.assertEqual(result.get("UC").string_value, "alice")
-
-    def test_wrong_password_still_rejected_after_migration(self):
-        rh = self._open_handler()
-        result = rh.login_user("alice", "wrong password")
-        self.assertIn("UE", result)
-
-
-class ExternalAccountAndSessionLoginTests(unittest.TestCase):
-    """
-    Exercises reservation.py's create_external_account/login_user('remoterf_global')
-    branch together with a real (temp-dir-backed) GlobalDB session — this is
-    the mechanism GlobalAuthV1.ExchangeAssertion relies on to authenticate a
-    Global-derived shadow account against the existing, unmodified `login`/
-    `get_res`/etc. RPC surface.
-    """
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.db_dir = Path(self._tmp.name)
-        with patch("remoteRF_server.server.reservation.get_db_dir", return_value=self.db_dir):
-            self.rh = ReservationHandler()
-        self.gdb = GlobalDB(db_dir=self.db_dir)
-
-    def test_external_account_has_remoterf_global_auth_type(self):
-        self.rh.create_external_account(username="global-test1")
-        self.assertEqual(self.rh.get_auth_type("global-test1"), "remoterf_global")
-
-    def test_external_account_cannot_login_with_any_password(self):
-        self.rh.create_external_account(username="global-test1")
-        # No password was ever set for this account by anyone — any guess,
-        # including an empty string, must be rejected. Patched so the
-        # (unmatched) session-token lookup never touches the real,
-        # process-wide global.db singleton.
-        with patch("remoteRF_server.server.global_access.db.get_global_db", return_value=self.gdb):
-            for guess in ("", "password", "global-test1", "admin"):
-                with self.subTest(guess=guess):
-                    result = self.rh.login_user("global-test1", guess)
-                    self.assertIn("UE", result)
-
-    def test_valid_session_token_authenticates_the_shadow_account(self):
-        acc_id = self.rh.create_external_account(username="global-test1")
-        token, _expires_at = self.gdb.create_session(
-            mapping_id=1, local_account_id=acc_id, minutes=5
+        code = "native-code"
+        self.groups.create_enrollment_codes(
+            code_names=[code], group_id=group_id, uses=2, duration_sec=0
         )
-        with patch("remoteRF_server.server.global_access.db.get_global_db", return_value=self.gdb):
-            result = self.rh.login_user("global-test1", token)
-        self.assertEqual(result.get("UC").string_value, "global-test1")
+        args = {"un": "fresh", "pw": "secret", "em": "fresh@example.com", "ec": code}
+        from remoteRF_server.common.utils import map_arg
 
-    def test_expired_session_token_is_rejected(self):
-        acc_id = self.rh.create_external_account(username="global-test1")
-        token, _ = self.gdb.create_session(mapping_id=1, local_account_id=acc_id, minutes=-1)
-        with patch("remoteRF_server.server.global_access.db.get_global_db", return_value=self.gdb):
-            result = self.rh.login_user("global-test1", token)
-        self.assertIn("UE", result)
-
-    def test_session_token_for_a_different_account_is_rejected(self):
-        acc_id_1 = self.rh.create_external_account(username="global-test1")
-        self.rh.create_external_account(username="global-test2")
-        token, _ = self.gdb.create_session(mapping_id=1, local_account_id=acc_id_1, minutes=5)
-        with patch("remoteRF_server.server.global_access.db.get_global_db", return_value=self.gdb):
-            result = self.rh.login_user("global-test2", token)
-        self.assertIn("UE", result)
-
-    def test_concurrent_create_external_account_converges_on_one_row(self):
-        id1 = self.rh.create_external_account(username="global-dup")
-        id2 = self.rh.create_external_account(username="global-dup")
-        self.assertEqual(id1, id2)
-        usernames = [row[1] for row in self.rh.get_all_accounts()]
-        self.assertEqual(usernames.count("global-dup"), 1)
+        mapped = {key: map_arg(value) for key, value in args.items()}
+        self.assertIn("UC", self.reservations.create_user(**mapped))
+        first_id = self.reservations.get_uid("fresh")
+        first = self.reservations.get_native_subject(first_id)
+        self.assertEqual(UUID(first).version, 4)
+        self.reservations.remove_user(username="fresh")
+        args["em"] = "fresh2@example.com"
+        mapped = {key: map_arg(value) for key, value in args.items()}
+        self.assertIn("UC", self.reservations.create_user(**mapped))
+        second = self.reservations.get_native_subject(
+            self.reservations.get_uid("fresh")
+        )
+        self.assertNotEqual(first, second)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class FederatedProxyTests(GateCFixture):
+    def test_concurrent_resolution_converges_on_one_account_and_principal(self):
+        handlers = [ReservationHandler() for _ in range(6)]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            principals = list(
+                pool.map(
+                    lambda handler: handler.resolve_federated_principal(
+                        issuer_deployment_id=ISSUER,
+                        remote_subject_id=SUBJECT,
+                        display_metadata={"display_name": "Concurrent"},
+                    ),
+                    handlers,
+                )
+            )
+        self.assertEqual(len({item.id for item in principals}), 1)
+        self.assertEqual(len({item.local_account_id for item in principals}), 1)
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM FederatedAccountBindings").fetchone()[0], 1)
+        with sqlite3.connect(self.root / "usergroups.db") as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM FederatedPrincipals").fetchone()[0], 1)
+
+    def test_same_tuple_converges_and_same_subject_at_other_issuer_is_distinct(self):
+        first = self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        again = self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        other = self.reservations.resolve_federated_account(
+            issuer_deployment_id=DEPLOYMENT, remote_subject_id=SUBJECT
+        )
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, other)
+        username, email = federated_proxy_adapter(ISSUER, SUBJECT)
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            row = conn.execute(
+                "SELECT username,email,pass_salt,pass_hash,auth_type FROM Accounts "
+                "WHERE acc_id=?",
+                (first,),
+            ).fetchone()
+        self.assertEqual(
+            row, (username, email, FEDERATED_PASSWORD_SALT, FEDERATED_PASSWORD_HASH, "federated")
+        )
+
+    def test_username_or_email_collision_fails_closed_without_adoption(self):
+        username, email = federated_proxy_adapter(ISSUER, SUBJECT)
+        for native_name, native_email in (
+            (username, "native@example.com"),
+            ("native-user", email),
+        ):
+            with self.subTest(native_name=native_name):
+                salt, hashed = hash_token("native-secret")
+                with sqlite3.connect(self.root / "reservations.db") as conn:
+                    conn.execute(
+                        "INSERT INTO Accounts "
+                        "(username,email,pass_salt,pass_hash,created_at,auth_type) "
+                        "VALUES (?,?,?,?,CURRENT_TIMESTAMP,'local_password')",
+                        (native_name, native_email, salt, hashed),
+                    )
+                with self.assertRaises(ValueError):
+                    self.reservations.resolve_federated_account(
+                        issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+                    )
+                with sqlite3.connect(self.root / "reservations.db") as conn:
+                    conn.execute("DELETE FROM Accounts")
+
+    def test_federated_and_unknown_auth_never_reach_password_verifier(self):
+        account_id = self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        username, _ = federated_proxy_adapter(ISSUER, SUBJECT)
+        salt, hashed = hash_token("copied-native-password")
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            # Model corrupt/out-of-band state after bypassing the database's
+            # normal immutability defense; runtime must still fail closed.
+            conn.execute("DROP TRIGGER Accounts_federated_adapter_immutable")
+            conn.execute(
+                "UPDATE Accounts SET pass_salt=?,pass_hash=? WHERE acc_id=?",
+                (salt, hashed, account_id),
+            )
+        with patch(
+            "remoteRF_server.server.reservation.validate_token",
+            side_effect=AssertionError("password verifier reached"),
+        ):
+            for guess in (
+                "anything", FEDERATED_PASSWORD_SALT, FEDERATED_PASSWORD_HASH,
+                "copied-native-password",
+            ):
+                self.assertIn("UE", self.reservations.login_user(username, guess))
+
+        native_id = self.native(name="mystery", email="mystery@example.com")
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            conn.execute("PRAGMA ignore_check_constraints=ON")
+            conn.execute("DROP TRIGGER Accounts_auth_type_immutable")
+            conn.execute("DROP TRIGGER Accounts_auth_type_insert")
+            conn.execute("UPDATE Accounts SET auth_type='unknown' WHERE acc_id=?", (native_id,))
+        with patch(
+            "remoteRF_server.server.reservation.validate_token",
+            side_effect=AssertionError("password verifier reached"),
+        ):
+            self.assertIn("UE", self.reservations.login_user("mystery", "native-secret"))
+
+    def test_retry_never_resets_an_existing_role(self):
+        account_id = self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        username = self.reservations.get_username_by_acc_id(account_id)
+        with sqlite3.connect(self.root / "perms.db") as conn:
+            conn.execute("DELETE FROM Users WHERE Username=?", (username,))
+            conn.execute("INSERT INTO Admins (Username) VALUES (?)", (username,))
+        self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        self.assertEqual(self.perms.get_perms(username)[0][0], "Admin")
+
+    def test_principal_is_generic_local_state_and_metadata_is_bounded(self):
+        first = self.reservations.resolve_federated_principal(
+            issuer_deployment_id=ISSUER,
+            remote_subject_id=SUBJECT,
+            display_metadata={"display_name": "Same Name"},
+        )
+        again = self.reservations.resolve_federated_principal(
+            issuer_deployment_id=ISSUER,
+            remote_subject_id=SUBJECT,
+            display_metadata={"display_name": "Renamed"},
+        )
+        self.assertEqual(first.id, again.id)
+        self.assertEqual(first.local_account_id, again.local_account_id)
+        self.assertEqual(again.display_metadata, {"display_name": "Renamed"})
+        with self.assertRaises(ValueError):
+            self.reservations.resolve_federated_principal(
+                issuer_deployment_id=ISSUER,
+                remote_subject_id=SUBJECT,
+                display_metadata={"display_name": "x" * 257},
+            )
+
+    def test_proxy_is_denied_before_server_role_bypass_or_token_mint(self):
+        account_id = self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        username = self.reservations.get_username_by_acc_id(account_id)
+        with patch.object(
+            self.perms,
+            "validate_reservation_request",
+            side_effect=AssertionError("role check reached"),
+        ):
+            result = self.reservations.reserve_device(
+                username,
+                1,
+                datetime.now() + timedelta(minutes=1),
+                datetime.now() + timedelta(minutes=12),
+                is_server=True,
+            )
+        self.assertIn("ace", result)
+
+    def test_out_of_band_proxy_reservation_is_not_materialized(self):
+        account_id = self.reservations.resolve_federated_account(
+            issuer_deployment_id=ISSUER, remote_subject_id=SUBJECT
+        )
+        username = self.reservations.get_username_by_acc_id(account_id)
+        token_salt, token_hash = hash_token("proxy-token")
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            conn.execute(
+                "INSERT INTO Reservations "
+                "(username,device_id,start_time,end_time,salt,hash) VALUES (?,?,?,?,?,?)",
+                (
+                    username, 7, datetime.now() - timedelta(minutes=1),
+                    datetime.now() + timedelta(minutes=10), token_salt, token_hash,
+                ),
+            )
+        with (
+            patch("remoteRF_server.server.reservation.get_all_devices", return_value={7: object()}),
+            patch("remoteRF_server.server.reservation.set_device") as set_device,
+        ):
+            self.reservations.update_devices()
+        set_device.assert_called_once_with("7", "", "")
+
+
+class LegacyAuthTypeReadinessTests(unittest.TestCase):
+    def test_pre_global_schema_migrates_additively_and_native_login_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            salt, hashed = hash_token("existing-password")
+            with sqlite3.connect(root / "reservations.db") as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE Accounts (
+                        acc_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL UNIQUE,
+                        email TEXT NOT NULL UNIQUE,
+                        pass_salt TEXT NOT NULL,
+                        pass_hash TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE Reservations (
+                        res_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT NOT NULL, device_id INTEGER NOT NULL,
+                        start_time TIMESTAMP NOT NULL, end_time TIMESTAMP NOT NULL,
+                        salt TEXT NOT NULL, hash TEXT NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO Accounts VALUES "
+                    "(77,'existing','existing@example.com',?,?,CURRENT_TIMESTAMP)",
+                    (salt, hashed),
+                )
+            patches = [
+                patch(target, return_value=root)
+                for target in (
+                    "remoteRF_server.server.reservation.get_db_dir",
+                    "remoteRF_server.server.acc_perms.get_db_dir",
+                    "remoteRF_server.server.user_group_handler.get_db_dir",
+                )
+            ]
+            for item in patches:
+                item.start()
+                self.addCleanup(item.stop)
+            local_perms = perms_db()
+            local_groups = UserGroupHandler()
+            with (
+                patch("remoteRF_server.server.reservation.perms", local_perms),
+                patch(
+                    "remoteRF_server.server.reservation.user_group_handler",
+                    local_groups,
+                ),
+            ):
+                handler = ReservationHandler()
+                self.assertIn("UC", handler.login_user("existing", "existing-password"))
+                subject = handler.initialize_native_subjects(DEPLOYMENT)[77]
+            with sqlite3.connect(root / "reservations.db") as conn:
+                row = conn.execute(
+                    "SELECT acc_id,pass_salt,pass_hash,auth_type FROM Accounts"
+                ).fetchone()
+            self.assertEqual(row, (77, salt, hashed, "local_password"))
+            self.assertEqual(subject, str(uuid5(UUID(DEPLOYMENT), "account:77")))
+
+    def test_remoterf_global_and_unknown_rows_block_runtime_migration(self):
+        for auth_type in ("remoterf_global", "mystery"):
+            with self.subTest(auth_type=auth_type), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with sqlite3.connect(root / "reservations.db") as conn:
+                    conn.execute(
+                        "CREATE TABLE Accounts (acc_id INTEGER PRIMARY KEY, username TEXT UNIQUE, "
+                        "email TEXT UNIQUE, pass_salt TEXT, pass_hash TEXT, created_at TIMESTAMP, "
+                        "auth_type TEXT NOT NULL)"
+                    )
+                    conn.execute(
+                        "INSERT INTO Accounts VALUES (1,'legacy','legacy@example.com','s','h',"
+                        "CURRENT_TIMESTAMP,?)",
+                        (auth_type,),
+                    )
+                with patch(
+                    "remoteRF_server.server.reservation.get_db_dir", return_value=root
+                ), self.assertRaises(SchemaNotReady):
+                    ReservationHandler()

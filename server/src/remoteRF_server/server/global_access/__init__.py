@@ -14,11 +14,11 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-RemoteRF Global v1.0 — optional integration between this RemoteRF Server
-deployment and the RemoteRF Global coordination layer (global.remoterf.net).
+Isolated connector/catalog support retained during Global v2 development.
 
 This package is entirely optional and additive. When Global is disabled
 (the default, ``REMOTERF_GLOBAL_ENABLED=false``), nothing in this package
 runs: no background threads, no outbound network calls, no requirement for
-identity/config files to exist. See docs/remoterf-global-server-v1.md.
+identity/config files to exist. Gate C provides no GlobalAuthV1 service,
+destination session, enrollment, or federated resource access.
 """

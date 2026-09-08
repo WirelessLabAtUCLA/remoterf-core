@@ -18,12 +18,9 @@ from __future__ import annotations
 import threading
 import socket
 import os
-import io
 import sys
 import time
 from dataclasses import dataclass, field
-
-from typing import Tuple 
 
 # os.system('clear')
 
@@ -43,9 +40,6 @@ from typing import Any
 
 import grpc
 
-import traceback
-import contextlib
-
 from ..common.grpc import *
 from .reservation import reservation_handler
 from .rpc_manager import rpc_manager
@@ -59,13 +53,11 @@ from .acc_perms import perms
 from ..common.utils import *
 from .device_manager import close_local_devices, get_all_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
-from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
+from .user_group_handler import start_usergroup_cleanup_loop
 
 from ..host import host_tunnel_server as hts
-from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
+from ..host.host_tunnel_server import HostTunnelServicer
 from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
-from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
-from ..common.grpc import global_auth_pb2, global_auth_pb2_grpc
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -160,8 +152,7 @@ load_dotenv(dotenv_path)
 # print(f"Local Port: {local_port}")
 
 # ---------------------------------------------------------------------
-# RemoteRF Global v1.0 (optional, disabled by default; see
-# server/global_access/ and docs/remoterf-global-server-v1.md).
+# Isolated connector/catalog mode (optional and disabled by default).
 # ---------------------------------------------------------------------
 
 _RELAY_GATED_FUNCTIONS = frozenset({"ACC:login", "ACC:create_user"})
@@ -173,63 +164,12 @@ def _global_enabled() -> bool:
     )
 
 
-def _global_local_session_minutes() -> int:
-    raw = (os.getenv("REMOTERF_GLOBAL_LOCAL_SESSION_MINUTES", "") or "").strip()
-    try:
-        n = int(raw) if raw else 60
-    except ValueError:
-        n = 60
-    return max(1, n)
-
-
-def _presents_valid_global_local_session(request) -> bool:
-    """Whether an ``ACC:login`` carries a live Global-minted local token.
-
-    Relay ingress must never expose password login or account creation.  A
-    Global-selected client, however, must send its owner-local session token
-    through the same ordinary ``ACC:login`` surface after ExchangeAssertion.
-    This narrow predicate only lifts the relay gate for a token that the
-    deployment's Global session store currently recognizes; the normal
-    reservation handler still checks that token against the requested account.
-    """
-    if request.function_name != "ACC:login" or "pw" not in request.args:
-        return False
-
-    try:
-        token = unmap_arg(request.args["pw"])
-        if not isinstance(token, str) or not token:
-            return False
-        from .global_access.db import get_global_db
-
-        return get_global_db().validate_session(token=token) is not None
-    except Exception:
-        # A database/configuration problem must fail closed at relay ingress.
-        return False
-
-
-_JWKS_CACHE_LOCK = threading.Lock()
-_JWKS_CACHES: dict = {}
-
-
-def _get_jwks_cache(jwks_url: str):
-    from .global_access.jwks_cache import JWKSCache
-
-    with _JWKS_CACHE_LOCK:
-        cache = _JWKS_CACHES.get(jwks_url)
-        if cache is None:
-            cache = JWKSCache(jwks_url)
-            _JWKS_CACHES[jwks_url] = cache
-        return cache
-
-
 def _reject_relay_sourced_credential_bootstrap(request, context) -> bool:
     """
     Returns True (and the caller should short-circuit with a rejection) when
     this is a password-login/account-creation attempt arriving from the
-    configured RemoteRF Global relay ingress. A legitimate Global local
-    session token is the sole exception: it has already been minted by
-    ExchangeAssertion and is still validated again by the account handler.
-    A legitimate LAN client never appears as that peer, so all other attempts
+    configured RemoteRF Global relay ingress. There is no destination-session
+    exception in v2. A legitimate LAN client never appears as that peer, so attempts
     are presumptively Internet clients trying to brute-force or mint UCLA-local
     credentials directly through the public relay path.
     """
@@ -251,66 +191,7 @@ def _reject_relay_sourced_credential_bootstrap(request, context) -> bool:
 
     if not is_trusted_relay_peer(context.peer(), cfg.relay_ingress.trusted_peer_cidrs):
         return False
-    if _presents_valid_global_local_session(request):
-        return False
     return True
-
-
-class GlobalAuthV1Servicer(global_auth_pb2_grpc.GlobalAuthV1Servicer):
-    def ExchangeAssertion(self, request, context):
-        if not _global_enabled():
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(
-                    code="global_disabled",
-                    message="RemoteRF Global integration is disabled on this deployment",
-                )
-            )
-
-        from .global_access import identity as identity_mod
-        from .global_access import principal_mapping
-        from .global_access.config import GlobalConfigError, load_global_config
-
-        try:
-            cfg = load_global_config()
-        except GlobalConfigError as exc:
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(code="global_misconfigured", message=str(exc))
-            )
-
-        state_dir = cfg.deployment_private_key_path.parent
-        state = identity_mod.load_state(state_dir)
-        if not state.enrolled:
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(
-                    code="not_enrolled",
-                    message="this deployment has not completed RemoteRF Global enrollment",
-                )
-            )
-
-        jwks = _get_jwks_cache(cfg.jwks_url)
-
-        try:
-            result = principal_mapping.exchange_assertion(
-                request.assertion,
-                cfg=cfg,
-                deployment_id=state.deployment_id,
-                jwks=jwks,
-                session_minutes=_global_local_session_minutes(),
-            )
-        except principal_mapping.GlobalAuthError as exc:
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(code=exc.code, message=str(exc))
-            )
-
-        return global_auth_pb2.ExchangeAssertionResponse(
-            local_username=result.local_username,
-            local_session_token=result.local_session_token,
-            local_account_id=int(result.local_account_id),
-            session_expires_at=result.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            deployment_id=result.deployment_id,
-            effective_policy_summary_json=result.effective_policy_summary,
-            protocol_version=identity_mod.PROTOCOL_VERSION,
-        )
 
 
 # Implement the GenericRPC service
@@ -403,7 +284,7 @@ def _start_global_connector_if_enabled(*, cert_dir: Path):
         return None
 
     try:
-        from .global_access.config import GlobalConfigError, load_global_config
+        from .global_access.config import load_global_config
         from .global_access.connector import GlobalConnector
         from .device_manager import get_all_devices
 
@@ -495,12 +376,6 @@ def start_server_runtime(
     grpc_pb2_grpc.add_SampleDataV1Servicer_to_server(
         SampleDataV1Servicer(), server
     )
-    # RemoteRF Global v1.0: always registered (additive); ExchangeAssertion
-    # itself returns a structured "global_disabled" error when
-    # REMOTERF_GLOBAL_ENABLED is not set, rather than the server refusing
-    # to start or the service being conditionally absent.
-    global_auth_pb2_grpc.add_GlobalAuthV1Servicer_to_server(GlobalAuthV1Servicer(), server)
-
     try:
         server_credentials = _load_server_credentials(cert_dir)
     except Exception as e:
@@ -807,9 +682,6 @@ def _cmd_devices_status() -> None:
             "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
         )
         
-from typing import Iterable
-import contextlib
-
 def _repo_root_guess() -> Path:
     """
     Best-effort: find <repo>/src/... and return <repo>.

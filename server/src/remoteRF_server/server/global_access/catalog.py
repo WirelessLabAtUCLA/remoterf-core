@@ -17,7 +17,7 @@
 Builds the public resource catalog snapshot: only explicitly-configured
 exports, safe metadata only (no IPs, serials, filesystem paths, tokens).
 Catalog metadata is discovery information, not authoritative reservation
-state or enforcement — see operation_policy.py for the actual enforcement.
+state or enforcement. Gate C exposes no federated resource-access path.
 """
 
 from __future__ import annotations

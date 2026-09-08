@@ -331,11 +331,7 @@ def print_help() -> None:
         "  serverrf --global validate-config\n"
         "  serverrf --global publish-now\n"
         "  serverrf --global show-public-key\n"
-        "  serverrf --global list-mappings\n"
-        "  serverrf --global disable-mapping <global-subject>\n"
-        "  serverrf --global enable-mapping <global-subject>\n"
-        "  serverrf --global revoke-sessions <global-subject>\n"
-        "  See docs/remoterf-global-server-v1.md for the full setup guide.\n"
+        "  Legacy GlobalAuth mappings/sessions were removed in Global v2 Gate C.\n"
         "\n"
         "Examples:\n"
         "  serverrf --gist --set --id 2a35e0... --file ucla-wlab-remoterf-status.json\n"
@@ -765,54 +761,6 @@ def _global_publish_now() -> int:
         return 2
 
     print("Published route + catalog + heartbeat.")
-    return 0
-
-
-def _global_list_mappings() -> int:
-    from .server.global_access.db import get_global_db
-
-    mappings = get_global_db().list_mappings()
-    if not mappings:
-        print("(no RemoteRF Global principal mappings)")
-        return 0
-
-    for m in mappings:
-        print(
-            f"  id={m.id} issuer={m.issuer} subject={m.global_subject} "
-            f"local_account_id={m.local_account_id} status={m.status} "
-            f"last_seen_at={m.last_seen_at}"
-        )
-    return 0
-
-
-def _global_set_mapping_status(subject: str, status: str) -> int:
-    from .server.global_access.db import get_global_db
-
-    db = get_global_db()
-    matches = [m for m in db.list_mappings() if m.global_subject == subject]
-    if not matches:
-        print(f"ERROR: no mapping found for subject {subject!r}", file=sys.stderr)
-        return 2
-
-    if not db.set_mapping_status(global_subject=subject, status=status):
-        print(f"ERROR: could not update mapping for subject {subject!r}", file=sys.stderr)
-        return 2
-
-    print(f"Mapping for subject {subject!r} set to {status!r}.")
-    return 0
-
-
-def _global_revoke_sessions(subject: str) -> int:
-    from .server.global_access.db import get_global_db
-
-    db = get_global_db()
-    matches = [m for m in db.list_mappings() if m.global_subject == subject]
-    if not matches:
-        print(f"ERROR: no mapping found for subject {subject!r}", file=sys.stderr)
-        return 2
-
-    total = sum(db.revoke_sessions_for_mapping(mapping_id=m.id) for m in matches)
-    print(f"Revoked {total} active session(s) for subject {subject!r}.")
     return 0
 
 
@@ -1765,10 +1713,6 @@ def main() -> int:
     global_validate_config = False
     global_publish_now = False
     global_show_public_key = False
-    global_list_mappings = False
-    global_disable_mapping_subject: Optional[str] = None
-    global_enable_mapping_subject: Optional[str] = None
-    global_revoke_sessions_subject: Optional[str] = None
 
     global_base_url: Optional[str] = None
     global_slug: Optional[str] = None
@@ -1890,35 +1834,6 @@ def main() -> int:
         if global_mode and tok == "show-public-key":
             global_show_public_key = True
             i += 1
-            continue
-
-        if global_mode and tok == "list-mappings":
-            global_list_mappings = True
-            i += 1
-            continue
-
-        if global_mode and tok == "disable-mapping":
-            if i + 1 >= len(argv):
-                print("ERROR: disable-mapping expects <global-subject>", file=sys.stderr)
-                return 2
-            global_disable_mapping_subject = argv[i + 1].strip()
-            i += 2
-            continue
-
-        if global_mode and tok == "enable-mapping":
-            if i + 1 >= len(argv):
-                print("ERROR: enable-mapping expects <global-subject>", file=sys.stderr)
-                return 2
-            global_enable_mapping_subject = argv[i + 1].strip()
-            i += 2
-            continue
-
-        if global_mode and tok == "revoke-sessions":
-            if i + 1 >= len(argv):
-                print("ERROR: revoke-sessions expects <global-subject>", file=sys.stderr)
-                return 2
-            global_revoke_sessions_subject = argv[i + 1].strip()
-            i += 2
             continue
 
         if global_mode and tok == "--base-url":
@@ -2302,10 +2217,6 @@ def main() -> int:
             + int(global_validate_config)
             + int(global_publish_now)
             + int(global_show_public_key)
-            + int(global_list_mappings)
-            + int(global_disable_mapping_subject is not None)
-            + int(global_enable_mapping_subject is not None)
-            + int(global_revoke_sessions_subject is not None)
         )
         if actions == 0:
             print_help()
@@ -2314,8 +2225,7 @@ def main() -> int:
             print(
                 "ERROR: global commands are mutually exclusive. Use exactly one of: "
                 "init-identity, enroll, status, validate-config, publish-now, "
-                "show-public-key, list-mappings, disable-mapping, enable-mapping, "
-                "revoke-sessions",
+                "show-public-key",
                 file=sys.stderr,
             )
             return 2
@@ -2330,14 +2240,6 @@ def main() -> int:
             return int(_global_validate_config())
         if global_publish_now:
             return int(_global_publish_now())
-        if global_list_mappings:
-            return int(_global_list_mappings())
-        if global_disable_mapping_subject is not None:
-            return int(_global_set_mapping_status(global_disable_mapping_subject, "disabled"))
-        if global_enable_mapping_subject is not None:
-            return int(_global_set_mapping_status(global_enable_mapping_subject, "active"))
-        if global_revoke_sessions_subject is not None:
-            return int(_global_revoke_sessions(global_revoke_sessions_subject))
         if global_enroll:
             return int(
                 _global_enroll(

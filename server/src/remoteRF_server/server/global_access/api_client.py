@@ -21,10 +21,9 @@ IMPORTANT: as of this writing, `remoterf-vps-global` implements only
 This module is the single, isolated place that assumes a contract for them
 (POST /v1/deployment/enroll, /v1/deployment/heartbeat,
 PUT /v1/deployment/route, PUT /v1/deployment/catalog,
-GET /.well-known/jwks.json), documented in
-docs/remoterf-global-server-v1.md. No other module in this codebase talks
+GET /.well-known/jwks.json). No other module in this codebase talks
 HTTP to Global directly — this is where that assumption gets corrected once
-the real API exists.
+the clean API exists. This connector client grants no user identity or access.
 
 Never disables TLS verification (no verify=False anywhere) and never logs
 request/response bodies or the Authorization header.

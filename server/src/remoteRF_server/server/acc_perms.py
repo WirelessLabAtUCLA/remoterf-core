@@ -16,10 +16,7 @@
 import sqlite3
 import threading
 from typing import Tuple 
-from pathlib import Path
 from datetime import datetime
-
-from functools import wraps
 
 from ..common.utils import *
 from .device_manager import get_all_devices
@@ -219,6 +216,23 @@ class perms_db:
             
         except sqlite3.Error as e:
             print("An error occurred:", e)
+
+    @db_connection
+    def ensure_user(self, username: str) -> None:
+        """Add the minimal role only when no role exists; never reset one."""
+        self.cursor.execute(
+            """
+            SELECT 1 FROM Users WHERE Username = ?
+            UNION ALL SELECT 1 FROM PowerUsers WHERE Username = ?
+            UNION ALL SELECT 1 FROM Admins WHERE Username = ?
+            LIMIT 1
+            """,
+            (username, username, username),
+        )
+        if self.cursor.fetchone() is None:
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO Users (Username) VALUES (?)", (username,)
+            )
 
     @db_connection
     def set_admin(self, username:str):

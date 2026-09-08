@@ -27,6 +27,7 @@ def db_connection(func):
             try:
                 conn.execute("PRAGMA busy_timeout=5000;")
                 conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA foreign_keys=ON;")
 
                 cur = conn.cursor()
                 self.db = conn

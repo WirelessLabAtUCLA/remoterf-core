@@ -6,7 +6,8 @@ ErrorEnvelope. `grpc.proto`, GenericRPC, DynamicControlV2 and SampleDataV1 are
 unchanged. Standalone discovery returns a null deployment ID, gRPC accounts,
 registration codes required, and email verification/federation disabled.
 No keys, new native DB schema or Global connection are initialized by this
-handler. GlobalAuthV1/connector removal remains Gate C/E work.
+handler. Gate C removed GlobalAuthV1; connector transport remains isolated for
+later authorized work.
 
 The canonical file is `src/remoteRF_server/common/grpc/deployment_capabilities.proto`.
 `scripts/generate-capabilities.py` runs the established grpc_tools.protoc
@@ -21,5 +22,5 @@ The VPS repository's `dependencies/core.lock.json` and
 `scripts/build-core-wheel.py` pin source, build tools and SHA-256:
 `512c4b57fa16ab656f9a48c9c50e1e8da5a83830f48d71802d97803ee563b4c0`.
 Consumers use a wheel, never sibling source or an editable core install.
-This is a development package (`remoteRF-server 1.1.0.dev1`), not a replacement
+This is a development package (`remoteRF-server 1.1.0.dev2`), not a replacement
 for the pinned production `v1.0.20` artifact.
