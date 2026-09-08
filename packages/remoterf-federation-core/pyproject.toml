@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remoterf-federation-core"
+version = "0.2.0"
+description = "Hardware-free RemoteRF deployment protocol schemas"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
