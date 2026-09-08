@@ -45,6 +45,36 @@ class SchemaTests(unittest.TestCase):
             with self.assertRaises(ValidationError): canonical_json(value)
         self.assertEqual(canonical_json({"b":1,"a":2}), '{"a":2,"b":1}')
 
+    def test_federated_identity_and_proxy_adapter(self):
+        issuer = "550e8400-e29b-41d4-a716-446655440000"
+        subject = "d9428888-122b-11e1-b85c-61cd3cbb3210"
+        identity = federated_identity(issuer, subject)
+        self.assertEqual(identity.as_json_value(), [issuer, subject])
+        username, email = federated_proxy_adapter(issuer, subject)
+        self.assertRegex(username, r"^fed-[0-9a-f]{64}$")
+        self.assertEqual(email, username + "@federation.invalid")
+        self.assertEqual(
+            federated_proxy_adapter(issuer, subject), (username, email)
+        )
+        other = "d9428888-122b-11e1-b85c-61cd3cbb3211"
+        self.assertNotEqual(federated_proxy_adapter(issuer, other)[0], username)
+        for invalid in ("ethan", "ETHAN@example.com", issuer.upper(), str(0)):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                federated_identity(invalid, subject)
+
+    def test_bounded_display_metadata(self):
+        value = {"display_name": "Ethan", "username_hint": "ethan"}
+        self.assertEqual(validate_display_metadata(value), value)
+        for invalid in (
+            {"display_name": "x" * 257},
+            {"display_name": "bad\nname"},
+            {"bad key": "value"},
+            {"field": 7},
+            {f"field{i}": "x" for i in range(17)},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                validate_display_metadata(invalid)
+
     def test_import_has_no_runtime_dependencies_or_side_effects(self):
         with tempfile.TemporaryDirectory() as d:
             script = '''
@@ -53,7 +83,7 @@ from pathlib import Path
 socket.socket=lambda *a,**k: (_ for _ in ()).throw(AssertionError("network"))
 sqlite3.connect=lambda *a,**k: (_ for _ in ()).throw(AssertionError("DB"))
 import remoterf_federation_core as c
-assert c.__version__ == "0.2.0"
+assert c.__version__ == "0.3.0"
 assert not any(n.startswith(("remoteRF_server", "numpy", "adi", "rtlsdr", "sqlalchemy", "httpx")) for n in sys.modules)
 assert not list(Path.cwd().iterdir())
 '''

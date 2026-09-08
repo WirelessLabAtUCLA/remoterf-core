@@ -1,10 +1,18 @@
-"""Gate B schemas only; no trust, grants, contracts, storage or transport."""
+"""Pure deployment and Gate C identity schemas.
+
+There is deliberately no trust, grant, contract, storage, or transport code in
+this package.  A federated identity is only an immutable deployment/subject
+tuple; display data and destination-local IDs are never part of that identity.
+"""
+import hashlib
 import json
 import re
+from dataclasses import dataclass
 from uuid import UUID
 
 PROTOCOL_VERSION = "2"
 MAX_DOCUMENT_BYTES = 16384
+MAX_DISPLAY_METADATA_BYTES = 2048
 OPERATIONS = frozenset({
     "ACC:create_user", "ACC:login", "ACC:verify_email", "ACC:refresh_session",
     "ACC:logout", "ACC:me", "ACC:set_enroll", "ACC:get_perms", "ACC:get_dev",
@@ -32,6 +40,59 @@ def canonical_uuid(value):
     if not valid:
         raise ValidationError("Expected canonical UUID")
     return value
+
+
+@dataclass(frozen=True)
+class FederatedIdentity:
+    """Canonical remote identity, independent of names, email, and routing."""
+
+    issuer_deployment_id: str
+    remote_subject_id: str
+
+    def __post_init__(self):
+        canonical_uuid(self.issuer_deployment_id)
+        canonical_uuid(self.remote_subject_id)
+
+    def as_json_value(self):
+        return [self.issuer_deployment_id, self.remote_subject_id]
+
+
+def federated_identity(issuer_deployment_id, remote_subject_id):
+    return FederatedIdentity(
+        issuer_deployment_id=canonical_uuid(issuer_deployment_id),
+        remote_subject_id=canonical_uuid(remote_subject_id),
+    )
+
+
+def federated_proxy_adapter(issuer_deployment_id, remote_subject_id):
+    """Return deterministic non-canonical adapter username/email values."""
+
+    identity = federated_identity(issuer_deployment_id, remote_subject_id)
+    digest = hashlib.sha256(
+        canonical_json(identity.as_json_value()).encode("utf-8")
+    ).hexdigest()
+    username = f"fed-{digest}"
+    return username, f"{username}@federation.invalid"
+
+
+def validate_display_metadata(value):
+    """Validate small, printable, string-only informational metadata."""
+
+    if type(value) is not dict or len(value) > 16:
+        raise ValidationError("Invalid display metadata")
+    for key, item in value.items():
+        if (
+            type(key) is not str
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", key)
+            or type(item) is not str
+            or len(item) > 256
+            or any(ord(char) < 32 or ord(char) == 127 for char in item)
+        ):
+            raise ValidationError("Invalid display metadata")
+    encoded = canonical_json(value)
+    if len(encoded.encode("utf-8")) > MAX_DISPLAY_METADATA_BYTES:
+        raise ValidationError("Display metadata exceeds limit")
+    return strict_json(encoded, max_bytes=MAX_DISPLAY_METADATA_BYTES)
 
 
 def _pairs(pairs):
