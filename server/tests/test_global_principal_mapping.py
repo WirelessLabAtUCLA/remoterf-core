@@ -37,6 +37,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -161,13 +162,13 @@ class ExchangeAssertionIntegrationTests(unittest.TestCase):
         resp.json.return_value = {"keys": [jwk]}
         return resp
 
-    def _exchange(self, token, *, cfg=None):
+    def _exchange(self, token, *, cfg=None, session_minutes=60):
         return principal_mapping.exchange_assertion(
             token,
             cfg=cfg or _cfg(enabled=True),
             deployment_id=DEPLOYMENT_ID,
             jwks=self.jwks,
-            session_minutes=60,
+            session_minutes=session_minutes,
         )
 
     def test_first_assertion_creates_mapping_and_shadow_account(self):
@@ -205,6 +206,36 @@ class ExchangeAssertionIntegrationTests(unittest.TestCase):
         with self.assertRaises(principal_mapping.GlobalAuthError) as ctx:
             self._exchange(token)
         self.assertEqual(ctx.exception.code, "replayed")
+
+    def test_lost_response_retry_creates_only_short_lived_revocable_sessions(self):
+        """Model a committed exchange whose response was lost, then one retry.
+
+        The Client's retry policy already proves it makes at most two
+        attempts.  This Server-side companion proves the only possible
+        extra owner-local session is scoped to the same mapping, has the
+        requested short lifetime, and can be revoked alongside the retry's
+        returned session.
+        """
+        before = datetime.now(timezone.utc).replace(tzinfo=None)
+        first = self._exchange(
+            _mint_assertion(self.priv, subject="lost-response-user"),
+            session_minutes=1,
+        )
+        retried = self._exchange(
+            _mint_assertion(self.priv, subject="lost-response-user"),
+            session_minutes=1,
+        )
+
+        self.assertNotEqual(first.local_session_token, retried.local_session_token)
+        self.assertEqual(first.mapping_id, retried.mapping_id)
+        for result in (first, retried):
+            self.assertGreater(result.expires_at, before)
+            self.assertLessEqual(result.expires_at, before + timedelta(minutes=1, seconds=2))
+            self.assertIsNotNone(self.gdb.validate_session(token=result.local_session_token))
+
+        self.assertEqual(self.gdb.revoke_sessions_for_mapping(mapping_id=first.mapping_id), 2)
+        self.assertIsNone(self.gdb.validate_session(token=first.local_session_token))
+        self.assertIsNone(self.gdb.validate_session(token=retried.local_session_token))
 
     def test_disabled_mapping_rejects_new_exchanges(self):
         token = _mint_assertion(self.priv, subject="user-0001")

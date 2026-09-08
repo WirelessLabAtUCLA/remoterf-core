@@ -30,6 +30,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from remoteRF_server.common.grpc import grpc_pb2
+from remoteRF_server.common.utils import map_arg
 from remoteRF_server.server import grpc_server
 from remoteRF_server.server.global_access import identity as identity_mod
 
@@ -73,8 +74,11 @@ class RelayIngressGateTests(unittest.TestCase):
         config_path.write_text(_VALID_CONFIG_YAML.format(state_dir=self.state_dir))
         self.config_path = config_path
 
-    def _request(self, function_name: str):
-        return grpc_pb2.GenericRPCRequest(function_name=function_name)
+    def _request(self, function_name: str, *, password: str | None = None):
+        request = grpc_pb2.GenericRPCRequest(function_name=function_name)
+        if password is not None:
+            request.args["pw"].CopyFrom(map_arg(password))
+        return request
 
     def test_disabled_global_never_gates_anything(self):
         with patch.dict(os.environ, {"REMOTERF_GLOBAL_ENABLED": "false"}):
@@ -102,6 +106,30 @@ class RelayIngressGateTests(unittest.TestCase):
                 )
                 mock_run.assert_not_called()
                 self.assertIn("ace", response.results)
+
+    def test_relay_peer_allows_a_valid_global_local_session_to_reach_login(self):
+        with patch.dict(
+            os.environ,
+            {
+                "REMOTERF_GLOBAL_ENABLED": "true",
+                "REMOTERF_GLOBAL_CONFIG_PATH": str(self.config_path),
+            },
+        ):
+            servicer = grpc_server.GenericRPCServicer()
+            with (
+                patch(
+                    "remoteRF_server.server.global_access.db.get_global_db"
+                ) as mock_global_db,
+                patch(
+                    "remoteRF_server.server.grpc_server.rpc_manager.run_rpc", return_value={}
+                ) as mock_run,
+            ):
+                mock_global_db.return_value.validate_session.return_value = {"local_account_id": 1}
+                servicer.Call(
+                    self._request("ACC:login", password="live-global-session"),
+                    _FakeContext("ipv4:10.77.0.1:4444"),
+                )
+                mock_run.assert_called_once()
 
     def test_relay_peer_is_blocked_from_account_creation_when_enabled(self):
         with patch.dict(

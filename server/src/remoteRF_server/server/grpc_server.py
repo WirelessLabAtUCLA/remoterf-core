@@ -182,6 +182,31 @@ def _global_local_session_minutes() -> int:
     return max(1, n)
 
 
+def _presents_valid_global_local_session(request) -> bool:
+    """Whether an ``ACC:login`` carries a live Global-minted local token.
+
+    Relay ingress must never expose password login or account creation.  A
+    Global-selected client, however, must send its owner-local session token
+    through the same ordinary ``ACC:login`` surface after ExchangeAssertion.
+    This narrow predicate only lifts the relay gate for a token that the
+    deployment's Global session store currently recognizes; the normal
+    reservation handler still checks that token against the requested account.
+    """
+    if request.function_name != "ACC:login" or "pw" not in request.args:
+        return False
+
+    try:
+        token = unmap_arg(request.args["pw"])
+        if not isinstance(token, str) or not token:
+            return False
+        from .global_access.db import get_global_db
+
+        return get_global_db().validate_session(token=token) is not None
+    except Exception:
+        # A database/configuration problem must fail closed at relay ingress.
+        return False
+
+
 _JWKS_CACHE_LOCK = threading.Lock()
 _JWKS_CACHES: dict = {}
 
@@ -201,11 +226,12 @@ def _reject_relay_sourced_credential_bootstrap(request, context) -> bool:
     """
     Returns True (and the caller should short-circuit with a rejection) when
     this is a password-login/account-creation attempt arriving from the
-    configured RemoteRF Global relay ingress — a legitimate LAN client never
-    appears as that peer, so any such attempt here is presumptively an
-    Internet client trying to brute-force or mint UCLA-local credentials
-    directly through the public relay path. Never used to grant trust;
-    only ever used to additionally restrict these two specific functions.
+    configured RemoteRF Global relay ingress. A legitimate Global local
+    session token is the sole exception: it has already been minted by
+    ExchangeAssertion and is still validated again by the account handler.
+    A legitimate LAN client never appears as that peer, so all other attempts
+    are presumptively Internet clients trying to brute-force or mint UCLA-local
+    credentials directly through the public relay path.
     """
     if not _global_enabled():
         return False
@@ -223,7 +249,11 @@ def _reject_relay_sourced_credential_bootstrap(request, context) -> bool:
         # disabled. It never bypasses any other existing check.
         return False
 
-    return is_trusted_relay_peer(context.peer(), cfg.relay_ingress.trusted_peer_cidrs)
+    if not is_trusted_relay_peer(context.peer(), cfg.relay_ingress.trusted_peer_cidrs):
+        return False
+    if _presents_valid_global_local_session(request):
+        return False
+    return True
 
 
 class GlobalAuthV1Servicer(global_auth_pb2_grpc.GlobalAuthV1Servicer):
