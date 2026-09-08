@@ -26,6 +26,8 @@ GATE_D_MIGRATION_VERSION = 3
 GATE_D_MIGRATION_NAME = "gate_d_trust_contracts_v1"
 GATE_E_MIGRATION_VERSION = 4
 GATE_E_MIGRATION_NAME = "gate_e_grant_jtis_v1"
+GATE_E1_MIGRATION_VERSION = 5
+GATE_E1_MIGRATION_NAME = "gate_e1_clock_floor_v1"
 FEDERATED_PASSWORD_SALT = "!remoterf-federated-salt-v2!"
 FEDERATED_PASSWORD_HASH = "!remoterf-federated-no-password-v2!"
 
@@ -232,6 +234,18 @@ BEGIN SELECT RAISE(ABORT,'federation grant JTI is retained'); END;
 """
 
 _GATE_E_MIGRATION_CHECKSUM = hashlib.sha256(_GATE_E_DDL.encode("utf-8")).hexdigest()
+
+_GATE_E1_DDL = """
+CREATE TABLE IF NOT EXISTS FederationClockState (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+    max_seen_at INTEGER NOT NULL CHECK(max_seen_at >= 0)
+);
+INSERT OR IGNORE INTO FederationClockState(singleton_id,max_seen_at) VALUES (1,0);
+"""
+
+_GATE_E1_MIGRATION_CHECKSUM = hashlib.sha256(
+    _GATE_E1_DDL.encode("utf-8")
+).hexdigest()
 
 
 class SchemaNotReady(RuntimeError):
@@ -456,6 +470,23 @@ def migrate_gate_e_usergroups_schema(conn: sqlite3.Connection) -> None:
             GATE_E_MIGRATION_VERSION,
             GATE_E_MIGRATION_NAME,
             _GATE_E_MIGRATION_CHECKSUM,
+            int(time.time()),
+        ),
+    )
+    row = conn.execute(
+        "SELECT checksum FROM SchemaMigrations WHERE name=?",
+        (GATE_E1_MIGRATION_NAME,),
+    ).fetchone()
+    if row is not None and row[0] != _GATE_E1_MIGRATION_CHECKSUM:
+        raise SchemaNotReady("Gate E.1 migration checksum mismatch")
+    conn.executescript(_GATE_E1_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO SchemaMigrations "
+        "(version,name,checksum,applied_at) VALUES (?,?,?,?)",
+        (
+            GATE_E1_MIGRATION_VERSION,
+            GATE_E1_MIGRATION_NAME,
+            _GATE_E1_MIGRATION_CHECKSUM,
             int(time.time()),
         ),
     )
@@ -761,15 +792,33 @@ def check_gate_e_ready(
     )
     with sqlite3.connect(Path(usergroups_path)) as conn:
         configure_connection(conn)
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='FederationGrantJTIs'"
-        ).fetchone()
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
         ledger = conn.execute(
             "SELECT checksum FROM SchemaMigrations WHERE name=?",
             (GATE_E_MIGRATION_NAME,),
         ).fetchone()
-        if table is None or ledger is None or ledger[0] != _GATE_E_MIGRATION_CHECKSUM:
+        clock_ledger = conn.execute(
+            "SELECT checksum FROM SchemaMigrations WHERE name=?",
+            (GATE_E1_MIGRATION_NAME,),
+        ).fetchone()
+        clock_row = conn.execute(
+            "SELECT max_seen_at FROM FederationClockState WHERE singleton_id=1"
+        ).fetchone() if "FederationClockState" in tables else None
+        if (
+            not {"FederationGrantJTIs", "FederationClockState"}.issubset(tables)
+            or ledger is None
+            or ledger[0] != _GATE_E_MIGRATION_CHECKSUM
+            or clock_ledger is None
+            or clock_ledger[0] != _GATE_E1_MIGRATION_CHECKSUM
+            or clock_row is None
+            or type(clock_row[0]) is not int
+            or clock_row[0] < 0
+        ):
             raise SchemaNotReady("Gate E migration ledger is missing or invalid")
         for row in conn.execute(
             "SELECT issuer_deployment_id,jti,remote_subject_id,"

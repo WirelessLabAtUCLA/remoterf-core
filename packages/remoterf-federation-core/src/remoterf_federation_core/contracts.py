@@ -22,7 +22,9 @@ BROKER_REQUEST_TYP = "remoterf-broker-request+jwt"
 BROKER_REQUEST_TOKEN_TYPE = "broker_request"
 MAX_CONTRACT_BYTES = 4096
 MAX_EVENT_TOKEN_BYTES = 8192
+MAX_BROKER_REQUEST_TOKEN_BYTES = 8192
 MAX_BROKER_REQUEST_SECONDS = 120
+MAX_PROTOCOL_INTEGER = (1 << 63) - 1
 
 CONTRACT_CAPABILITIES = frozenset({"FEDERATED_ENROLL", "PERMISSIONS_READ"})
 CONTRACT_STATES = frozenset(
@@ -111,7 +113,12 @@ class ContractError(ValidationError):
 
 
 def _integer(value, *, code: str, positive: bool = False) -> int:
-    if type(value) is not int or (positive and value <= 0) or value < 0:
+    if (
+        type(value) is not int
+        or (positive and value <= 0)
+        or value < 0
+        or value > MAX_PROTOCOL_INTEGER
+    ):
         raise ContractError(code)
     return value
 

@@ -83,7 +83,7 @@ from pathlib import Path
 socket.socket=lambda *a,**k: (_ for _ in ()).throw(AssertionError("network"))
 sqlite3.connect=lambda *a,**k: (_ for _ in ()).throw(AssertionError("DB"))
 import remoterf_federation_core as c
-assert c.__version__ == "0.5.0"
+assert c.__version__ == "0.6.0"
 assert not any(n.startswith(("remoteRF_server", "numpy", "adi", "rtlsdr", "sqlalchemy", "httpx")) for n in sys.modules)
 assert not list(Path.cwd().iterdir())
 '''

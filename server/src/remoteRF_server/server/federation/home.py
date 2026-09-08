@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 from uuid import uuid4
 
 import jwt
@@ -19,26 +19,36 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from remoterf_federation_core import (
     BROKER_REQUEST_TYP,
+    DEFAULT_ACTION_RETRY_POLICIES,
     FEDERATION_GRANT_TYP,
-    READ_ONLY_ACTIONS,
+    MAX_PROTOCOL_INTEGER,
+    ActionRetryPolicy,
+    ContractError,
     FederationError,
+    OwnerSignedFailure,
+    TransportFailure,
+    ValidationError,
     build_action_request,
     build_broker_request_claims,
     build_grant_claims,
     canonical_json,
     canonical_uuid,
+    contract_terms_sha256,
     contract_allows,
     key_is_current,
     parse_unverified_result,
+    public_key_bytes,
     strict_json,
     validate_contract_terms,
     validate_result_claims,
     validate_transport_response,
+    validate_trusted_key_material,
 )
 
 from .migrations import configure_connection, migrate_gate_e_usergroups_schema
 
 FORWARD_PATH = "/v2/broker/federation/forward"
+MAX_FORWARD_RESPONSE_BYTES = 32768
 
 
 @dataclass(frozen=True)
@@ -78,7 +88,7 @@ class ServerHomeGrantIssuer:
 
     @staticmethod
     def _terms(row):
-        return validate_contract_terms(
+        terms = validate_contract_terms(
             {
                 "contract_id": row["contract_id"],
                 "version": row["version"],
@@ -96,6 +106,9 @@ class ServerHomeGrantIssuer:
                 "supersedes_version": row["supersedes_version"],
             }
         )
+        if contract_terms_sha256(terms) != row["terms_sha256"]:
+            raise FederationError("contract_material_mismatch")
+        return terms
 
     @staticmethod
     def _key(conn, deployment_id, kid, fingerprint, now):
@@ -103,10 +116,24 @@ class ServerHomeGrantIssuer:
             "SELECT * FROM TrustedDeploymentKeys WHERE deployment_id=? AND kid=?",
             (deployment_id, kid),
         ).fetchone()
-        if (
-            row is None
-            or row["public_key_sha256"] != fingerprint
-            or not key_is_current(dict(row), now)
+        if row is None:
+            raise FederationError("contract_key_mismatch")
+        try:
+            material = validate_trusted_key_material(
+                {
+                    "deployment_id": row["deployment_id"],
+                    "kid": row["kid"],
+                    "public_key_b64": row["public_key_b64"],
+                    "public_key_sha256": row["public_key_sha256"],
+                    "valid_from": row["valid_from"],
+                    "valid_until": row["valid_until"],
+                }
+            )
+            Ed25519PublicKey.from_public_bytes(public_key_bytes(material))
+        except (ContractError, ValueError):
+            raise FederationError("contract_key_mismatch") from None
+        if material["public_key_sha256"] != fingerprint or not key_is_current(
+            dict(row), now
         ):
             raise FederationError("contract_key_mismatch")
         return row
@@ -117,12 +144,19 @@ class ServerHomeGrantIssuer:
         with sqlite3.connect(self.reservations_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT a.auth_type,s.subject_id,s.status FROM Accounts a "
+                "SELECT a.auth_type,s.subject_id,s.status,b.local_account_id AS binding_id "
+                "FROM Accounts a "
                 "JOIN LocalAccountSubjects s ON s.local_account_id=a.acc_id "
+                "LEFT JOIN FederatedAccountBindings b ON b.local_account_id=a.acc_id "
                 "WHERE a.acc_id=?",
                 (local_account_id,),
             ).fetchone()
-        if row is None or row["auth_type"] != "local_password" or row["status"] != "active":
+        if (
+            row is None
+            or row["auth_type"] != "local_password"
+            or row["status"] != "active"
+            or row["binding_id"] is not None
+        ):
             raise FederationError("native_account_required")
         return canonical_uuid(row["subject_id"])
 
@@ -140,6 +174,8 @@ class ServerHomeGrantIssuer:
         subject = self._native_subject(local_account_id)
         destination = canonical_uuid(destination_deployment_id)
         request_id = canonical_uuid(request_id or str(uuid4()))
+        if type(contract_version) is not int or not 0 < contract_version <= MAX_PROTOCOL_INTEGER:
+            raise FederationError("invalid_contract_version")
         now = int(self.clock())
         conn = sqlite3.connect(self.usergroups_path)
         conn.row_factory = sqlite3.Row
@@ -239,10 +275,18 @@ class ServerHomeGrantIssuer:
                 raise FederationError("result_key_mismatch")
             key_row = self._key(conn, destination, kid, fingerprint, now)
             try:
-                key = Ed25519PublicKey.from_public_bytes(
-                    base64.b64decode(key_row["public_key_b64"], validate=True)
+                material = validate_trusted_key_material(
+                    {
+                        "deployment_id": key_row["deployment_id"],
+                        "kid": key_row["kid"],
+                        "public_key_b64": key_row["public_key_b64"],
+                        "public_key_sha256": key_row["public_key_sha256"],
+                        "valid_from": key_row["valid_from"],
+                        "valid_until": key_row["valid_until"],
+                    }
                 )
-            except (ValueError, TypeError):
+                key = Ed25519PublicKey.from_public_bytes(public_key_bytes(material))
+            except (ContractError, ValueError, TypeError):
                 raise FederationError("result_key_mismatch") from None
         try:
             verified = jwt.decode(
@@ -290,6 +334,7 @@ class HomeFederationOutbound:
         broker_kid: str,
         timeout: float = 5.0,
         sender=None,
+        retry_policies: Mapping[str, ActionRetryPolicy] | None = None,
     ):
         self.issuer = issuer
         self.broker_base_url = broker_base_url.rstrip("/")
@@ -299,21 +344,66 @@ class HomeFederationOutbound:
         self.broker_private_key = broker_private_key
         self.broker_kid = broker_kid
         self.timeout = float(timeout)
-        self.sender = sender or self._send
+        if self.timeout <= 0:
+            raise FederationError("invalid_transport_timeout")
+        self.connect_timeout = min(self.timeout, 3.0)
+        self.read_timeout = self.timeout
+        self.overall_timeout = self.timeout * 2
+        self.sender = sender
+        policies = dict(DEFAULT_ACTION_RETRY_POLICIES)
+        for action, policy in dict(retry_policies or {}).items():
+            if action not in policies or type(policy) is not ActionRetryPolicy:
+                raise FederationError("invalid_retry_policy")
+            policies[action] = policy
+        self.retry_policies = policies
 
-    def _send(self, body: bytes, authorization: str) -> dict:
-        response = requests.post(
+    def _send(self, body: bytes, authorization: str, deadline: float) -> dict:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        with requests.post(
             self.broker_base_url + FORWARD_PATH,
             data=body,
             headers={
                 "Authorization": "Bearer " + authorization,
                 "Content-Type": "application/json",
+                "Accept-Encoding": "identity",
             },
-            timeout=self.timeout,
+            timeout=(
+                min(self.connect_timeout, remaining),
+                min(self.read_timeout, remaining),
+            ),
             allow_redirects=False,
-        )
-        response.raise_for_status()
-        return response.json()
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            declared = response.headers.get("Content-Length")
+            if declared is not None:
+                try:
+                    length = int(declared)
+                except ValueError:
+                    raise TransportFailure(
+                        "invalid_transport_response", retryable=False
+                    ) from None
+                if length < 0:
+                    raise TransportFailure(
+                        "invalid_transport_response", retryable=False
+                    )
+                if length > MAX_FORWARD_RESPONSE_BYTES:
+                    raise TransportFailure("response_too_large", retryable=False)
+            raw = bytearray()
+            for chunk in response.iter_content(chunk_size=4096):
+                if time.monotonic() > deadline:
+                    raise TimeoutError()
+                if len(raw) + len(chunk) > MAX_FORWARD_RESPONSE_BYTES:
+                    raise TransportFailure("response_too_large", retryable=False)
+                raw.extend(chunk)
+        try:
+            return strict_json(bytes(raw), max_bytes=MAX_FORWARD_RESPONSE_BYTES)
+        except (FederationError, ValidationError):
+            raise TransportFailure(
+                "invalid_transport_response", retryable=False
+            ) from None
 
     def _broker_token(self, body: bytes) -> str:
         now = int(self.issuer.clock())
@@ -345,15 +435,20 @@ class HomeFederationOutbound:
         request_id: str | None = None,
         code_name: str | None = None,
         retry_ambiguous: bool = True,
-        application_idempotent: bool = False,
     ) -> dict:
         logical_request_id = canonical_uuid(request_id or str(uuid4()))
-        may_retry = retry_ambiguous and (
-            action in READ_ONLY_ACTIONS or application_idempotent
-        )
+        if type(retry_ambiguous) is not bool:
+            raise FederationError("invalid_retry_policy")
+        try:
+            policy = self.retry_policies[action]
+        except KeyError:
+            raise FederationError("unknown_action") from None
+        may_retry = retry_ambiguous and policy is not ActionRetryPolicy.NO_RETRY
         attempts = 2 if may_retry else 1
-        last_error = None
+        deadline = time.monotonic() + self.overall_timeout
         for attempt in range(attempts):
+            if time.monotonic() >= deadline:
+                raise TransportFailure("route_unavailable", retryable=False)
             issued = self.issuer.issue(
                 local_account_id=local_account_id,
                 destination_deployment_id=destination_deployment_id,
@@ -372,18 +467,34 @@ class HomeFederationOutbound:
             ).encode("utf-8")
             outer = self._broker_token(body)
             try:
-                response = validate_transport_response(self.sender(body, outer))
-            except (requests.RequestException, TimeoutError, ConnectionError, OSError) as exc:
-                last_error = exc
+                received = (
+                    self.sender(body, outer)
+                    if self.sender is not None
+                    else self._send(body, outer, deadline)
+                )
+            except (requests.RequestException, TimeoutError, ConnectionError, OSError):
                 if attempt + 1 < attempts:
                     continue
-                raise FederationError("route_unavailable") from None
+                raise TransportFailure("route_unavailable", retryable=False) from None
+            try:
+                response = validate_transport_response(received)
+            except (FederationError, ValidationError):
+                raise TransportFailure("invalid_transport_response", retryable=False) from None
             if response["error"] is not None:
                 if (
                     response["error"]["retryable"]
                     and attempt + 1 < attempts
                 ):
                     continue
-                raise FederationError(response["error"]["code"])
-            return self.issuer.verify_result(response["signed_result"], issued)
-        raise FederationError("route_unavailable") from last_error
+                raise TransportFailure(
+                    response["error"]["code"],
+                    retryable=response["error"]["retryable"],
+                )
+            try:
+                result = self.issuer.verify_result(response["signed_result"], issued)
+            except FederationError:
+                raise TransportFailure("invalid_signed_result", retryable=False) from None
+            if result["status"] == "error":
+                raise OwnerSignedFailure(result)
+            return result
+        raise TransportFailure("route_unavailable", retryable=False)

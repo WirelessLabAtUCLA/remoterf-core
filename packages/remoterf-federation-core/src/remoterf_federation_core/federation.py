@@ -12,6 +12,8 @@ import binascii
 import hashlib
 import re
 from dataclasses import dataclass
+from enum import Enum
+from types import MappingProxyType
 from typing import Mapping
 
 from .contracts import (
@@ -35,12 +37,30 @@ MAX_RESULT_BYTES = 12288
 MAX_GRANT_SECONDS = 60
 MAX_RESULT_SECONDS = 60
 MAX_GROUPS = 256
+MAX_PROTOCOL_INTEGER = (1 << 63) - 1
+MAX_RESULT_SNAPSHOT_AGE_SECONDS = 60
 
 ACTION_CAPABILITIES = {
     "federated_enroll": "FEDERATED_ENROLL",
     "permissions_read": "PERMISSIONS_READ",
 }
 READ_ONLY_ACTIONS = frozenset({"permissions_read"})
+
+
+class ActionRetryPolicy(Enum):
+    """Trusted integration policy; ordinary action callers never select it."""
+
+    NO_RETRY = "no_retry"
+    READ_ONLY = "read_only"
+    RECEIPT_IDEMPOTENT = "receipt_idempotent"
+
+
+DEFAULT_ACTION_RETRY_POLICIES = MappingProxyType(
+    {
+        "federated_enroll": ActionRetryPolicy.NO_RETRY,
+        "permissions_read": ActionRetryPolicy.READ_ONLY,
+    }
+)
 ACTION_REQUEST_FIELDS = frozenset({"protocol_version", "action", "payload"})
 ENROLL_PAYLOAD_FIELDS = frozenset(
     {
@@ -117,6 +137,22 @@ class FederationError(ContractError):
     """Stable, non-secret federation protocol failure."""
 
 
+class TransportFailure(FederationError):
+    """Unsigned broker/network/protocol failure, never an owner decision."""
+
+    def __init__(self, code: str, *, retryable: bool = False):
+        self.retryable = retryable
+        super().__init__(code)
+
+
+class OwnerSignedFailure(FederationError):
+    """Cryptographically verified destination business decision."""
+
+    def __init__(self, result: Mapping):
+        self.result = dict(result)
+        super().__init__(self.result["error_code"])
+
+
 @dataclass(frozen=True)
 class CanonicalActionRequest:
     value: dict
@@ -125,7 +161,12 @@ class CanonicalActionRequest:
 
 
 def _integer(value: object, code: str, *, positive: bool = False) -> int:
-    if type(value) is not int or value < 0 or (positive and value <= 0):
+    if (
+        type(value) is not int
+        or value < 0
+        or value > MAX_PROTOCOL_INTEGER
+        or (positive and value <= 0)
+    ):
         raise FederationError(code)
     return value
 
@@ -380,7 +421,8 @@ def validate_grant_claims(
     }
 
 
-def validate_typed_result(value: object) -> dict:
+def validate_typed_result(value: object, *, action: str) -> dict:
+    action_capability(action)
     if type(value) is not dict or set(value) != TYPED_RESULT_FIELDS:
         raise FederationError("invalid_result_fields")
     status = value["status"]
@@ -434,6 +476,16 @@ def validate_typed_result(value: object) -> dict:
     }
     if result["state"] not in RESULT_STATES:
         raise FederationError("invalid_contract_state")
+    if status == "error":
+        if normalized_groups or redemption_id is not None or membership is not None:
+            raise FederationError("invalid_result_semantics")
+    elif action == "permissions_read":
+        if redemption_id is not None or membership is not None:
+            raise FederationError("invalid_result_semantics")
+    elif redemption_id is None or membership is None:
+        raise FederationError("invalid_result_semantics")
+    if membership is False and normalized_groups:
+        raise FederationError("invalid_result_semantics")
     if len(canonical_json(result).encode("utf-8")) > MAX_RESULT_BYTES:
         raise FederationError("result_too_large")
     return result
@@ -534,7 +586,13 @@ def validate_result_claims(
         raise FederationError("invalid_result_time")
     if issued_at > checked_now + 5 or checked_now >= expires_at:
         raise FederationError("result_expired")
-    result = validate_typed_result(value["result"])
+    result = validate_typed_result(value["result"], action=value["action"])
+    if not (
+        issued_at - MAX_RESULT_SNAPSHOT_AGE_SECONDS
+        <= result["retrieved_at"]
+        <= issued_at
+    ):
+        raise FederationError("invalid_result_time")
     expected = (
         (issuer, expected_destination, "result_destination_mismatch", canonical_uuid),
         (audience, expected_home, "result_home_mismatch", canonical_uuid),

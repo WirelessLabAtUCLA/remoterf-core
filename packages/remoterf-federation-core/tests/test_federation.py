@@ -25,6 +25,7 @@ from remoterf_federation_core import (
     validate_result_claims,
     validate_result_header,
     validate_transport_response,
+    validate_typed_result,
 )
 
 HOME = "11111111-1111-4111-8111-111111111111"
@@ -215,6 +216,38 @@ def test_result_header_and_transport_one_of():
     ):
         with pytest.raises(FederationError, match="invalid_transport_response"):
             validate_transport_response(bad)
+
+
+def test_action_specific_result_semantics_and_snapshot_time_are_strict():
+    _, _, claims = result_fixture()
+    contradictory = copy.deepcopy(claims)
+    contradictory["result"]["membership_present"] = True
+    with pytest.raises(FederationError, match="invalid_result_semantics"):
+        validate_result_claims(contradictory, now=101)
+
+    enrollment = copy.deepcopy(claims["result"])
+    enrollment["redemption_id"] = str(uuid4())
+    enrollment["membership_present"] = True
+    assert validate_typed_result(enrollment, action="federated_enroll") == enrollment
+    enrollment["redemption_id"] = None
+    with pytest.raises(FederationError, match="invalid_result_semantics"):
+        validate_typed_result(enrollment, action="federated_enroll")
+
+    stale = copy.deepcopy(claims)
+    stale["result"]["retrieved_at"] = 40
+    with pytest.raises(FederationError, match="invalid_result_time"):
+        validate_result_claims(stale, now=101)
+    future = copy.deepcopy(claims)
+    future["result"]["retrieved_at"] = 102
+    with pytest.raises(FederationError, match="invalid_result_time"):
+        validate_result_claims(future, now=101)
+
+
+def test_sqlite_integer_overflow_is_a_protocol_error():
+    request, claims = grant_fixture()
+    claims["contract_version"] = 1 << 100
+    with pytest.raises(FederationError, match="invalid_contract_version"):
+        validate_grant_claims(claims, now=100, request=request)
 
 
 def _unsigned_token(typ):

@@ -8,13 +8,12 @@ No production action handler is registered by default.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 
 import jwt
 from cryptography.hazmat.primitives import serialization
@@ -25,17 +24,23 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from remoterf_federation_core import (
     ACTION_CAPABILITIES,
     FEDERATION_RESULT_TYP,
+    MAX_PROTOCOL_INTEGER,
+    MAX_RESULT_TOKEN_BYTES,
     ContractError,
     FederationError,
+    ValidationError,
     build_result_claims,
     canonical_uuid,
+    contract_terms_sha256,
     contract_allows,
     key_is_current,
     parse_canonical_action_request,
     parse_unverified_grant,
+    public_key_bytes,
     strict_json,
     validate_contract_terms,
     validate_grant_claims,
+    validate_trusted_key_material,
     validate_typed_result,
 )
 
@@ -72,6 +77,79 @@ class ActionRegistry:
 
     def get(self, action: str) -> Callable | None:
         return self._handlers.get(action)
+
+
+_BLOCKED_SQL = frozenset(
+    {"begin", "commit", "end", "rollback", "savepoint", "release", "attach", "detach", "vacuum", "pragma"}
+)
+
+
+def _sql_keyword(statement: str) -> str:
+    if type(statement) is not str or not statement or len(statement) > 65536:
+        raise ValueError("invalid federation action statement")
+    remaining = statement.lstrip()
+    while True:
+        if remaining.startswith("--"):
+            newline = remaining.find("\n")
+            remaining = "" if newline < 0 else remaining[newline + 1 :].lstrip()
+            continue
+        if remaining.startswith("/*"):
+            end = remaining.find("*/", 2)
+            if end < 0:
+                raise ValueError("invalid federation action statement")
+            remaining = remaining[end + 2 :].lstrip()
+            continue
+        break
+    keyword = remaining.split(None, 1)[0].rstrip(";").lower() if remaining else ""
+    if not keyword or keyword in _BLOCKED_SQL:
+        raise ValueError("transaction lifecycle is executor-owned")
+    return keyword
+
+
+class FederationActionCursor:
+    """Cursor view that deliberately exposes no connection or lifecycle API."""
+
+    __slots__ = ("_cursor",)
+
+    def __init__(self, cursor: sqlite3.Cursor):
+        self._cursor = cursor
+
+    @property
+    def rowcount(self) -> int:
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self) -> int | None:
+        return self._cursor.lastrowid
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchmany(self, size: int | None = None):
+        return self._cursor.fetchmany() if size is None else self._cursor.fetchmany(size)
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def __iter__(self) -> Iterator:
+        return iter(self._cursor)
+
+
+class FederationActionTransaction:
+    """Small SQL surface inside an executor-owned SQLite transaction."""
+
+    __slots__ = ("__connection",)
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.__connection = connection
+
+    def execute(self, statement: str, parameters=()) -> FederationActionCursor:
+        _sql_keyword(statement)
+        return FederationActionCursor(self.__connection.execute(statement, parameters))
+
+    def executemany(self, statement: str, parameters) -> FederationActionCursor:
+        _sql_keyword(statement)
+        return FederationActionCursor(self.__connection.executemany(statement, parameters))
 
 
 @dataclass(frozen=True)
@@ -146,7 +224,7 @@ class ServerFederationExecutor:
 
     @staticmethod
     def _terms(row):
-        return validate_contract_terms(
+        terms = validate_contract_terms(
             {
                 "contract_id": row["contract_id"],
                 "version": row["version"],
@@ -164,6 +242,9 @@ class ServerFederationExecutor:
                 "supersedes_version": row["supersedes_version"],
             }
         )
+        if contract_terms_sha256(terms) != row["terms_sha256"]:
+            raise FederationError("contract_material_mismatch")
+        return terms
 
     @staticmethod
     def _key_row(conn, deployment_id, kid, fingerprint):
@@ -171,31 +252,55 @@ class ServerFederationExecutor:
             "SELECT * FROM TrustedDeploymentKeys WHERE deployment_id=? AND kid=?",
             (deployment_id, kid),
         ).fetchone()
-        if row is None or row["public_key_sha256"] != fingerprint:
+        if row is None:
+            raise FederationError("contract_key_mismatch")
+        try:
+            material = validate_trusted_key_material(
+                {
+                    "deployment_id": row["deployment_id"],
+                    "kid": row["kid"],
+                    "public_key_b64": row["public_key_b64"],
+                    "public_key_sha256": row["public_key_sha256"],
+                    "valid_from": row["valid_from"],
+                    "valid_until": row["valid_until"],
+                }
+            )
+            Ed25519PublicKey.from_public_bytes(public_key_bytes(material))
+        except (ContractError, ValueError):
+            raise FederationError("contract_key_mismatch") from None
+        if material["public_key_sha256"] != fingerprint:
             raise FederationError("contract_key_mismatch")
         return row
 
     @staticmethod
     def _public_key(row):
         try:
-            return Ed25519PublicKey.from_public_bytes(
-                base64.b64decode(row["public_key_b64"], validate=True)
+            material = validate_trusted_key_material(
+                {
+                    "deployment_id": row["deployment_id"],
+                    "kid": row["kid"],
+                    "public_key_b64": row["public_key_b64"],
+                    "public_key_sha256": row["public_key_sha256"],
+                    "valid_from": row["valid_from"],
+                    "valid_until": row["valid_until"],
+                }
             )
-        except (ValueError, TypeError):
+            return Ed25519PublicKey.from_public_bytes(public_key_bytes(material))
+        except (ContractError, ValueError, TypeError):
             raise FederationError("invalid_public_key") from None
 
     def _prevalidate(self, protocol_version, grant, request_json):
         if protocol_version != "2":
             raise FederationError("unsupported_version")
-        request = parse_canonical_action_request(request_json)
-        header, unchecked = parse_unverified_grant(grant)
         try:
+            request = parse_canonical_action_request(request_json)
+            header, unchecked = parse_unverified_grant(grant)
             issuer = canonical_uuid(unchecked["iss"])
             contract_id = canonical_uuid(unchecked["contract_id"])
             version = unchecked["contract_version"]
-            if type(version) is not int or version <= 0:
+            if type(version) is not int or not 0 < version <= MAX_PROTOCOL_INTEGER:
                 raise ValueError()
-        except (KeyError, ValueError, TypeError):
+        except (ContractError, ValidationError, KeyError, ValueError, TypeError):
             raise FederationError("invalid_grant") from None
         with self._connect() as conn:
             row = conn.execute(
@@ -249,6 +354,16 @@ class ServerFederationExecutor:
 
     def _fresh_authorization(self, conn, claims):
         now = int(self.clock())
+        clock_row = conn.execute(
+            "SELECT max_seen_at FROM FederationClockState WHERE singleton_id=1"
+        ).fetchone()
+        if clock_row is None or now < clock_row["max_seen_at"] - 5:
+            return now, None, "clock_rollback"
+        if now > clock_row["max_seen_at"]:
+            conn.execute(
+                "UPDATE FederationClockState SET max_seen_at=? WHERE singleton_id=1",
+                (now,),
+            )
         row = conn.execute(
             "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
             (claims["contract_id"], claims["contract_version"]),
@@ -256,7 +371,9 @@ class ServerFederationExecutor:
         if row is None:
             return now, None, "contract_unknown"
         terms = self._terms(row)
-        if now >= claims["exp"]:
+        try:
+            validate_grant_claims(claims, now=now)
+        except FederationError:
             return now, (row, terms), "grant_expired"
         if row["terms_sha256"] != claims["terms_sha256"]:
             return now, (row, terms), "terms_hash_mismatch"
@@ -274,6 +391,11 @@ class ServerFederationExecutor:
             or local_fp != self.signing_fingerprint
             or not key_is_current(dict(issuer_key), now)
             or not key_is_current(dict(local_key), now)
+            or claims["exp"] > terms.valid_until
+            or (
+                issuer_key["valid_until"] is not None
+                and claims["exp"] > issuer_key["valid_until"]
+            )
         ):
             return now, (row, terms), "contract_inactive"
         if not contract_allows(
@@ -341,34 +463,11 @@ class ServerFederationExecutor:
                 "retrieved_at": now,
                 "redemption_id": None,
                 "membership_present": None,
-            }
+            },
+            action=claims["action"],
         )
 
-    def _sign_after_commit(self, claims, result):
-        now = int(self.clock())
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
-                (claims["contract_id"], claims["contract_version"]),
-            ).fetchone()
-            if row is None:
-                raise FederationError("result_signing_unavailable")
-            terms = self._terms(row)
-            kid, fingerprint = terms.key_binding(self.local_deployment_id)
-            key_row = self._key_row(
-                conn, self.local_deployment_id, kid, fingerprint
-            )
-            if (
-                kid != self.signing_kid
-                or fingerprint != self.signing_fingerprint
-                or not key_is_current(dict(key_row), now)
-            ):
-                raise FederationError("result_signing_unavailable")
-            expires = now + 60
-            if key_row["valid_until"] is not None:
-                expires = min(expires, key_row["valid_until"])
-            if expires <= now:
-                raise FederationError("result_signing_unavailable")
+    def _encode_result(self, claims, result, *, now, expires):
         result_claims = build_result_claims(
             destination_deployment_id=self.local_deployment_id,
             home_deployment_id=claims["iss"],
@@ -384,12 +483,65 @@ class ServerFederationExecutor:
             expires_at=expires,
             result=result,
         )
-        token = jwt.encode(
+        return jwt.encode(
             result_claims,
             self.private_key,
             algorithm="EdDSA",
             headers={"typ": FEDERATION_RESULT_TYP, "kid": self.signing_kid},
         )
+
+    def _ensure_result_fits_before_commit(self, conn, claims, result, now):
+        if not now - 60 <= result["retrieved_at"] <= now:
+            raise FederationError("invalid_result_snapshot_time")
+        row = conn.execute(
+            "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
+            (claims["contract_id"], claims["contract_version"]),
+        ).fetchone()
+        if row is None:
+            raise FederationError("result_signing_unavailable")
+        terms = self._terms(row)
+        kid, fingerprint = terms.key_binding(self.local_deployment_id)
+        key_row = self._key_row(conn, self.local_deployment_id, kid, fingerprint)
+        expires = min(now + 60, key_row["valid_until"] or now + 60)
+        token = self._encode_result(claims, result, now=now, expires=expires)
+        # 64 bytes covers the maximum possible decimal-width growth of both
+        # JWT timestamps between this prediction and the immediate final sign.
+        if len(token.encode("utf-8")) > MAX_RESULT_TOKEN_BYTES - 64:
+            raise FederationError("result_too_large")
+
+    def _sign_after_commit(self, claims, result):
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = int(self.clock())
+            row = conn.execute(
+                "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
+                (claims["contract_id"], claims["contract_version"]),
+            ).fetchone()
+            if row is None:
+                raise FederationError("result_signing_unavailable")
+            terms = self._terms(row)
+            kid, fingerprint = terms.key_binding(self.local_deployment_id)
+            key_row = self._key_row(
+                conn, self.local_deployment_id, kid, fingerprint
+            )
+            if (
+                kid != self.signing_kid
+                or fingerprint != self.signing_fingerprint
+                or not key_is_current(dict(key_row), now)
+                or not now - 60 <= result["retrieved_at"] <= now
+            ):
+                raise FederationError("result_signing_unavailable")
+            expires = now + 60
+            if key_row["valid_until"] is not None:
+                expires = min(expires, key_row["valid_until"])
+            if expires <= now:
+                raise FederationError("result_signing_unavailable")
+            hook = getattr(self, "_signing_lock_hook", None)
+            if hook is not None:
+                hook()
+            token = self._encode_result(claims, result, now=now, expires=expires)
+            if len(token.encode("utf-8")) > MAX_RESULT_TOKEN_BYTES:
+                raise FederationError("result_too_large")
         return {"protocol_version": "2", "signed_result": token, "error": None}
 
     def execute(self, protocol_version: str, grant: str, request_json: str) -> dict:
@@ -402,6 +554,8 @@ class ServerFederationExecutor:
         except FederationError as exc:
             safe = exc.code if exc.code in {"unsupported_version", "contract_unknown"} else "invalid_grant"
             return error_response(safe)
+        except (ContractError, ValidationError, sqlite3.Error):
+            return error_response("internal_error", retryable=False)
 
         result = None
         state = "active"
@@ -410,7 +564,7 @@ class ServerFederationExecutor:
                 conn.execute("BEGIN IMMEDIATE")
                 now, current, rejection = self._fresh_authorization(conn, claims)
                 state = current[0]["state"] if current is not None else "suspended"
-                if rejection == "grant_expired":
+                if rejection in {"grant_expired", "clock_rollback"}:
                     result = self._typed_error(claims, state, rejection, now)
                 else:
                     try:
@@ -431,7 +585,7 @@ class ServerFederationExecutor:
                                 conn.execute("SAVEPOINT federation_action")
                                 try:
                                     candidate = handler(
-                                        conn,
+                                        FederationActionTransaction(conn),
                                         VerifiedAction(
                                             claims=claims,
                                             request=request,
@@ -439,14 +593,43 @@ class ServerFederationExecutor:
                                             state=state,
                                         ),
                                     )
-                                    result = validate_typed_result(candidate)
-                                    conn.execute("RELEASE federation_action")
+                                    result = validate_typed_result(
+                                        candidate, action=claims["action"]
+                                    )
+                                    if result["status"] != "ok":
+                                        raise FederationError(
+                                            "handler_must_raise_business_error"
+                                        )
+                                    try:
+                                        self._ensure_result_fits_before_commit(
+                                            conn, claims, result, now
+                                        )
+                                    except FederationError as exc:
+                                        if exc.code != "result_too_large":
+                                            raise
+                                        conn.execute("ROLLBACK TO federation_action")
+                                        conn.execute("RELEASE federation_action")
+                                        result = self._typed_error(
+                                            claims, state, "result_too_large", now
+                                        )
+                                        self._ensure_result_fits_before_commit(
+                                            conn, claims, result, now
+                                        )
+                                    else:
+                                        conn.execute("RELEASE federation_action")
                                 except FederationBusinessError as exc:
                                     conn.execute("ROLLBACK TO federation_action")
                                     conn.execute("RELEASE federation_action")
                                     result = self._typed_error(
                                         claims, state, exc.code, now
                                     )
+                                    self._ensure_result_fits_before_commit(
+                                        conn, claims, result, now
+                                    )
+                if conn.in_transaction and result is not None:
+                    self._ensure_result_fits_before_commit(
+                        conn, claims, result, now
+                    )
         except Exception:
             return error_response("internal_error", retryable=False)
         try:
