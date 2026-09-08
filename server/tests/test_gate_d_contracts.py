@@ -20,6 +20,7 @@ from remoterf_federation_core import (
     contract_terms_sha256,
 )
 
+from remoteRF_server.server.federation import contracts as server_contracts
 from remoteRF_server.server.federation.contracts import ContractStore
 from remoteRF_server.server.federation.migrations import (
     GATE_D_MIGRATION_NAME,
@@ -59,12 +60,22 @@ def import_pin(store, value, *, source="manual_offline"):
     )
 
 
-def pair(tmp_path, left=A, right=B, *, contract_id=CONTRACT, now=None):
+def pair(
+    tmp_path,
+    left=A,
+    right=B,
+    *,
+    contract_id=CONTRACT,
+    now=None,
+    key_valid_until=1000,
+):
     now = now or [100]
     left_key = Ed25519PrivateKey.generate()
     right_key = Ed25519PrivateKey.generate()
-    left_material = material(left, "left-key", left_key)
-    right_material = material(right, "right-key", right_key)
+    left_material = material(left, "left-key", left_key, valid_until=key_valid_until)
+    right_material = material(
+        right, "right-key", right_key, valid_until=key_valid_until
+    )
     left_db, right_db = tmp_path / "left.db", tmp_path / "right.db"
     for path in (left_db, right_db):
         trust = TrustedKeyStore(path, clock=lambda: now[0])
@@ -126,6 +137,73 @@ def fully_activate(p):
     left.import_bundle(right.export_bundle(cid, 1))
     assert left.is_active(cid, 1, "FEDERATED_ENROLL")
     assert right.is_active(cid, 1, "PERMISSIONS_READ")
+
+
+def prepare_final_activation(p):
+    left, right, terms = p["left"], p["right"], p["terms"]
+    cid = terms.contract_id
+    left.propose(terms, actor_admin_ref="admin:left")
+    right.import_bundle(left.export_bundle(cid, 1))
+    right.accept(cid, 1, actor_admin_ref="admin:right")
+    left.import_bundle(right.export_bundle(cid, 1))
+    left.activate(cid, 1, actor_admin_ref="admin:left")
+    right.import_bundle(left.export_bundle(cid, 1))
+    right.activate(cid, 1, actor_admin_ref="admin:right")
+    return right.export_bundle(cid, 1)
+
+
+def install_begin_gates(monkeypatch, gates):
+    """Pause named threads immediately before their BEGIN IMMEDIATE call."""
+
+    real_connect = sqlite3.connect
+
+    class GatedConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            gate = gates.get(threading.current_thread().name)
+            if sql == "BEGIN IMMEDIATE" and gate is not None:
+                entered, release = gate
+                entered.set()
+                assert release.wait(timeout=5), "timed out waiting to release DB gate"
+            return super().execute(sql, *args, **kwargs)
+
+    def gated_connect(*args, **kwargs):
+        kwargs["factory"] = GatedConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(server_contracts.sqlite3, "connect", gated_connect)
+
+
+def local_projection_snapshot(path):
+    with sqlite3.connect(path) as conn:
+        state = conn.execute(
+            "SELECT state,superseded_by_version FROM FederationContracts "
+            "WHERE contract_id=? AND version=1",
+            (CONTRACT,),
+        ).fetchone()
+        events = conn.execute(
+            "SELECT event_id,actor_deployment_id,actor_sequence,event_type "
+            "FROM FederationContractEvents ORDER BY rowid"
+        ).fetchall()
+        audits = conn.execute(
+            "SELECT event_type,result_code FROM FederationAuditEvents ORDER BY rowid"
+        ).fetchall()
+    return state, events, audits
+
+
+def assert_local_sequence_integrity(path):
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute(
+            "SELECT actor_deployment_id,actor_sequence,event_id "
+            "FROM FederationContractEvents WHERE contract_id=? "
+            "ORDER BY actor_deployment_id,actor_sequence",
+            (CONTRACT,),
+        ).fetchall()
+    by_actor = {}
+    for actor, sequence, event_id in rows:
+        by_actor.setdefault(actor, []).append((sequence, event_id))
+    for values in by_actor.values():
+        assert [item[0] for item in values] == list(range(1, len(values) + 1))
+        assert len({item[1] for item in values}) == len(values)
 
 
 def test_trust_import_confirmation_conflicts_revocation_and_sources(tmp_path):
@@ -255,7 +333,14 @@ def test_signed_event_sequence_gap_replay_conflict_wrong_key_and_domain(tmp_path
     proposal = bundle["events"][0]
     with pytest.raises(ContractError, match="event_id_conflict"):
         parts = proposal.split(".")
-        conflicting = parts[0] + "." + parts[1] + "." + ("A" if parts[2][0] != "A" else "B") + parts[2][1:]
+        conflicting = (
+            parts[0]
+            + "."
+            + parts[1]
+            + "."
+            + ("A" if parts[2][0] != "A" else "B")
+            + parts[2][1:]
+        )
         right.import_event(terms, conflicting)
 
     claims = build_contract_event_claims(
@@ -356,6 +441,239 @@ def test_supersession_retires_old_active_version(tmp_path):
         assert store.show(CONTRACT, 1)["superseded_by_version"] == 2
 
 
+def test_server_key_expiry_is_rechecked_after_waiting_for_lock(tmp_path, monkeypatch):
+    p = pair(tmp_path, key_valid_until=101)
+    p["left"].propose(p["terms"], actor_admin_ref="admin:left")
+    p["right"].import_bundle(p["left"].export_bundle(CONTRACT, 1))
+    before = local_projection_snapshot(p["right_db"])
+    blocker = sqlite3.connect(p["right_db"], timeout=5.0)
+    blocker.execute("PRAGMA journal_mode=WAL")
+    blocker.execute("BEGIN IMMEDIATE")
+    entered, release = threading.Event(), threading.Event()
+    install_begin_gates(monkeypatch, {"expiry-transition": (entered, release)})
+    outcome = []
+
+    def transition():
+        try:
+            p["right"].accept(CONTRACT, 1, actor_admin_ref="admin:right")
+        except Exception as exc:  # captured for deterministic main-thread checks
+            outcome.append(exc)
+
+    thread = threading.Thread(target=transition, name="expiry-transition")
+    thread.start()
+    assert entered.wait(timeout=5), "transition did not reach BEGIN IMMEDIATE"
+    p["now"][0] = 101
+    blocker.commit()
+    blocker.close()
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], ContractError)
+    assert outcome[0].code == "key_not_current"
+    assert local_projection_snapshot(p["right_db"]) == before
+
+
+def test_server_activate_suspend_race_has_only_serialized_outcomes(
+    tmp_path, monkeypatch
+):
+    gates = {}
+    install_begin_gates(monkeypatch, gates)
+
+    first_dir = tmp_path / "activate-first"
+    first_dir.mkdir()
+    p = pair(first_dir)
+    bundle = json.loads(prepare_final_activation(p))
+    activation = next(
+        token
+        for token in bundle["events"]
+        if jwt.decode(token, options={"verify_signature": False})["event_type"]
+        == "activate"
+        and jwt.decode(token, options={"verify_signature": False})["iss"] == B
+    )
+    suspend_entered, allow_suspend = threading.Event(), threading.Event()
+    gates["suspend-after-activation"] = (suspend_entered, allow_suspend)
+    outcomes = {}
+
+    def suspend_after_activation():
+        try:
+            outcomes["suspend"] = p["left"].suspend(
+                CONTRACT, 1, actor_admin_ref="admin:left"
+            )
+        except Exception as exc:
+            outcomes["suspend"] = exc
+
+    suspend_thread = threading.Thread(
+        target=suspend_after_activation, name="suspend-after-activation"
+    )
+    suspend_thread.start()
+    assert suspend_entered.wait(timeout=5)
+    outcomes["activate"] = p["left"].import_event(p["terms"], activation)
+    allow_suspend.set()
+    suspend_thread.join(timeout=5)
+    assert outcomes["activate"] is True
+    assert not isinstance(outcomes["suspend"], Exception)
+    assert p["left"].show(CONTRACT, 1)["state"] == "suspended"
+    assert_local_sequence_integrity(p["left_db"])
+
+    second_dir = tmp_path / "suspend-first"
+    second_dir.mkdir()
+    p = pair(second_dir)
+    fully_activate(p)
+    bundle = json.loads(p["right"].export_bundle(CONTRACT, 1))
+    activation = next(
+        token
+        for token in bundle["events"]
+        if jwt.decode(token, options={"verify_signature": False})["event_type"]
+        == "activate"
+        and jwt.decode(token, options={"verify_signature": False})["iss"] == B
+    )
+    activation_entered, allow_activation = threading.Event(), threading.Event()
+    gates["activation-after-suspend"] = (activation_entered, allow_activation)
+    outcomes = {}
+
+    def delayed_activation():
+        try:
+            outcomes["activate"] = p["left"].import_event(p["terms"], activation)
+        except Exception as exc:
+            outcomes["activate"] = exc
+
+    activation_thread = threading.Thread(
+        target=delayed_activation, name="activation-after-suspend"
+    )
+    activation_thread.start()
+    assert activation_entered.wait(timeout=5)
+    p["left"].suspend(CONTRACT, 1, actor_admin_ref="admin:left")
+    allow_activation.set()
+    activation_thread.join(timeout=5)
+    assert outcomes["activate"] is False
+    assert p["left"].show(CONTRACT, 1)["state"] == "suspended"
+    assert_local_sequence_integrity(p["left_db"])
+
+
+def test_server_activate_revoke_race_keeps_revocation_terminal(tmp_path, monkeypatch):
+    gates = {}
+    install_begin_gates(monkeypatch, gates)
+
+    first_dir = tmp_path / "activate-before-revoke"
+    first_dir.mkdir()
+    p = pair(first_dir)
+    bundle = json.loads(prepare_final_activation(p))
+    activation = next(
+        token
+        for token in bundle["events"]
+        if jwt.decode(token, options={"verify_signature": False})["event_type"]
+        == "activate"
+        and jwt.decode(token, options={"verify_signature": False})["iss"] == B
+    )
+    revoke_entered, allow_revoke = threading.Event(), threading.Event()
+    gates["revoke-after-activation"] = (revoke_entered, allow_revoke)
+    outcomes = {}
+
+    def delayed_revoke():
+        try:
+            outcomes["revoke"] = p["left"].revoke(
+                CONTRACT, 1, actor_admin_ref="admin:left"
+            )
+        except Exception as exc:
+            outcomes["revoke"] = exc
+
+    revoke_thread = threading.Thread(
+        target=delayed_revoke, name="revoke-after-activation"
+    )
+    revoke_thread.start()
+    assert revoke_entered.wait(timeout=5)
+    assert p["left"].import_event(p["terms"], activation) is True
+    allow_revoke.set()
+    revoke_thread.join(timeout=5)
+    assert not isinstance(outcomes["revoke"], Exception)
+    assert p["left"].show(CONTRACT, 1)["state"] == "revoked"
+    assert_local_sequence_integrity(p["left_db"])
+
+    second_dir = tmp_path / "revoke-before-activation"
+    second_dir.mkdir()
+    p = pair(second_dir)
+    bundle = json.loads(prepare_final_activation(p))
+    activation = next(
+        token
+        for token in bundle["events"]
+        if jwt.decode(token, options={"verify_signature": False})["event_type"]
+        == "activate"
+        and jwt.decode(token, options={"verify_signature": False})["iss"] == B
+    )
+    activation_entered, allow_activation = threading.Event(), threading.Event()
+    gates["activation-after-revoke"] = (activation_entered, allow_activation)
+    outcomes = {}
+
+    def delayed_activation():
+        try:
+            outcomes["activate"] = p["left"].import_event(p["terms"], activation)
+        except Exception as exc:
+            outcomes["activate"] = exc
+
+    activation_thread = threading.Thread(
+        target=delayed_activation, name="activation-after-revoke"
+    )
+    activation_thread.start()
+    assert activation_entered.wait(timeout=5)
+    p["left"].revoke(CONTRACT, 1, actor_admin_ref="admin:left")
+    allow_activation.set()
+    activation_thread.join(timeout=5)
+    assert isinstance(outcomes["activate"], ContractError)
+    assert outcomes["activate"].code == "contract_revoked"
+    assert p["left"].show(CONTRACT, 1)["state"] == "revoked"
+    assert_local_sequence_integrity(p["left_db"])
+
+
+def test_server_concurrent_conflicting_sequence_accepts_only_one(tmp_path, monkeypatch):
+    p = pair(tmp_path)
+    p["left"].propose(p["terms"], actor_admin_ref="admin:left")
+
+    def acceptance(reason_code):
+        claims = build_contract_event_claims(
+            actor_deployment_id=B,
+            event_id=str(uuid4()),
+            contract_id=CONTRACT,
+            contract_version=1,
+            event_type="accept",
+            terms_sha256=contract_terms_sha256(p["terms"]),
+            actor_sequence=1,
+            occurred_at=100,
+            actor_admin_ref="admin:right",
+            reason_code=reason_code,
+        )
+        return jwt.encode(
+            claims,
+            p["right_key"],
+            algorithm="EdDSA",
+            headers={"typ": CONTRACT_EVENT_TYP, "kid": "right-key"},
+        )
+
+    first = acceptance("first_accept")
+    conflicting = acceptance("conflicting_accept")
+    entered, release = threading.Event(), threading.Event()
+    install_begin_gates(monkeypatch, {"conflicting-import": (entered, release)})
+    outcome = []
+
+    def delayed_conflict():
+        try:
+            outcome.append(p["left"].import_event(p["terms"], conflicting))
+        except Exception as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=delayed_conflict, name="conflicting-import")
+    thread.start()
+    assert entered.wait(timeout=5)
+    assert p["left"].import_event(p["terms"], first) is True
+    release.set()
+    thread.join(timeout=5)
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], ContractError)
+    assert outcome[0].code == "event_sequence_replay"
+    assert p["left"].show(CONTRACT, 1)["state"] == "accepted"
+    assert_local_sequence_integrity(p["left_db"])
+
+
 def test_broker_directory_cannot_authorize_local_store(tmp_path):
     p = pair(tmp_path)
     p["left"].propose(p["terms"], actor_admin_ref="admin:left")
@@ -414,10 +732,13 @@ def test_schema_is_idempotent_checksumed_and_append_only(tmp_path):
     with sqlite3.connect(path) as conn:
         migrate_gate_d_usergroups_schema(conn)
         migrate_gate_d_usergroups_schema(conn)
-        assert conn.execute(
-            "SELECT COUNT(*) FROM SchemaMigrations WHERE name=?",
-            (GATE_D_MIGRATION_NAME,),
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM SchemaMigrations WHERE name=?",
+                (GATE_D_MIGRATION_NAME,),
+            ).fetchone()[0]
+            == 1
+        )
     check_gate_d_ready(path)
     key = Ed25519PrivateKey.generate()
     value = material(A, "key", key)
@@ -444,7 +765,10 @@ def test_same_contract_adapter_is_symmetric_for_all_deployment_pairs(
 def test_canonical_vector_matches_shared_core(tmp_path):
     p = pair(tmp_path)
     encoded = canonical_contract_bytes(p["terms"])
-    assert encoded == json.dumps(
-        p["terms"].to_dict(), sort_keys=True, separators=(",", ":")
-    ).encode()
+    assert (
+        encoded
+        == json.dumps(
+            p["terms"].to_dict(), sort_keys=True, separators=(",", ":")
+        ).encode()
+    )
     assert contract_terms_sha256(p["terms"]) == hashlib.sha256(encoded).hexdigest()
