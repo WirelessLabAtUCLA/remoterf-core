@@ -486,6 +486,8 @@ def start_server_runtime(
     ]
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
+    from .deployment.capabilities import register_capabilities
+    register_capabilities(server)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
     grpc_pb2_grpc.add_DynamicControlV2Servicer_to_server(
         DynamicControlV2Servicer(), server
