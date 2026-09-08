@@ -343,6 +343,7 @@ def start_server_runtime(
     include_host_tunnel: bool = True,
     run_reservation_updates: bool = True,
     publish_status: bool = True,
+    federation_executor: Any = None,
 ) -> ServerRuntime:
     bind_host = str(bind_host or local_ip)
     grpc_port = int(local_port if grpc_port is None else grpc_port)
@@ -368,7 +369,9 @@ def start_server_runtime(
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
     from .deployment.capabilities import register_capabilities
+    from .federation.destination import register_grpc_federation
     register_capabilities(server)
+    register_grpc_federation(server, federation_executor)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
     grpc_pb2_grpc.add_DynamicControlV2Servicer_to_server(
         DynamicControlV2Servicer(), server

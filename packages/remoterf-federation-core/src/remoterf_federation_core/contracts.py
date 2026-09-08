@@ -94,7 +94,11 @@ _KID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _REASON = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _BROKER_PATHS = frozenset(
-    {"/v2/broker/contracts", "/v2/broker/contracts/events"}
+    {
+        "/v2/broker/contracts",
+        "/v2/broker/contracts/events",
+        "/v2/broker/federation/forward",
+    }
 )
 
 

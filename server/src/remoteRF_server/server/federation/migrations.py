@@ -24,6 +24,8 @@ MIGRATION_VERSION = 2
 MIGRATION_NAME = "gate_c_identity_v2"
 GATE_D_MIGRATION_VERSION = 3
 GATE_D_MIGRATION_NAME = "gate_d_trust_contracts_v1"
+GATE_E_MIGRATION_VERSION = 4
+GATE_E_MIGRATION_NAME = "gate_e_grant_jtis_v1"
 FEDERATED_PASSWORD_SALT = "!remoterf-federated-salt-v2!"
 FEDERATED_PASSWORD_HASH = "!remoterf-federated-no-password-v2!"
 
@@ -190,6 +192,46 @@ BEGIN SELECT RAISE(ABORT,'federation audit is append-only'); END;
 """
 
 _GATE_D_MIGRATION_CHECKSUM = hashlib.sha256(_GATE_D_DDL.encode("utf-8")).hexdigest()
+
+_GATE_E_DDL = """
+CREATE TABLE IF NOT EXISTS FederationGrantJTIs (
+    issuer_deployment_id TEXT NOT NULL,
+    jti TEXT NOT NULL,
+    remote_subject_id TEXT NOT NULL,
+    destination_deployment_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+    terms_sha256 TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('federated_enroll','permissions_read')),
+    request_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    retain_until INTEGER NOT NULL,
+    consumed_at INTEGER NOT NULL,
+    PRIMARY KEY(issuer_deployment_id,jti),
+    CHECK(length(issuer_deployment_id)=36),
+    CHECK(length(jti)=36),
+    CHECK(length(remote_subject_id)=36),
+    CHECK(length(destination_deployment_id)=36),
+    CHECK(length(contract_id)=36),
+    CHECK(length(terms_sha256)=64),
+    CHECK(length(request_id)=36),
+    CHECK(length(request_sha256)=64),
+    CHECK(retain_until=expires_at+5),
+    CHECK(consumed_at < expires_at)
+);
+CREATE INDEX IF NOT EXISTS FederationGrantJTIs_retention
+ON FederationGrantJTIs(retain_until);
+CREATE TRIGGER IF NOT EXISTS FederationGrantJTIs_append_only_update
+BEFORE UPDATE ON FederationGrantJTIs
+BEGIN SELECT RAISE(ABORT,'federation grant JTI evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS FederationGrantJTIs_retain_delete
+BEFORE DELETE ON FederationGrantJTIs
+WHEN CAST(strftime('%s','now') AS INTEGER) <= OLD.retain_until
+BEGIN SELECT RAISE(ABORT,'federation grant JTI is retained'); END;
+"""
+
+_GATE_E_MIGRATION_CHECKSUM = hashlib.sha256(_GATE_E_DDL.encode("utf-8")).hexdigest()
 
 
 class SchemaNotReady(RuntimeError):
@@ -394,6 +436,35 @@ def migrate_gate_d(db_dir: str | Path) -> None:
     migrate_gate_c(db_dir)
     with sqlite3.connect(Path(db_dir) / "usergroups.db") as conn:
         migrate_gate_d_usergroups_schema(conn)
+
+
+def migrate_gate_e_usergroups_schema(conn: sqlite3.Connection) -> None:
+    """Install only Gate E replay state; no enrollment receipt or membership schema."""
+
+    migrate_gate_d_usergroups_schema(conn)
+    row = conn.execute(
+        "SELECT checksum FROM SchemaMigrations WHERE name=?",
+        (GATE_E_MIGRATION_NAME,),
+    ).fetchone()
+    if row is not None and row[0] != _GATE_E_MIGRATION_CHECKSUM:
+        raise SchemaNotReady("Gate E migration checksum mismatch")
+    conn.executescript(_GATE_E_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO SchemaMigrations "
+        "(version,name,checksum,applied_at) VALUES (?,?,?,?)",
+        (
+            GATE_E_MIGRATION_VERSION,
+            GATE_E_MIGRATION_NAME,
+            _GATE_E_MIGRATION_CHECKSUM,
+            int(time.time()),
+        ),
+    )
+
+
+def migrate_gate_e(db_dir: str | Path) -> None:
+    migrate_gate_c(db_dir)
+    with sqlite3.connect(Path(db_dir) / "usergroups.db") as conn:
+        migrate_gate_e_usergroups_schema(conn)
 
 
 def initialize_native_subjects(
@@ -678,3 +749,45 @@ def check_gate_d_ready(
             value = strict_json(metadata, max_bytes=2048)
             if type(value) is not dict:
                 raise SchemaNotReady("federation audit metadata is invalid")
+
+
+def check_gate_e_ready(
+    usergroups_path: str | Path, *, local_deployment_id: str | None = None
+) -> None:
+    """Validate Gate E replay state without requiring any live contract."""
+
+    check_gate_d_ready(
+        usergroups_path, local_deployment_id=local_deployment_id
+    )
+    with sqlite3.connect(Path(usergroups_path)) as conn:
+        configure_connection(conn)
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='FederationGrantJTIs'"
+        ).fetchone()
+        ledger = conn.execute(
+            "SELECT checksum FROM SchemaMigrations WHERE name=?",
+            (GATE_E_MIGRATION_NAME,),
+        ).fetchone()
+        if table is None or ledger is None or ledger[0] != _GATE_E_MIGRATION_CHECKSUM:
+            raise SchemaNotReady("Gate E migration ledger is missing or invalid")
+        for row in conn.execute(
+            "SELECT issuer_deployment_id,jti,remote_subject_id,"
+            "destination_deployment_id,contract_id,contract_version,terms_sha256,"
+            "action,request_id,request_sha256,expires_at,retain_until,consumed_at "
+            "FROM FederationGrantJTIs"
+        ):
+            for value in (row[0], row[1], row[2], row[3], row[4], row[8]):
+                canonical_uuid(value)
+            if (
+                type(row[5]) is not int
+                or row[5] <= 0
+                or row[7] not in {"federated_enroll", "permissions_read"}
+                or row[11] != row[10] + 5
+                or not row[12] < row[10]
+            ):
+                raise SchemaNotReady("Federation grant JTI state is invalid")
+            from remoterf_federation_core import validate_sha256
+
+            validate_sha256(row[6], code="invalid_terms_hash")
+            validate_sha256(row[9], code="invalid_request_hash")
