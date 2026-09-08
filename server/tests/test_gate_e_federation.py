@@ -61,6 +61,8 @@ def pin(path, item, now):
 
 
 def active_pair(tmp_path, *, key_valid_until=10_000, contract_valid_until=1000):
+    from remoteRF_server.common.utils import hash_token
+
     now = [100]
     home_key, dest_key = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
     home_material = material(HOME, home_key, key_valid_until)
@@ -106,12 +108,19 @@ def active_pair(tmp_path, *, key_valid_until=10_000, contract_valid_until=1000):
     home_store.import_bundle(dest_store.export_bundle(CONTRACT, 1))
 
     reservations = tmp_path / "reservations.db"
+    password_salt, password_hash = hash_token("native-password")
     with sqlite3.connect(reservations) as conn:
         migrate_reservations_schema(conn)
         conn.execute(
             "INSERT INTO Accounts "
             "(username,email,pass_salt,pass_hash,auth_type) VALUES (?,?,?,?,?)",
-            ("native", "native@example.test", "salt", "hash", "local_password"),
+            (
+                "native",
+                "native@example.test",
+                password_salt,
+                password_hash,
+                "local_password",
+            ),
         )
     subjects = initialize_native_subjects(reservations, HOME)
     issuer = ServerHomeGrantIssuer(
@@ -129,6 +138,7 @@ def active_pair(tmp_path, *, key_valid_until=10_000, contract_valid_until=1000):
         "dest_db": dest_db,
         "dest_key": dest_key,
         "dest_material": dest_material,
+        "reservations": reservations,
         "subject": subjects[1],
     }
 
@@ -303,6 +313,51 @@ def test_home_rejects_cryptographically_valid_result_substitution_matrix(tmp_pat
         )
         with pytest.raises(FederationError):
             pair["issuer"].verify_result(token, issued)
+
+
+def test_federation_grant_is_not_any_legacy_or_dynamic_credential(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    from remoteRF_server.common.utils import hash_token, map_arg, validate_token
+    from remoteRF_server.server import device_manager, dynamic_v2
+    from remoteRF_server.server.reservation import ReservationHandler
+
+    pair = active_pair(tmp_path)
+    grant = issue(pair).grant
+
+    # GenericRPC native password/login path.
+    reservations = ReservationHandler.__new__(ReservationHandler)
+    reservations.filepath = pair["reservations"]
+    reservations.lock = threading.RLock()
+    reservations.db = reservations.cursor = None
+    login = reservations.handle_call(
+        function_name="login",
+        args={"un": map_arg("native"), "pw": map_arg(grant)},
+    )
+    assert "UE" in login and "UC" not in login
+
+    # Reservation/device opaque token hash and master-token grammars.
+    salt, digest = hash_token("real-reservation-token")
+    assert not validate_token(salt, digest, grant)
+    assert device_manager.parse_mastertoken(
+        grant, configured_token="real-master-token"
+    ) is None
+    monkeypatch.setattr(device_manager, "_sync_host_devices", lambda *a, **k: None)
+    monkeypatch.setattr(device_manager, "_get_master_token", lambda: "real-master-token")
+    monkeypatch.setattr(device_manager, "_devices", {})
+    assert device_manager.resolve_gid_for_token(grant) is None
+
+    # Dynamic device token and live session-ID paths.
+    monkeypatch.setattr(
+        dynamic_v2, "resolve_gid_for_token", device_manager.resolve_gid_for_token
+    )
+    manager = dynamic_v2.SessionManager()
+    with pytest.raises(dynamic_v2.RemoteRFReservationError):
+        manager.schema_for_token(grant)
+    with pytest.raises(dynamic_v2.RemoteRFSessionExpiredError):
+        manager.get(grant)
 
 
 def test_server_handler_internal_error_rolls_back_jti_and_application_write(tmp_path):
