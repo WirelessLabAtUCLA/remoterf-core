@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoteRF-server"
-version = "1.1.0.dev2"
+version = "1.1.0.dev3"
 description = "RemoteRF server-side control package"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.10"
 dependencies = [
-  "remoterf-federation-core==0.3.0",
+  "remoterf-federation-core==0.4.0",
   "grpcio>=1.78.1,<2.0.0",
   "protobuf>=6.31.1,<7.0.0",
   "numpy",
@@ -36,6 +36,7 @@ classifiers = [
 [project.scripts]
 # RRRFserver = "remoteRF_server.server.grpc_server:main"
 serverrf = "remoteRF_server.serverrf_cli:main"
+remoterf-federation-admin = "remoteRF_server.server.federation.admin:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

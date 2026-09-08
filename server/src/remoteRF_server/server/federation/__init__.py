@@ -1,9 +1,16 @@
-"""Owner-local federation primitives.
+"""Owner-local Gate C identity and Gate D trust/contract primitives.
 
-Gate C contains identity and containment only.  It intentionally exposes no
-trust keys, contracts, grants, execution service, enrollment, or broker path.
+This package still exposes no grants, federation execution, enrollment,
+permission aggregation, resources, reservations, or broker authorization.
 """
 
+from .contracts import ContractStore
 from .principals import FederatedPrincipal, FederatedPrincipalStore
+from .trust import TrustedKeyStore
 
-__all__ = ["FederatedPrincipal", "FederatedPrincipalStore"]
+__all__ = [
+    "ContractStore",
+    "FederatedPrincipal",
+    "FederatedPrincipalStore",
+    "TrustedKeyStore",
+]
