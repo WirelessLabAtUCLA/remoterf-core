@@ -57,7 +57,6 @@ from .device_manager import (
 from .v2_errors import (
     RemoteRFNativeUHDError,
     RemoteRFOverloadError,
-    RemoteRFPolicyError,
     RemoteRFProtocolError,
     RemoteRFReservationError,
     RemoteRFServerOverloadedError,
@@ -1256,17 +1255,6 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
                         f"duplicate invoke keywords: {sorted(overlap)}"
                     )
                 args.update(extra_kwargs)
-
-            from .global_access.operation_policy import enforce_for_dynamic_v2
-            from .reservation import reservation_handler
-
-            _policy_session = session_manager.get(request.session_id)
-            enforce_for_dynamic_v2(
-                username=reservation_handler.get_username_for_active_token(_policy_session.token),
-                device_id=_policy_session.gid,
-                method=request.method,
-            )
-
             result, mutations = session_manager.invoke(
                 request.session_id,
                 request.handle,
@@ -1445,19 +1433,6 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                             raise RemoteRFProtocolError(
                                 "sample direction does not match the streamer type"
                             )
-                        if request.direction == grpc_pb2.SAMPLE_DIRECTION_TX:
-                            from .global_access.operation_policy import sample_upload_allowed_for
-                            from .reservation import reservation_handler
-
-                            if not sample_upload_allowed_for(
-                                username=reservation_handler.get_username_for_active_token(session.token),
-                                device_id=session.gid,
-                            ):
-                                raise RemoteRFPolicyError(
-                                    "client sample upload (TX) is not enabled for RemoteRF "
-                                    "Global public sessions on this device",
-                                    details={"reason": "global_tx_denied"},
-                                )
                         with entry.lock:
                             if entry.active_operation:
                                 raise RemoteRFServerOverloadedError(

@@ -17,7 +17,6 @@ import sqlite3
 from datetime import datetime
 import time
 import sys
-import secrets
 import threading
 from pathlib import Path
 from functools import wraps
@@ -71,20 +70,6 @@ class ReservationHandler:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
-
-        # RemoteRF Global v1.0: distinguishes ordinary local accounts from
-        # JIT shadow accounts created for a Global identity (see
-        # server/global_access/principal_mapping.py). SQLite has no
-        # "ADD COLUMN IF NOT EXISTS", so this is guarded manually — the only
-        # schema change ever made to a pre-existing table in this repo.
-        # Existing rows default to 'local_password' and are completely
-        # unaffected.
-        self.cursor.execute("PRAGMA table_info(Accounts)")
-        existing_columns = {row[1] for row in self.cursor.fetchall()}
-        if "auth_type" not in existing_columns:
-            self.cursor.execute(
-                "ALTER TABLE Accounts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'local_password'"
-            )
 
         self.cursor.execute('''
         CREATE TABLE IF NOT EXISTS Reservations (
@@ -313,112 +298,15 @@ class ReservationHandler:
         self.cursor.execute('DELETE FROM Reservations')
         print("All reservations removed.")
     
-    @db_connection
+    @db_connection 
     def login_user(self, username, password):
         self.cursor.execute('SELECT * FROM Accounts WHERE username = ?', (username,))
         account = self.cursor.fetchone()
-
-        if account is None:
-            return {"UE": map_arg("Invalid login details.")}
-
-        auth_type = account[6] if len(account) > 6 else "local_password"
-
-        if auth_type == "remoterf_global":
-            # RemoteRF Global v1.0 shadow accounts never authenticate via a
-            # human-chosen password (pass_salt/pass_hash are permanently
-            # unusable junk for these accounts, see create_external_account).
-            # The client-visible "password" field instead carries the
-            # short-lived session token minted by GlobalAuthV1.ExchangeAssertion.
-            from .global_access.db import get_global_db
-
-            session = get_global_db().validate_session(token=password)
-            if session is not None and session["local_account_id"] == account[0]:
-                return {"UC": map_arg(f"{username}")}
-            return {"UE": map_arg("Invalid login details.")}
-
-        if validate_token(account[3], account[4], password):
+        
+        if account is not None and validate_token(account[3], account[4], password):
             return {"UC": map_arg(f"{username}")}
-        return {"UE": map_arg("Invalid login details.")}
-
-    @db_connection
-    def create_external_account(self, *, username: str, auth_type: str = "remoterf_global") -> int:
-        """
-        Create a JIT shadow account for a non-local (e.g. RemoteRF Global)
-        identity. Not exposed via RPC dispatch — only called internally by
-        server/global_access/principal_mapping.py. Uses an IANA-reserved
-        '.invalid' placeholder email (RFC 2606) rather than fabricating a
-        real-looking address, and a random, immediately-discarded password
-        hash: this account can never authenticate via the normal password
-        path (see login_user's auth_type branch above).
-        """
-        if auth_type == "local_password":
-            raise ValueError("create_external_account requires a non-local auth_type")
-
-        email = f"{username}@global.invalid"
-        junk_password = secrets.token_urlsafe(32)
-        pass_salt, pass_hash = hash_token(junk_password)
-
-        self.cursor.execute(
-            "SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,)
-        )
-        row = self.cursor.fetchone()
-        if row is not None:
-            return int(row[0])
-
-        try:
-            self.cursor.execute(
-                "INSERT INTO Accounts (username, email, pass_salt, pass_hash, created_at, auth_type) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (username, email, pass_salt, pass_hash, datetime.now(), auth_type),
-            )
-            return int(self.cursor.lastrowid)
-        except sqlite3.IntegrityError:
-            # Lost a concurrent create race for the same deterministic
-            # username — fall through to whoever won.
-            self.cursor.execute(
-                "SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,)
-            )
-            row = self.cursor.fetchone()
-            if row is None:
-                raise
-            return int(row[0])
-
-    @db_connection
-    def get_username_by_acc_id(self, acc_id: int) -> str | None:
-        self.cursor.execute(
-            "SELECT username FROM Accounts WHERE acc_id = ? LIMIT 1", (acc_id,)
-        )
-        row = self.cursor.fetchone()
-        return row[0] if row else None
-
-    @db_connection
-    def get_username_for_active_token(self, api_token: str) -> str | None:
-        """
-        Resolve a live device/reservation API token back to the owning
-        account's username, without re-deriving reservation/device-token
-        matching logic elsewhere. Used by the Global operation-policy layer
-        to decide whether a given device RPC call belongs to a Global
-        principal (see server/global_access/operation_policy.py).
-        """
-        now = datetime.now()
-        self.cursor.execute(
-            "SELECT username, salt, hash FROM Reservations WHERE start_time <= ? AND end_time > ?",
-            (now, now),
-        )
-        for username, salt, hashed in self.cursor.fetchall():
-            if salt and hashed and validate_token(salt, hashed, api_token):
-                return username
-        return None
-
-    @db_connection
-    def get_auth_type(self, username: str) -> str:
-        self.cursor.execute(
-            "SELECT auth_type FROM Accounts WHERE username = ? LIMIT 1", (username,)
-        )
-        row = self.cursor.fetchone()
-        if row is None:
-            return "local_password"
-        return row[0] or "local_password"
+        else:
+            return {"UE": map_arg("Invalid login details.")}
     
     def _clean_expired_reservations(self, device_id: int):
         """Remove expired reservations from the database."""

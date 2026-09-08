@@ -65,7 +65,6 @@ from ..host import host_tunnel_server as hts
 from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
 from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
 from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
-from ..common.grpc import global_auth_pb2, global_auth_pb2_grpc
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -159,134 +158,10 @@ load_dotenv(dotenv_path)
 # print(f"Local IP: {local_ip}")
 # print(f"Local Port: {local_port}")
 
-# ---------------------------------------------------------------------
-# RemoteRF Global v1.0 (optional, disabled by default; see
-# server/global_access/ and docs/remoterf-global-server-v1.md).
-# ---------------------------------------------------------------------
-
-_RELAY_GATED_FUNCTIONS = frozenset({"ACC:login", "ACC:create_user"})
-
-
-def _global_enabled() -> bool:
-    return (os.getenv("REMOTERF_GLOBAL_ENABLED", "false") or "").strip().lower() in (
-        "1", "true", "yes",
-    )
-
-
-def _global_local_session_minutes() -> int:
-    raw = (os.getenv("REMOTERF_GLOBAL_LOCAL_SESSION_MINUTES", "") or "").strip()
-    try:
-        n = int(raw) if raw else 60
-    except ValueError:
-        n = 60
-    return max(1, n)
-
-
-_JWKS_CACHE_LOCK = threading.Lock()
-_JWKS_CACHES: dict = {}
-
-
-def _get_jwks_cache(jwks_url: str):
-    from .global_access.jwks_cache import JWKSCache
-
-    with _JWKS_CACHE_LOCK:
-        cache = _JWKS_CACHES.get(jwks_url)
-        if cache is None:
-            cache = JWKSCache(jwks_url)
-            _JWKS_CACHES[jwks_url] = cache
-        return cache
-
-
-def _reject_relay_sourced_credential_bootstrap(request, context) -> bool:
-    """
-    Returns True (and the caller should short-circuit with a rejection) when
-    this is a password-login/account-creation attempt arriving from the
-    configured RemoteRF Global relay ingress — a legitimate LAN client never
-    appears as that peer, so any such attempt here is presumptively an
-    Internet client trying to brute-force or mint UCLA-local credentials
-    directly through the public relay path. Never used to grant trust;
-    only ever used to additionally restrict these two specific functions.
-    """
-    if not _global_enabled():
-        return False
-    if request.function_name not in _RELAY_GATED_FUNCTIONS:
-        return False
-
-    from .global_access.config import GlobalConfigError, load_global_config
-    from .global_access.ingress_policy import is_trusted_relay_peer
-
-    try:
-        cfg = load_global_config()
-    except GlobalConfigError:
-        # Misconfigured Global never *opens* a hole here — it just means
-        # this extra restriction can't be evaluated, same as Global being
-        # disabled. It never bypasses any other existing check.
-        return False
-
-    return is_trusted_relay_peer(context.peer(), cfg.relay_ingress.trusted_peer_cidrs)
-
-
-class GlobalAuthV1Servicer(global_auth_pb2_grpc.GlobalAuthV1Servicer):
-    def ExchangeAssertion(self, request, context):
-        if not _global_enabled():
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(
-                    code="global_disabled",
-                    message="RemoteRF Global integration is disabled on this deployment",
-                )
-            )
-
-        from .global_access import identity as identity_mod
-        from .global_access import principal_mapping
-        from .global_access.config import GlobalConfigError, load_global_config
-
-        try:
-            cfg = load_global_config()
-        except GlobalConfigError as exc:
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(code="global_misconfigured", message=str(exc))
-            )
-
-        state_dir = cfg.deployment_private_key_path.parent
-        state = identity_mod.load_state(state_dir)
-        if not state.enrolled:
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(
-                    code="not_enrolled",
-                    message="this deployment has not completed RemoteRF Global enrollment",
-                )
-            )
-
-        jwks = _get_jwks_cache(cfg.jwks_url)
-
-        try:
-            result = principal_mapping.exchange_assertion(
-                request.assertion,
-                cfg=cfg,
-                deployment_id=state.deployment_id,
-                jwks=jwks,
-                session_minutes=_global_local_session_minutes(),
-            )
-        except principal_mapping.GlobalAuthError as exc:
-            return global_auth_pb2.ExchangeAssertionResponse(
-                error=grpc_pb2.ErrorEnvelope(code=exc.code, message=str(exc))
-            )
-
-        return global_auth_pb2.ExchangeAssertionResponse(
-            local_username=result.local_username,
-            local_session_token=result.local_session_token,
-            local_account_id=int(result.local_account_id),
-            session_expires_at=result.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            deployment_id=result.deployment_id,
-            effective_policy_summary_json=result.effective_policy_summary,
-            protocol_version=identity_mod.PROTOCOL_VERSION,
-        )
-
-
 # Implement the GenericRPC service
 class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
     def Call(self, request, context):
-
+        
         # Remote Admin
         # function_name_args = request.function_name.split(':')
         # if function_name_args[0] == "RemoteAdmin":
@@ -301,19 +176,11 @@ class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
         #     return grpc_pb2.GenericRPCResponse(
         #         results=remote_admin_call(function_name=function_name_args[1], args=request.args)
         #     )
-
-        if _reject_relay_sourced_credential_bootstrap(request, context):
-            return grpc_pb2.GenericRPCResponse(results={
-                "ace": map_arg(
-                    "Password login and account creation are not permitted via the "
-                    "RemoteRF Global public relay path."
-                ),
-            })
-
+            
         # Normal RPC
         response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
         return grpc_pb2.GenericRPCResponse(results=response)
-
+    
 
 @dataclass
 class ServerRuntime:
@@ -324,7 +191,6 @@ class ServerRuntime:
     bind_host: str
     grpc_port: int
     cert_port: int
-    global_connector: Any = None
     _stop_lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
 
@@ -338,12 +204,6 @@ class ServerRuntime:
                 return
             self._stopped = True
             self.stop_event.set()
-
-        if self.global_connector is not None:
-            try:
-                self.global_connector.stop()
-            except Exception:
-                pass
 
         termination = self.grpc_server.stop(max(0.0, float(grace_sec)))
         try:
@@ -360,36 +220,6 @@ class ServerRuntime:
                 and self.update_thread is not threading.current_thread()
             ):
                 self.update_thread.join(timeout=2.0)
-
-
-def _start_global_connector_if_enabled(*, cert_dir: Path):
-    """
-    Best-effort: constructs and starts the optional RemoteRF Global
-    connector when REMOTERF_GLOBAL_ENABLED is set. Any failure here (bad
-    config, no identity yet, Global unreachable) is logged and swallowed —
-    it must never prevent the rest of the server from starting.
-    """
-    if not _global_enabled():
-        return None
-
-    try:
-        from .global_access.config import GlobalConfigError, load_global_config
-        from .global_access.connector import GlobalConnector
-        from .device_manager import get_all_devices
-
-        cfg = load_global_config()
-        connector = GlobalConnector(
-            cfg=cfg,
-            state_dir=cfg.deployment_private_key_path.parent,
-            cert_dir=cert_dir,
-            get_known_device_ids=lambda: {str(k) for k in get_all_devices().keys()},
-        )
-        connector.start()
-        printf("RemoteRF Global connector started.", Sty.GRAY)
-        return connector
-    except Exception as exc:
-        printf(f"RemoteRF Global connector did not start: {exc}", Sty.YELLOW)
-        return None
 
 
 def _load_server_credentials(cert_dir: Path):
@@ -463,11 +293,6 @@ def start_server_runtime(
     grpc_pb2_grpc.add_SampleDataV1Servicer_to_server(
         SampleDataV1Servicer(), server
     )
-    # RemoteRF Global v1.0: always registered (additive); ExchangeAssertion
-    # itself returns a structured "global_disabled" error when
-    # REMOTERF_GLOBAL_ENABLED is not set, rather than the server refusing
-    # to start or the service being conditionally absent.
-    global_auth_pb2_grpc.add_GlobalAuthV1Servicer_to_server(GlobalAuthV1Servicer(), server)
 
     try:
         server_credentials = _load_server_credentials(cert_dir)
@@ -525,11 +350,6 @@ def start_server_runtime(
             stop_cert_provider(cert_server)
         raise
 
-    # RemoteRF Global v1.0: optional, best-effort. A failure here (bad
-    # config, no identity yet, Global unreachable) never prevents the rest
-    # of the server from starting — see _start_global_connector_if_enabled.
-    global_connector = _start_global_connector_if_enabled(cert_dir=cert_dir)
-
     return ServerRuntime(
         grpc_server=server,
         cert_server=cert_server,
@@ -538,7 +358,6 @@ def start_server_runtime(
         bind_host=bind_host,
         grpc_port=int(bound_grpc_port),
         cert_port=int(cert_server.server_address[1]),
-        global_connector=global_connector,
     )
 
 
