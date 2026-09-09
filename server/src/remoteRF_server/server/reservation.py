@@ -60,6 +60,7 @@ def _parse_reservation_datetime(value) -> datetime:
 class ReservationHandler:
     def __init__(self):
         self.federation_enroller = None
+        self.federation_permissions = None
         self.filepath = get_db_dir() / "reservations.db"
         # self.filepath = Path(__file__).resolve().parent.parent/'db'/'reservations.db'
         
@@ -152,10 +153,23 @@ class ReservationHandler:
 
                 if self.login_user(username, password) == {"UC": map_arg(f"{username}")}:
                     data = perms.get_perms(username)
+                    uid = int(self.get_uid(username))
+                    home_permissions = None
+                    federation_permissions = getattr(
+                        self, "federation_permissions", None
+                    )
+                    if federation_permissions is not None:
+                        try:
+                            home_permissions = federation_permissions.summary(
+                                local_account_id=uid
+                            )
+                        except Exception:
+                            # Federation is additive. A local permission read must
+                            # retain its protected pre-Global behavior even when
+                            # optional aggregation is misconfigured.
+                            home_permissions = None
 
                     if data and data[0] and data[0][0] == "Normal User":
-                        uid = int(self.get_uid(username))
-
                         # Force pure ints (defensive)
                         devs_raw = user_group_handler.get_users_devices(uid=uid) or []
                         devs: list[int] = []
@@ -185,15 +199,25 @@ class ReservationHandler:
                             if s:
                                 groups.append(s)
 
+                        details = {
+                            "devices": devs,
+                            "caps": caps,
+                            "groups": groups,
+                        }
+                        if home_permissions is not None:
+                            details["home_permissions"] = home_permissions
                         return {
                             "UC": map_arg(str(data)),
-                            "details": map_arg(json.dumps({
-                                "devices": devs,
-                                "caps": caps,
-                                "groups": groups,
-                            })),
+                            "details": map_arg(json.dumps(details)),
                         }
 
+                    if home_permissions is not None:
+                        return {
+                            "UC": map_arg(str(data)),
+                            "details": map_arg(
+                                json.dumps({"home_permissions": home_permissions})
+                            ),
+                        }
                     return {"UC": map_arg(str(data))}
 
                 return {"ace": map_arg("Invalid login credentials.")}

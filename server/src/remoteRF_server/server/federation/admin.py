@@ -11,7 +11,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from remoterf_federation_core import ContractError, canonical_json, strict_json
 
-from ..global_access import identity
+from . import identity
 from .contracts import ContractStore
 from .enrollment import ServerEnrollmentCodeStore
 from .trust import TrustedKeyStore

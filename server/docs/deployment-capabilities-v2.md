@@ -6,8 +6,9 @@ ErrorEnvelope. `grpc.proto`, GenericRPC, DynamicControlV2 and SampleDataV1 are
 unchanged. Standalone discovery returns a null deployment ID, gRPC accounts,
 registration codes required, and email verification/federation disabled.
 No keys, new native DB schema or Global connection are initialized by this
-handler. Gate C removed GlobalAuthV1; connector transport remains isolated for
-later authorized work.
+handler. Gate C removed GlobalAuthV1, and Gate G removed the retired Global-v1
+connector/catalog/relay-ingress runtime. Federation v2 is the only Global
+integration surface in the Server process.
 
 The canonical file is `src/remoteRF_server/common/grpc/deployment_capabilities.proto`.
 `scripts/generate-capabilities.py` runs the established grpc_tools.protoc

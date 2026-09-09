@@ -314,7 +314,7 @@ def print_help() -> None:
         "  --force             Overwrite existing certs/keys\n"
         "  --no-detect-ip      Do not auto-detect IP when none provided\n"
         "\n"
-        "Global:\n"
+        "General:\n"
         "  -y, --yes           Skip wipe confirmation prompts\n"
         "  -v, --verbose       With --show-certs, also print x509 details (requires openssl)\n"
         "\n"
@@ -322,16 +322,6 @@ def print_help() -> None:
         "  serverrf --gist --set --id <gist_id> --file <filename> [--token <tok> | --token-stdin]\n"
         "  serverrf --gist --show [--secrets]\n"
         "  serverrf --gist --wipe [-y]\n"
-        "\n"
-        "RemoteRF Global (optional, disabled by default):\n"
-        "  serverrf --global init-identity\n"
-        "  serverrf --global enroll --base-url <url> --slug <slug> --display-name <name> "
-        "[--token <tok> | --token-stdin]\n"
-        "  serverrf --global status\n"
-        "  serverrf --global validate-config\n"
-        "  serverrf --global publish-now\n"
-        "  serverrf --global show-public-key\n"
-        "  Legacy GlobalAuth mappings/sessions were removed in Global v2 Gate C.\n"
         "\n"
         "Examples:\n"
         "  serverrf --gist --set --id 2a35e0... --file ucla-wlab-remoterf-status.json\n"
@@ -354,12 +344,6 @@ def print_help() -> None:
         "  serverrf --host --show\n"
         "  serverrf --host --delete lab-host-01\n"
         "  serverrf --host --wipe -y\n"
-        "\n"
-        "  serverrf --global init-identity\n"
-        "  serverrf --global enroll --base-url https://global.remoterf.net "
-        "--slug ucla --display-name \"UCLA WirelessLab\" --token-stdin\n"
-        "  serverrf --global status\n"
-        "  serverrf --global validate-config\n"
         "\n"
         "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
         "  serverrf --device --add --pluto-mimo 1:pluto_mimo:104473f6\n"
@@ -529,240 +513,6 @@ def _gist_wipe(*, yes: bool) -> int:
     p.unlink()
     print("Wiped gist config (gist.env).")
     return 0
-
-# -----------------------------
-# RemoteRF Global commands
-# -----------------------------
-
-
-def _global_state_dir() -> Path:
-    """
-    Where the deployment's Ed25519 identity + deployment.json live. Prefers
-    the directory implied by global.yaml's deployment_private_key_path when
-    a config exists and parses; falls back to the standard default location
-    (~/.config/remoterf/global/) otherwise — e.g. before global.yaml has
-    been written, for init-identity/show-public-key.
-    """
-    from .server.global_access.config import (
-        GlobalConfigError,
-        default_global_state_dir,
-        load_global_config,
-    )
-
-    try:
-        cfg = load_global_config()
-        return cfg.deployment_private_key_path.parent
-    except GlobalConfigError:
-        return default_global_state_dir()
-
-
-def _global_init_identity() -> int:
-    from .server.global_access import identity as identity_mod
-
-    state_dir = _global_state_dir()
-    try:
-        path = identity_mod.init_identity(state_dir)
-    except identity_mod.IdentityError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    print(f"Deployment identity created: {path}")
-    print("The private key is never printed and never leaves this machine.")
-    print("Next: 'serverrf --global enroll --base-url <url> --slug <slug> --display-name <name>'")
-    return 0
-
-
-def _global_show_public_key() -> int:
-    from .server.global_access import identity as identity_mod
-
-    state_dir = _global_state_dir()
-    try:
-        print(identity_mod.public_key_pem(state_dir).strip())
-    except identity_mod.IdentityError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-    return 0
-
-
-def _global_enroll(
-    *,
-    base_url: Optional[str],
-    token: Optional[str],
-    token_stdin: bool,
-    slug: Optional[str],
-    display_name: Optional[str],
-) -> int:
-    from datetime import datetime, timezone
-
-    from .server.global_access import identity as identity_mod
-    from .server.global_access.api_client import GlobalApiClient, GlobalApiError
-
-    if not base_url:
-        print("ERROR: enroll requires --base-url <url>", file=sys.stderr)
-        return 2
-    if not slug:
-        print("ERROR: enroll requires --slug <slug>", file=sys.stderr)
-        return 2
-    if not display_name:
-        print("ERROR: enroll requires --display-name <name>", file=sys.stderr)
-        return 2
-
-    state_dir = _global_state_dir()
-    if not identity_mod.identity_exists(state_dir):
-        print(
-            "ERROR: no deployment identity yet; run 'serverrf --global init-identity' first",
-            file=sys.stderr,
-        )
-        return 2
-
-    state = identity_mod.load_state(state_dir)
-    if state.enrolled:
-        print(
-            f"ERROR: this deployment is already enrolled (deployment_id={state.deployment_id}); "
-            "refusing to silently re-enroll. Delete deployment.json manually first if you "
-            "really intend to re-enroll.",
-            file=sys.stderr,
-        )
-        return 2
-
-    enrollment_token = token or ""
-    if token_stdin:
-        enrollment_token = sys.stdin.read().strip()
-    if not enrollment_token:
-        enrollment_token = getpass.getpass("RemoteRF Global enrollment token (won't echo): ").strip()
-    if not enrollment_token:
-        print("ERROR: missing enrollment token", file=sys.stderr)
-        return 2
-
-    public_key_b64 = identity_mod.public_key_b64(state_dir)
-    client = GlobalApiClient(base_url)
-    try:
-        result = client.enroll(
-            enrollment_token=enrollment_token,
-            slug=slug,
-            display_name=display_name,
-            public_key_b64=public_key_b64,
-            protocol_version=identity_mod.PROTOCOL_VERSION,
-        )
-    except GlobalApiError as exc:
-        print(f"ERROR: enrollment failed: {exc}", file=sys.stderr)
-        return 2
-    finally:
-        enrollment_token = None  # never persisted, never logged
-
-    new_state = identity_mod.DeploymentState(
-        deployment_id=result.deployment_id,
-        slug=result.slug,
-        display_name=display_name,
-        protocol_version=result.supported_protocol_version,
-        enrolled_at=datetime.now(timezone.utc).isoformat(),
-        issuer=result.issuer,
-        api_base_url=result.api_base_url,
-    )
-    identity_mod.save_state(state_dir, new_state)
-    print(f"Enrolled. deployment_id={result.deployment_id} slug={result.slug}")
-    return 0
-
-
-def _global_status() -> int:
-    from .server.global_access import identity as identity_mod
-    from .server.global_access.config import (
-        GlobalConfigError,
-        default_global_config_path,
-        load_global_config,
-    )
-
-    enabled = (os.getenv("REMOTERF_GLOBAL_ENABLED", "false") or "").strip().lower() in (
-        "1", "true", "yes",
-    )
-    print(f"REMOTERF_GLOBAL_ENABLED: {enabled}")
-
-    state_dir = _global_state_dir()
-    if identity_mod.identity_exists(state_dir):
-        state = identity_mod.load_state(state_dir)
-        print(f"Identity: present ({state_dir})")
-        print(f"Enrolled: {state.enrolled}")
-        if state.enrolled:
-            print(f"  deployment_id: {state.deployment_id}")
-            print(f"  slug: {state.slug}")
-            print(f"  issuer: {state.issuer}")
-    else:
-        print("Identity: not yet created (run 'serverrf --global init-identity')")
-
-    try:
-        cfg = load_global_config()
-        print(f"Config: OK ({default_global_config_path()})")
-        print(f"  public_group: {cfg.public_group}")
-        print(f"  exports: {len(cfg.exports)}")
-        print(f"  route.grpc_endpoint: {cfg.route.grpc_endpoint}")
-    except GlobalConfigError as exc:
-        print(f"Config: ERROR ({exc})")
-
-    return 0
-
-
-def _global_validate_config() -> int:
-    from .server.global_access.config import (
-        GlobalConfigError,
-        default_global_config_path,
-        load_global_config,
-        validate_against_known_devices,
-    )
-    from .server.device_manager import get_all_devices
-    from .server.user_group_handler import user_group_handler
-
-    path = default_global_config_path()
-    try:
-        cfg = load_global_config(path)
-    except GlobalConfigError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    errors = validate_against_known_devices(cfg, {str(k) for k in get_all_devices().keys()})
-
-    if not user_group_handler.group_exists(group_name=cfg.public_group):
-        errors.append(
-            f"public_group {cfg.public_group!r} does not exist locally "
-            "(create it with the existing group CLI first)"
-        )
-
-    if errors:
-        print("Config INVALID:")
-        for err in errors:
-            print(f"  - {err}")
-        return 2
-
-    print(f"Config OK: {path}")
-    print(f"  {len(cfg.exports)} export(s), public_group={cfg.public_group!r}")
-    return 0
-
-
-def _global_publish_now() -> int:
-    from .server.global_access.config import GlobalConfigError, load_global_config
-    from .server.global_access.connector import GlobalConnector
-    from .server.device_manager import get_all_devices
-
-    try:
-        cfg = load_global_config()
-    except GlobalConfigError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    connector = GlobalConnector(
-        cfg=cfg,
-        state_dir=cfg.deployment_private_key_path.parent,
-        cert_dir=_certs_dir(),
-        get_known_device_ids=lambda: {str(k) for k in get_all_devices().keys()},
-    )
-    try:
-        connector.publish_now()
-    except Exception as exc:
-        print(f"ERROR: publish failed: {exc}", file=sys.stderr)
-        return 2
-
-    print("Published route + catalog + heartbeat.")
-    return 0
-
 
 # -----------------------------
 # Subprocess utils
@@ -1705,21 +1455,6 @@ def main() -> int:
     gist_token: Optional[str] = None
     gist_token_stdin = False
 
-    # RemoteRF Global commands
-    global_mode = False
-    global_init_identity = False
-    global_enroll = False
-    global_status = False
-    global_validate_config = False
-    global_publish_now = False
-    global_show_public_key = False
-
-    global_base_url: Optional[str] = None
-    global_slug: Optional[str] = None
-    global_display_name: Optional[str] = None
-    global_token: Optional[str] = None
-    global_token_stdin = False
-
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -1800,79 +1535,6 @@ def main() -> int:
             i += 2
             continue
         
-        # enter global mode
-        if tok in ("--global", "-global"):
-            global_mode = True
-            i += 1
-            continue
-
-        if global_mode and tok == "init-identity":
-            global_init_identity = True
-            i += 1
-            continue
-
-        if global_mode and tok == "enroll":
-            global_enroll = True
-            i += 1
-            continue
-
-        if global_mode and tok == "status":
-            global_status = True
-            i += 1
-            continue
-
-        if global_mode and tok == "validate-config":
-            global_validate_config = True
-            i += 1
-            continue
-
-        if global_mode and tok == "publish-now":
-            global_publish_now = True
-            i += 1
-            continue
-
-        if global_mode and tok == "show-public-key":
-            global_show_public_key = True
-            i += 1
-            continue
-
-        if global_mode and tok == "--base-url":
-            if i + 1 >= len(argv):
-                print("ERROR: missing value after --base-url <url>", file=sys.stderr)
-                return 2
-            global_base_url = argv[i + 1].strip()
-            i += 2
-            continue
-
-        if global_mode and tok == "--slug":
-            if i + 1 >= len(argv):
-                print("ERROR: missing value after --slug <slug>", file=sys.stderr)
-                return 2
-            global_slug = argv[i + 1].strip()
-            i += 2
-            continue
-
-        if global_mode and tok == "--display-name":
-            if i + 1 >= len(argv):
-                print("ERROR: missing value after --display-name <name>", file=sys.stderr)
-                return 2
-            global_display_name = argv[i + 1].strip()
-            i += 2
-            continue
-
-        if global_mode and tok == "--token":
-            if i + 1 >= len(argv):
-                print("ERROR: missing value after --token <token>", file=sys.stderr)
-                return 2
-            global_token = argv[i + 1].strip()
-            i += 2
-            continue
-
-        if global_mode and tok == "--token-stdin":
-            global_token_stdin = True
-            i += 1
-            continue
-
         # enter host mode
         if tok in ("--host", "-host"):
             host_mode = True
@@ -2131,16 +1793,12 @@ def main() -> int:
     # ----------------
     # Enforce single-mode semantics (device vs config vs cert)
     # ----------------
-    if device_mode and (config_mode or show_certs or wipe_certs or (gen_ip is not None) or global_mode):
-        print("ERROR: --device cannot be combined with config/cert/global commands. Run them separately.", file=sys.stderr)
+    if device_mode and (config_mode or show_certs or wipe_certs or (gen_ip is not None)):
+        print("ERROR: --device cannot be combined with config/cert commands. Run them separately.", file=sys.stderr)
         return 2
 
-    if host_mode and (device_mode or config_mode or show_certs or wipe_certs or (gen_ip is not None) or global_mode):
-        print("ERROR: --host cannot be combined with device/config/cert/global commands. Run them separately.", file=sys.stderr)
-        return 2
-
-    if global_mode and (device_mode or config_mode or host_mode or show_certs or wipe_certs or (gen_ip is not None)):
-        print("ERROR: --global cannot be combined with device/config/host/cert commands. Run them separately.", file=sys.stderr)
+    if host_mode and (device_mode or config_mode or show_certs or wipe_certs or (gen_ip is not None)):
+        print("ERROR: --host cannot be combined with device/config/cert commands. Run them separately.", file=sys.stderr)
         return 2
     
     if host_force and host_token_create_id is None:
@@ -2166,12 +1824,8 @@ def main() -> int:
                 print("\nCancelled.")
                 return 1
             
-    if gist_mode and (device_mode or config_mode or host_mode or show_certs or wipe_certs or (gen_ip is not None) or global_mode):
-        print("ERROR: --gist cannot be combined with device/config/host/cert/global commands. Run them separately.", file=sys.stderr)
-        return 2
-
-    if global_mode and gist_mode:
-        print("ERROR: --global cannot be combined with --gist. Run them separately.", file=sys.stderr)
+    if gist_mode and (device_mode or config_mode or host_mode or show_certs or wipe_certs or (gen_ip is not None)):
+        print("ERROR: --gist cannot be combined with device/config/host/cert commands. Run them separately.", file=sys.stderr)
         return 2
     
     # ----------------
@@ -2205,53 +1859,6 @@ def main() -> int:
             tok = getpass.getpass("GitHub token (won't echo): ").strip()
 
         return int(_gist_set(gist_id=gist_id, filename=gist_filename, token=tok))
-
-    # ----------------
-    # Global mode execution
-    # ----------------
-    if global_mode:
-        actions = (
-            int(global_init_identity)
-            + int(global_enroll)
-            + int(global_status)
-            + int(global_validate_config)
-            + int(global_publish_now)
-            + int(global_show_public_key)
-        )
-        if actions == 0:
-            print_help()
-            return 2
-        if actions > 1:
-            print(
-                "ERROR: global commands are mutually exclusive. Use exactly one of: "
-                "init-identity, enroll, status, validate-config, publish-now, "
-                "show-public-key",
-                file=sys.stderr,
-            )
-            return 2
-
-        if global_init_identity:
-            return int(_global_init_identity())
-        if global_show_public_key:
-            return int(_global_show_public_key())
-        if global_status:
-            return int(_global_status())
-        if global_validate_config:
-            return int(_global_validate_config())
-        if global_publish_now:
-            return int(_global_publish_now())
-        if global_enroll:
-            return int(
-                _global_enroll(
-                    base_url=global_base_url,
-                    token=global_token,
-                    token_stdin=global_token_stdin,
-                    slug=global_slug,
-                    display_name=global_display_name,
-                )
-            )
-        print_help()
-        return 2
 
     # ----------------
     # Host mode execution

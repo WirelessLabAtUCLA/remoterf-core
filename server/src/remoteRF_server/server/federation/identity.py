@@ -15,11 +15,10 @@
 
 """
 Durable per-deployment Ed25519 identity, separate from TLS certificates,
-HostRF host tokens, Global user assertions, and local RemoteRF account
-tokens.
+HostRF host tokens, federation grants, and local RemoteRF account tokens.
 
 Files (under the caller-supplied state dir, normally
-``~/.config/remoterf/global/``):
+deployment identity directory):
 
   deployment-private.pem   0600, Ed25519 private key. NEVER printed/logged.
   deployment-public.pem    Ed25519 public key (safe to share/print).
@@ -43,10 +42,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-# This is the RemoteRF *Global* wire version, not the Dynamic v2 streaming
-# version. Global's OpenAPI and Client route resolver both identify v1 as
-# the canonical string "1".
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = "2"
 
 PRIVATE_KEY_FILENAME = "deployment-private.pem"
 PUBLIC_KEY_FILENAME = "deployment-public.pem"
@@ -146,7 +142,7 @@ def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
     p = private_key_path(state_dir)
     if not p.exists():
         raise IdentityError(
-            f"no deployment identity at {p}; run 'serverrf global init-identity' first"
+            f"no deployment identity at {p}; initialize a federation identity first"
         )
     data = p.read_bytes()
     key = serialization.load_pem_private_key(data, password=None)

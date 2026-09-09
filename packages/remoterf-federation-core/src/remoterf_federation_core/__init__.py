@@ -75,8 +75,15 @@ from .federation import (
     validate_transport_response,
     validate_typed_result,
 )
+from .permissions import (
+    HOME_PERMISSION_PROVENANCE,
+    HOME_PERMISSION_STATUSES,
+    MAX_HOME_PERMISSION_DESTINATIONS,
+    HomePermissionsError,
+    validate_home_permissions_summary,
+)
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __all__ = ["ValidationError", "canonical_json", "strict_json", "canonical_uuid",
            "validate_capabilities", "local_capabilities", "PROTOCOL_VERSION",
            "FederatedIdentity", "federated_identity", "federated_proxy_adapter",
@@ -112,3 +119,6 @@ __all__ = ["ValidationError", "canonical_json", "strict_json", "canonical_uuid",
            "validate_result_claims", "validate_typed_result",
            "parse_unverified_jwt", "parse_unverified_grant",
            "parse_unverified_result", "validate_transport_response"]
+__all__ += ["HOME_PERMISSION_PROVENANCE", "HOME_PERMISSION_STATUSES",
+            "MAX_HOME_PERMISSION_DESTINATIONS", "HomePermissionsError",
+            "validate_home_permissions_summary"]

@@ -226,6 +226,29 @@ You most likely will need to port forward, etc.
 Troubleshooting:
 Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server. Depending on the setup, you may also have ISP firewalls.
 
+## RemoteRF federation v2 Phase 1
+
+The `global-dev` branch implements the development-only Phase-1 federation
+boundary. A Server can issue and verify participant-signed
+`federated_enroll` and `permissions_read` actions under explicit bilateral
+contracts. Destination permission reads use current local membership and
+expiry state; unknown principals return signed empty membership without
+allocation, while disabled principals return a signed error.
+
+Ordinary `ACC:get_perms` remains the native permission operation. When a
+federation HOME aggregator is configured, its exact local/federation summary
+is additive in `details.home_permissions`; local output survives remote
+failure and is safe with zero devices.
+
+Phase 1 does not grant a federated principal device visibility, reservations,
+leases, sessions, RX, TX, streaming, or radio operations. The old Global-v1
+connector/catalog and relay-ingress account gate have been removed from the
+Server runtime. Production remains unchanged until a separate cutover is
+authorized.
+
+See [federated enrollment](docs/federated-enrollment-v2.md); the cross-project
+runtime boundary is documented in `remoterf-vps-global/docs/phase1-runtime.md`.
+
 ## RemoteRF Global v0 — Server Setup
 
 RemoteRF Global v0 is an **optional, external** networking proof of concept. It

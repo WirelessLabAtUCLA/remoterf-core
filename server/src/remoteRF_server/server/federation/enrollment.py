@@ -520,22 +520,17 @@ def build_server_gate_f_executor(
     perms_path=None,
     clock=None,
 ):
-    """Production/dev wiring for the sole live Gate F action handler."""
+    """Compatibility alias for the final Phase-1 Gate G executor factory."""
 
-    handler = ServerFederatedEnrollHandler(
+    from .permissions import build_server_gate_g_executor
+
+    return build_server_gate_g_executor(
         usergroups_path=usergroups_path,
         reservations_path=reservations_path,
-        perms_path=perms_path,
-        local_deployment_id=local_deployment_id,
-        display_name=display_name,
-        clock=clock,
-    )
-    return ServerFederationExecutor(
-        usergroups_path,
         local_deployment_id=local_deployment_id,
         private_key=private_key,
         signing_kid=signing_kid,
         display_name=display_name,
+        perms_path=perms_path,
         clock=clock,
-        registry=ActionRegistry({"federated_enroll": handler}),
     )
