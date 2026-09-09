@@ -70,38 +70,46 @@ def pin(path, item, now):
     )
 
 
-def active_pair(tmp_path, *, key_valid_until=10_000, contract_valid_until=1000):
+def active_pair(
+    tmp_path,
+    *,
+    key_valid_until=10_000,
+    contract_valid_until=1000,
+    home_id=HOME,
+    destination_id=DEST,
+    contract_id=CONTRACT,
+):
     from remoteRF_server.common.utils import hash_token
 
     now = [100]
     home_key, dest_key = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
-    home_material = material(HOME, home_key, key_valid_until)
-    dest_material = material(DEST, dest_key, key_valid_until)
+    home_material = material(home_id, home_key, key_valid_until)
+    dest_material = material(destination_id, dest_key, key_valid_until)
     home_db, dest_db = tmp_path / "home-usergroups.db", tmp_path / "dest-usergroups.db"
     for path in (home_db, dest_db):
         pin(path, home_material, now)
         pin(path, dest_material, now)
     home_store = ContractStore(
         home_db,
-        local_deployment_id=HOME,
+        local_deployment_id=home_id,
         private_key=home_key,
         signing_kid=home_material["kid"],
         clock=lambda: now[0],
     )
     dest_store = ContractStore(
         dest_db,
-        local_deployment_id=DEST,
+        local_deployment_id=destination_id,
         private_key=dest_key,
         signing_kid=dest_material["kid"],
         clock=lambda: now[0],
     )
     terms = build_contract_terms(
-        contract_id=CONTRACT,
+        contract_id=contract_id,
         version=1,
-        participant_1=HOME,
+        participant_1=home_id,
         participant_1_kid=home_material["kid"],
         participant_1_sha256=home_material["public_key_sha256"],
-        participant_2=DEST,
+        participant_2=destination_id,
         participant_2_kid=dest_material["kid"],
         participant_2_sha256=dest_material["public_key_sha256"],
         valid_from=50,
@@ -109,13 +117,13 @@ def active_pair(tmp_path, *, key_valid_until=10_000, contract_valid_until=1000):
         allowed_capabilities=["FEDERATED_ENROLL", "PERMISSIONS_READ"],
     )
     home_store.propose(terms, actor_admin_ref="home")
-    dest_store.import_bundle(home_store.export_bundle(CONTRACT, 1))
-    dest_store.accept(CONTRACT, 1, actor_admin_ref="dest")
-    home_store.import_bundle(dest_store.export_bundle(CONTRACT, 1))
-    home_store.activate(CONTRACT, 1, actor_admin_ref="home")
-    dest_store.import_bundle(home_store.export_bundle(CONTRACT, 1))
-    dest_store.activate(CONTRACT, 1, actor_admin_ref="dest")
-    home_store.import_bundle(dest_store.export_bundle(CONTRACT, 1))
+    dest_store.import_bundle(home_store.export_bundle(contract_id, 1))
+    dest_store.accept(contract_id, 1, actor_admin_ref="dest")
+    home_store.import_bundle(dest_store.export_bundle(contract_id, 1))
+    home_store.activate(contract_id, 1, actor_admin_ref="home")
+    dest_store.import_bundle(home_store.export_bundle(contract_id, 1))
+    dest_store.activate(contract_id, 1, actor_admin_ref="dest")
+    home_store.import_bundle(dest_store.export_bundle(contract_id, 1))
 
     reservations = tmp_path / "reservations.db"
     password_salt, password_hash = hash_token("native-password")
@@ -132,17 +140,20 @@ def active_pair(tmp_path, *, key_valid_until=10_000, contract_valid_until=1000):
                 "local_password",
             ),
         )
-    subjects = initialize_native_subjects(reservations, HOME)
+    subjects = initialize_native_subjects(reservations, home_id)
     issuer = ServerHomeGrantIssuer(
         reservations_path=reservations,
         usergroups_path=home_db,
-        local_deployment_id=HOME,
+        local_deployment_id=home_id,
         private_key=home_key,
         signing_kid=home_material["kid"],
         clock=lambda: now[0],
     )
     return {
         "now": now,
+        "home_id": home_id,
+        "destination_id": destination_id,
+        "contract_id": contract_id,
         "issuer": issuer,
         "home_db": home_db,
         "dest_db": dest_db,
@@ -181,8 +192,8 @@ def ok_handler(destination):
 def issue(pair, action="permissions_read"):
     return pair["issuer"].issue(
         local_account_id=1,
-        destination_deployment_id=DEST,
-        contract_id=CONTRACT,
+        destination_deployment_id=pair["destination_id"],
+        contract_id=pair["contract_id"],
         contract_version=1,
         action=action,
         **({"code_name": "future-only"} if action == "federated_enroll" else {}),
@@ -192,7 +203,7 @@ def issue(pair, action="permissions_read"):
 def executor(pair, registry=None):
     return ServerFederationExecutor(
         pair["dest_db"],
-        local_deployment_id=DEST,
+        local_deployment_id=pair["destination_id"],
         private_key=pair["dest_key"],
         signing_kid=pair["dest_material"]["kid"],
         display_name="Destination",

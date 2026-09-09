@@ -3,6 +3,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
+import pytest
 from remoterf_federation_core import parse_federation_invitation
 from remoteRF_server.server.federation.destination import ActionRegistry
 from remoteRF_server.server.federation.enrollment import (
@@ -15,10 +16,24 @@ from remoteRF_server.server.federation.migrations import check_gate_f_ready
 from test_gate_e_federation import CONTRACT, DEST, HOME, active_pair, executor
 
 
-def _gate_f(tmp_path, uses=1):
-    pair = active_pair(tmp_path)
+def _gate_f(
+    tmp_path,
+    uses=1,
+    *,
+    home_id=HOME,
+    destination_id=DEST,
+    contract_id=CONTRACT,
+):
+    pair = active_pair(
+        tmp_path,
+        home_id=home_id,
+        destination_id=destination_id,
+        contract_id=contract_id,
+    )
     store = ServerEnrollmentCodeStore(
-        pair["dest_db"], local_deployment_id=DEST, clock=lambda: pair["now"][0]
+        pair["dest_db"],
+        local_deployment_id=destination_id,
+        clock=lambda: pair["now"][0],
     )
     with sqlite3.connect(pair["dest_db"]) as conn:
         conn.execute(
@@ -30,9 +45,9 @@ def _gate_f(tmp_path, uses=1):
         group_id=7,
         uses=uses,
         duration_sec=300,
-        contract_id=CONTRACT,
+        contract_id=contract_id,
         contract_version=1,
-        allowed_issuer_deployment_id=HOME,
+        allowed_issuer_deployment_id=home_id,
     )
     dest_reservations = tmp_path / "dest-reservations.db"
     with sqlite3.connect(dest_reservations) as conn:
@@ -40,7 +55,7 @@ def _gate_f(tmp_path, uses=1):
     handler = ServerFederatedEnrollHandler(
         usergroups_path=pair["dest_db"],
         reservations_path=dest_reservations,
-        local_deployment_id=DEST,
+        local_deployment_id=destination_id,
         display_name="Destination",
         clock=lambda: pair["now"][0],
     )
@@ -53,8 +68,8 @@ def _issue(pair, invitation, request_id=None, code_name=None):
     value = parse_federation_invitation(invitation).value
     return pair["issuer"].issue(
         local_account_id=1,
-        destination_deployment_id=DEST,
-        contract_id=CONTRACT,
+        destination_deployment_id=pair["destination_id"],
+        contract_id=pair["contract_id"],
         contract_version=1,
         action="federated_enroll",
         request_id=request_id,
@@ -66,6 +81,41 @@ def _result(pair, destination, issued):
     response = destination.execute("2", issued.grant, issued.request.json)
     assert response["error"] is None
     return pair["issuer"].verify_result(response["signed_result"], issued)
+
+
+@pytest.mark.parametrize(
+    ("home_id", "destination_id", "contract_id"),
+    (
+        (
+            "55555555-5555-4555-8555-555555555555",  # synthetic UT home
+            "66666666-6666-4666-8666-666666666666",  # synthetic UCLA destination
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        ),
+        (
+            "66666666-6666-4666-8666-666666666666",  # synthetic UCLA home
+            "55555555-5555-4555-8555-555555555555",  # synthetic UT destination
+            "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        ),
+    ),
+)
+def test_server_to_server_enrollment_is_identity_symmetric(
+    tmp_path, home_id, destination_id, contract_id
+):
+    pair, invitation, destination = _gate_f(
+        tmp_path,
+        home_id=home_id,
+        destination_id=destination_id,
+        contract_id=contract_id,
+    )
+    completed = _result(pair, destination, _issue(pair, invitation))
+    assert completed["status"] == "ok"
+    assert completed["deployment_id"] == destination_id
+    assert completed["contract_id"] == contract_id
+    assert completed["membership_present"] is True
+    with sqlite3.connect(pair["dest_db"]) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM EnrollmentRedemptions").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM FederatedPrincipals").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM UsersLookup").fetchone() == (1,)
 
 
 def test_server_federated_enrollment_receipt_retry_tracks_current_membership(tmp_path):
@@ -83,7 +133,9 @@ def test_server_federated_enrollment_receipt_retry_tracks_current_membership(tmp
         assert conn.execute("SELECT COUNT(*) FROM EnrollmentCodes").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM UsersLookup").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM FederatedPrincipals").fetchone()[0] == 1
-    check_gate_f_ready(pair["dest_db"], local_deployment_id=DEST)
+    check_gate_f_ready(
+        pair["dest_db"], local_deployment_id=pair["destination_id"]
+    )
     # Even an owner edit that whitelists a real-looking device does not turn
     # Gate F membership into a password, session, or resource capability.
     with sqlite3.connect(pair["dest_db"]) as conn:
@@ -170,7 +222,7 @@ def test_server_post_commit_sign_failure_recovers_from_receipt_after_restart(
     restarted_handler = ServerFederatedEnrollHandler(
         usergroups_path=pair["dest_db"],
         reservations_path=tmp_path / "dest-reservations.db",
-        local_deployment_id=DEST,
+        local_deployment_id=pair["destination_id"],
         display_name="Destination",
         clock=lambda: pair["now"][0],
     )
@@ -220,15 +272,15 @@ def test_server_one_use_code_concurrency_allows_exactly_one_subject(tmp_path):
             "VALUES ('second','second@example.test',?,?,'local_password')",
             (salt, digest),
         )
-    subjects = initialize_native_subjects(pair["reservations"], HOME)
+    subjects = initialize_native_subjects(pair["reservations"], pair["home_id"])
     grants = []
     code = parse_federation_invitation(invitation).value["code_name"]
     for account_id in (1, 2):
         grants.append(
             pair["issuer"].issue(
                 local_account_id=account_id,
-                destination_deployment_id=DEST,
-                contract_id=CONTRACT,
+                destination_deployment_id=pair["destination_id"],
+                contract_id=pair["contract_id"],
                 contract_version=1,
                 action="federated_enroll",
                 code_name=code,
@@ -292,7 +344,7 @@ def test_server_current_principal_and_contract_state_override_receipt(tmp_path):
         conn.execute(
             "UPDATE FederationContracts SET state='suspended' "
             "WHERE contract_id=? AND version=1",
-            (CONTRACT,),
+            (pair["contract_id"],),
         )
     suspended_retry = _issue(pair, invitation, request_id=first.claims["request_id"])
     suspended = _result(pair, destination, suspended_retry)
@@ -363,7 +415,7 @@ def test_server_code_restrictions_are_exact_and_raw_code_is_not_receipted(tmp_pa
                 "UPDATE EnrollmentCodes SET federation_contract_id=?,"
                 "federation_contract_version=1,allowed_issuer_deployment_id=? "
                 "WHERE code_name=?",
-                (CONTRACT, HOME, code),
+                (pair["contract_id"], pair["home_id"], code),
             )
             assert conn.execute(
                 "SELECT uses FROM EnrollmentCodes WHERE code_name=?", (code,)
