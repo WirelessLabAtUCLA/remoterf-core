@@ -16,6 +16,7 @@ from remoteRF_server.server.federation.migrations import SchemaNotReady
 from remoteRF_server.server.federation.identity import (
     DeploymentState,
     init_identity,
+    load_private_key,
     save_state,
 )
 from remoteRF_server.server.federation.runtime import (
@@ -132,6 +133,19 @@ class NativeSubjectTests(GateCFixture):
 
 
 class StockFederationRuntimeTests(GateCFixture):
+    def test_stock_runtime_rejects_replaced_private_identity_key(self):
+        identity_dir = self.root / "identity"
+        init_identity(identity_dir)
+        replacement_dir = self.root / "replacement"
+        init_identity(replacement_dir)
+        (identity_dir / "deployment-private.pem").write_bytes(
+            (replacement_dir / "deployment-private.pem").read_bytes()
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "private/public key binding mismatch"
+        ):
+            load_private_key(identity_dir)
+
     def test_explicit_config_builds_complete_server_federation_runtime(self):
         identity_dir = self.root / "identity"
         init_identity(identity_dir)

@@ -144,10 +144,33 @@ def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
         raise IdentityError(
             f"no deployment identity at {p}; initialize a federation identity first"
         )
-    data = p.read_bytes()
-    key = serialization.load_pem_private_key(data, password=None)
+    try:
+        key = serialization.load_pem_private_key(p.read_bytes(), password=None)
+    except (OSError, TypeError, ValueError) as exc:
+        raise IdentityError(f"could not load deployment private key {p}") from exc
     if not isinstance(key, Ed25519PrivateKey):
         raise IdentityError(f"{p} does not contain an Ed25519 private key")
+    public_path = public_key_path(state_dir)
+    if not public_path.exists():
+        raise IdentityError(
+            f"no deployment public key at {public_path}; identity is incomplete"
+        )
+    try:
+        public_key = serialization.load_pem_public_key(public_path.read_bytes())
+    except (OSError, TypeError, ValueError) as exc:
+        raise IdentityError(f"could not load deployment public key {public_path}") from exc
+    if not isinstance(public_key, Ed25519PublicKey):
+        raise IdentityError(f"{public_path} does not contain an Ed25519 public key")
+    derived = key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    recorded = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    if derived != recorded:
+        raise IdentityError("deployment private/public key binding mismatch")
     return key
 
 
