@@ -14,9 +14,11 @@ from remoterf_federation_core import (
     ContractError,
     FederationError,
     build_action_request,
+    build_federation_invitation,
     build_grant_claims,
     build_result_claims,
     parse_canonical_action_request,
+    parse_federation_invitation,
     parse_unverified_grant,
     validate_broker_request_header,
     validate_contract_event_header,
@@ -33,6 +35,26 @@ DEST = "22222222-2222-4222-8222-222222222222"
 SUBJECT = "33333333-3333-4333-8333-333333333333"
 CONTRACT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 TERMS = "b" * 64
+
+
+def test_federation_invitation_is_strict_canonical_and_opaque():
+    invitation = build_federation_invitation(
+        destination_deployment_id=DEST,
+        contract_id=CONTRACT,
+        contract_version=2,
+        code_name="high-entropy-secret",
+    )
+    assert invitation.text.startswith("rrf2.")
+    assert parse_federation_invitation(invitation.text) == invitation
+    with pytest.raises((FederationError, ValueError)):
+        parse_federation_invitation(invitation.text + "=")
+    payload = invitation.text[5:]
+    padded = payload + "=" * (-len(payload) % 4)
+    value = json.loads(base64.urlsafe_b64decode(padded))
+    value["extra"] = True
+    altered = base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+    with pytest.raises((FederationError, ValueError)):
+        parse_federation_invitation("rrf2." + altered)
 
 
 def grant_fixture(action="permissions_read"):

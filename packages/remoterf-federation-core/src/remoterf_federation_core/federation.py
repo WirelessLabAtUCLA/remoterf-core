@@ -23,7 +23,13 @@ from .contracts import (
     validate_kid,
     validate_sha256,
 )
-from .schemas import PROTOCOL_VERSION, canonical_json, canonical_uuid, strict_json
+from .schemas import (
+    PROTOCOL_VERSION,
+    ValidationError,
+    canonical_json,
+    canonical_uuid,
+    strict_json,
+)
 
 FEDERATION_GRANT_TYP = "remoterf-federation-grant+jwt"
 FEDERATION_GRANT_TOKEN_TYPE = "federation_grant"
@@ -39,6 +45,16 @@ MAX_RESULT_SECONDS = 60
 MAX_GROUPS = 256
 MAX_PROTOCOL_INTEGER = (1 << 63) - 1
 MAX_RESULT_SNAPSHOT_AGE_SECONDS = 60
+FEDERATION_INVITATION_PREFIX = "rrf2."
+MAX_FEDERATION_INVITATION_BYTES = 1024
+INVITATION_FIELDS = frozenset(
+    {
+        "destination_deployment_id",
+        "contract_id",
+        "contract_version",
+        "code_name",
+    }
+)
 
 ACTION_CAPABILITIES = {
     "federated_enroll": "FEDERATED_ENROLL",
@@ -57,7 +73,7 @@ class ActionRetryPolicy(Enum):
 
 DEFAULT_ACTION_RETRY_POLICIES = MappingProxyType(
     {
-        "federated_enroll": ActionRetryPolicy.NO_RETRY,
+        "federated_enroll": ActionRetryPolicy.RECEIPT_IDEMPOTENT,
         "permissions_read": ActionRetryPolicy.READ_ONLY,
     }
 )
@@ -158,6 +174,81 @@ class CanonicalActionRequest:
     value: dict
     json: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class FederationInvitation:
+    """Strict untrusted routing wrapper around a destination-owned code."""
+
+    value: dict
+    json: str
+    text: str
+
+
+def federation_invitation(value: object) -> FederationInvitation:
+    if type(value) is not dict or set(value) != INVITATION_FIELDS:
+        raise FederationError("invalid_invitation_fields")
+    normalized = {
+        "destination_deployment_id": canonical_uuid(
+            value["destination_deployment_id"]
+        ),
+        "contract_id": canonical_uuid(value["contract_id"]),
+        "contract_version": _integer(
+            value["contract_version"],
+            "invalid_contract_version",
+            positive=True,
+        ),
+        "code_name": _printable(value["code_name"], "invalid_code_name", 256),
+    }
+    encoded_json = canonical_json(normalized)
+    payload = base64.urlsafe_b64encode(encoded_json.encode("utf-8")).rstrip(b"=")
+    text = FEDERATION_INVITATION_PREFIX + payload.decode("ascii")
+    if len(text.encode("ascii")) > MAX_FEDERATION_INVITATION_BYTES:
+        raise FederationError("invitation_too_large")
+    return FederationInvitation(normalized, encoded_json, text)
+
+
+def build_federation_invitation(
+    *,
+    destination_deployment_id: str,
+    contract_id: str,
+    contract_version: int,
+    code_name: str,
+) -> FederationInvitation:
+    return federation_invitation(
+        {
+            "destination_deployment_id": destination_deployment_id,
+            "contract_id": contract_id,
+            "contract_version": contract_version,
+            "code_name": code_name,
+        }
+    )
+
+
+def parse_federation_invitation(value: object) -> FederationInvitation:
+    if (
+        type(value) is not str
+        or not value.startswith(FEDERATION_INVITATION_PREFIX)
+        or len(value.encode("utf-8")) > MAX_FEDERATION_INVITATION_BYTES
+    ):
+        raise FederationError("invalid_invitation")
+    segment = value[len(FEDERATION_INVITATION_PREFIX) :]
+    if not segment or re.fullmatch(r"[A-Za-z0-9_-]+", segment) is None:
+        raise FederationError("invalid_invitation_encoding")
+    try:
+        raw = base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+    except (ValueError, binascii.Error):
+        raise FederationError("invalid_invitation_encoding") from None
+    if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != segment:
+        raise FederationError("invalid_invitation_encoding")
+    try:
+        parsed = strict_json(raw, max_bytes=768)
+        invitation = federation_invitation(parsed)
+    except (ValidationError, ValueError, UnicodeError):
+        raise FederationError("invalid_invitation") from None
+    if invitation.text != value:
+        raise FederationError("invitation_not_canonical")
+    return invitation
 
 
 def _integer(value: object, code: str, *, positive: bool = False) -> int:
