@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 from remoterf_federation_core import parse_federation_invitation
 from remoteRF_server.server.federation.destination import ActionRegistry
@@ -83,6 +84,37 @@ def test_server_federated_enrollment_receipt_retry_tracks_current_membership(tmp
         assert conn.execute("SELECT COUNT(*) FROM UsersLookup").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM FederatedPrincipals").fetchone()[0] == 1
     check_gate_f_ready(pair["dest_db"], local_deployment_id=DEST)
+    # Even an owner edit that whitelists a real-looking device does not turn
+    # Gate F membership into a password, session, or resource capability.
+    with sqlite3.connect(pair["dest_db"]) as conn:
+        conn.execute("UPDATE UserGroups SET devices_whitelist='[7]' WHERE group_id=7")
+    with sqlite3.connect(tmp_path / "dest-reservations.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS Reservations"
+            "(device_id INTEGER NOT NULL,end_time TIMESTAMP NOT NULL)"
+        )
+        proxy_name = conn.execute(
+            "SELECT username FROM Accounts WHERE acc_id=?", (receipt[0],)
+        ).fetchone()[0]
+    from remoteRF_server.common.utils import map_arg
+    from remoteRF_server.server.reservation import ReservationHandler
+
+    resources = object.__new__(ReservationHandler)
+    resources.filepath = tmp_path / "dest-reservations.db"
+    resources.lock = threading.RLock()
+    resources.federation_enroller = None
+    assert "UE" in resources.login_user(proxy_name, "any-password")
+    assert "ace" in resources.handle_call(
+        function_name="get_dev",
+        args={"un": map_arg(proxy_name), "pw": map_arg("any-password")},
+    )
+    assert "ace" in resources.reserve_device(
+        proxy_name,
+        7,
+        datetime.now() + timedelta(minutes=1),
+        datetime.now() + timedelta(minutes=5),
+        is_server=True,
+    )
 
     retry = _issue(pair, invitation, request_id=first.claims["request_id"])
     retried = _result(pair, destination, retry)
