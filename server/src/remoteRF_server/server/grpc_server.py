@@ -155,7 +155,9 @@ load_dotenv(dotenv_path)
 # Isolated connector/catalog mode (optional and disabled by default).
 # ---------------------------------------------------------------------
 
-_RELAY_GATED_FUNCTIONS = frozenset({"ACC:login", "ACC:create_user"})
+_RELAY_GATED_FUNCTIONS = frozenset(
+    {"ACC:login", "ACC:create_user", "ACC:set_enroll"}
+)
 
 
 def _global_enabled() -> bool:
@@ -344,6 +346,7 @@ def start_server_runtime(
     run_reservation_updates: bool = True,
     publish_status: bool = True,
     federation_executor: Any = None,
+    home_federation_enroller: Any = None,
 ) -> ServerRuntime:
     bind_host = str(bind_host or local_ip)
     grpc_port = int(local_port if grpc_port is None else grpc_port)
@@ -368,6 +371,7 @@ def start_server_runtime(
     ]
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
+    reservation_handler.federation_enroller = home_federation_enroller
     from .deployment.capabilities import register_capabilities
     from .federation.destination import register_grpc_federation
     register_capabilities(server)

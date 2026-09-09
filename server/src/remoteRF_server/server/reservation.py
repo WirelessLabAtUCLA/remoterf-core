@@ -59,6 +59,7 @@ def _parse_reservation_datetime(value) -> datetime:
 
 class ReservationHandler:
     def __init__(self):
+        self.federation_enroller = None
         self.filepath = get_db_dir() / "reservations.db"
         # self.filepath = Path(__file__).resolve().parent.parent/'db'/'reservations.db'
         
@@ -205,10 +206,41 @@ class ReservationHandler:
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     code_name = unmap_arg(args['ec'])
                     acc_id = self.get_uid(username)
+                    if code_name.startswith("rrf2."):
+                        if self.federation_enroller is None:
+                            return {"ace": map_arg("Federated enrollment is unavailable.")}
+                        from remoterf_federation_core import (
+                            FederationError,
+                            OwnerSignedFailure,
+                            TransportFailure,
+                            canonical_json,
+                        )
+
+                        try:
+                            result = self.federation_enroller.enroll(
+                                local_account_id=acc_id,
+                                enrollment_input=code_name,
+                            )
+                        except OwnerSignedFailure as exc:
+                            return {
+                                "UE": map_arg(exc.result["error_code"]),
+                                "federation_provenance": map_arg("destination"),
+                            }
+                        except TransportFailure as exc:
+                            return {
+                                "ace": map_arg(exc.code),
+                                "federation_provenance": map_arg("transport"),
+                            }
+                        except FederationError:
+                            return {"UE": map_arg("Invalid federation invitation.")}
+                        return {
+                            "UC": map_arg("Federated enrollment confirmed."),
+                            "federation": map_arg(canonical_json(result)),
+                        }
                     if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
-                        return {'UC': map_arg(f'Enrolled {username} with code {code_name}')}
+                        return {'UC': map_arg(f'Enrolled {username}.')}
                     else:
-                        return {'UE': map_arg(f'Failed to enroll {username} with code {code_name}. Invalid or expired code.')}
+                        return {'UE': map_arg(f'Failed to enroll {username}. Invalid or expired code.')}
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
             return {"ace": map_arg(f"No matching server function to call: {function_name}")}

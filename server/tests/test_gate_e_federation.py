@@ -236,7 +236,9 @@ def test_server_missing_runtime_handler_fails_closed_and_consumes(tmp_path):
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-    assert "EnrollmentRedemptions" not in tables
+    # Gate F installs the receipt table as part of destination readiness even
+    # when no runtime action handler is registered.
+    assert "EnrollmentRedemptions" in tables
 
 
 def test_server_request_substitution_and_cross_token_fail_without_jti(tmp_path):
@@ -432,7 +434,9 @@ def test_server_state_changing_retry_requires_application_idempotency(tmp_path):
             action="federated_enroll",
             code_name="future-only",
         )
-    assert len(attempts) == 1
+    # Gate F makes federated enrollment receipt-idempotent, so ambiguous
+    # transport failures receive the single policy retry.
+    assert len(attempts) == 2
 
 
 def test_server_retry_policy_is_typed_and_integration_controlled(tmp_path):

@@ -24,7 +24,7 @@ from functools import wraps
 from typing import Optional, Tuple, List
 
 from ..common.utils import *
-from .federation.migrations import migrate_usergroups_schema
+from .federation.migrations import migrate_gate_f_usergroups_schema
 
 import os
 import sys
@@ -88,7 +88,7 @@ class UserGroupHandler:
         );
         ''')
 
-        migrate_usergroups_schema(self.db)
+        migrate_gate_f_usergroups_schema(self.db)
         
         self.cursor.close()
         self.db.commit()
@@ -563,7 +563,10 @@ class UserGroupHandler:
     def get_all_enrollment_codes(self) -> list[dict]:
         try:
             self.cursor.execute(
-                "SELECT code_id, code_name, group_id, uses, duration_sec FROM EnrollmentCodes"
+                "SELECT code_id, code_name, group_id, uses, duration_sec, "
+                "federation_contract_id, federation_contract_version, "
+                "allowed_issuer_deployment_id, federation_expires_at "
+                "FROM EnrollmentCodes"
             )
             rows = self.cursor.fetchall() or []
 
@@ -573,10 +576,16 @@ class UserGroupHandler:
                     out.append(
                         {
                             "code_id": int(r[0]),
-                            "code_name": str(r[1]),
+                            "code_name": (
+                                "[federated-redacted]" if r[5] is not None else str(r[1])
+                            ),
                             "group_id": int(r[2]),
                             "uses": int(r[3]),
                             "duration_sec": int(r[4]),
+                            "federation_contract_id": r[5],
+                            "federation_contract_version": r[6],
+                            "allowed_issuer_deployment_id": r[7],
+                            "federation_expires_at": r[8],
                         }
                     )
                 except Exception:
@@ -597,7 +606,9 @@ class UserGroupHandler:
                 return False
 
             self.cursor.execute(
-                "SELECT uses FROM EnrollmentCodes WHERE code_name = ? LIMIT 1",
+                "SELECT uses, federation_contract_id, federation_contract_version, "
+                "allowed_issuer_deployment_id FROM EnrollmentCodes "
+                "WHERE code_name = ? LIMIT 1",
                 (code_name,),
             )
             row = self.cursor.fetchone()
@@ -608,8 +619,7 @@ class UserGroupHandler:
                 uses_left = int(row[0])
             except Exception:
                 return False
-
-            return uses_left > 0
+            return uses_left > 0 and all(value is None for value in row[1:])
         except Exception:
             return False
     
@@ -624,7 +634,9 @@ class UserGroupHandler:
 
             # look up code + ensure it exists and has remaining uses
             self.cursor.execute(
-                "SELECT group_id, uses FROM EnrollmentCodes WHERE code_name = ? LIMIT 1",
+                "SELECT group_id, uses, federation_contract_id, "
+                "federation_contract_version, allowed_issuer_deployment_id "
+                "FROM EnrollmentCodes WHERE code_name = ? LIMIT 1",
                 (code_name,),
             )
             row = self.cursor.fetchone()
@@ -633,7 +645,11 @@ class UserGroupHandler:
 
             group_id = int(row[0])
             uses_left = int(row[1])
-            if group_id < 0 or uses_left <= 0:
+            if (
+                group_id < 0
+                or uses_left <= 0
+                or any(value is not None for value in row[2:])
+            ):
                 return False
 
             # ensure group exists
@@ -1058,7 +1074,7 @@ class UserGroupHandler:
             self.cursor.execute("""
                 SELECT code_name, duration_sec, created_at
                 FROM EnrollmentCodes
-                WHERE duration_sec > 0
+                WHERE duration_sec > 0 AND federation_contract_id IS NULL
             """)
             for code_name, duration_sec, created_at in (self.cursor.fetchall() or []):
                 code = str(code_name).strip() if code_name is not None else ""

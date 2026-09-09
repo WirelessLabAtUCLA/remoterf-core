@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -37,6 +38,109 @@ class FederatedPrincipal:
     last_seen_at: int | None
     disabled_at: int | None
     display_metadata: dict[str, str]
+
+
+@dataclass(frozen=True)
+class PreparedFederatedAccount:
+    local_account_id: int
+    username: str
+
+
+def prepare_federated_account(
+    reservations_path: str | Path,
+    *,
+    issuer_deployment_id: str,
+    remote_subject_id: str,
+    perms_path: str | Path | None = None,
+    now: int | None = None,
+) -> PreparedFederatedAccount:
+    """Idempotently prepare only the harmless cross-DB proxy and Normal role."""
+
+    identity = federated_identity(issuer_deployment_id, remote_subject_id)
+    username, email = federated_proxy_adapter(
+        identity.issuer_deployment_id, identity.remote_subject_id
+    )
+    observed = int(time.time() if now is None else now)
+    reservations_path = Path(reservations_path)
+    from .migrations import migrate_reservations_schema
+
+    with sqlite3.connect(reservations_path, timeout=10.0) as conn:
+        configure_connection(conn)
+        migrate_reservations_schema(conn)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT b.local_account_id,a.username,a.email,a.pass_salt,a.pass_hash,"
+            "a.auth_type FROM FederatedAccountBindings b JOIN Accounts a "
+            "ON a.acc_id=b.local_account_id WHERE b.issuer_deployment_id=? "
+            "AND b.remote_subject_id=?",
+            (identity.issuer_deployment_id, identity.remote_subject_id),
+        ).fetchone()
+        if row is None:
+            if conn.execute(
+                "SELECT 1 FROM Accounts WHERE username=? OR email=? LIMIT 1",
+                (username, email),
+            ).fetchone():
+                raise ValueError("federated proxy adapter collision")
+            conn.execute(
+                "INSERT INTO Accounts(username,email,pass_salt,pass_hash,created_at,auth_type) "
+                "VALUES (?,?,?,?,?,'federated')",
+                (
+                    username,
+                    email,
+                    FEDERATED_PASSWORD_SALT,
+                    FEDERATED_PASSWORD_HASH,
+                    datetime.now(),
+                ),
+            )
+            account_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.execute(
+                "INSERT INTO FederatedAccountBindings"
+                "(issuer_deployment_id,remote_subject_id,local_account_id,created_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    identity.issuer_deployment_id,
+                    identity.remote_subject_id,
+                    account_id,
+                    observed,
+                ),
+            )
+        else:
+            expected = (
+                username,
+                email,
+                FEDERATED_PASSWORD_SALT,
+                FEDERATED_PASSWORD_HASH,
+                "federated",
+            )
+            if tuple(row[1:]) != expected:
+                raise ValueError("federated account binding is incoherent")
+            account_id = int(row[0])
+
+    role_path = Path(perms_path) if perms_path is not None else reservations_path.with_name("perms.db")
+    with sqlite3.connect(role_path, timeout=10.0) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS Users (
+              UserID INTEGER PRIMARY KEY AUTOINCREMENT, Username TEXT NOT NULL UNIQUE);
+            CREATE TABLE IF NOT EXISTS PowerUsers (
+              UserID INTEGER PRIMARY KEY AUTOINCREMENT, Username TEXT NOT NULL UNIQUE,
+              MaxReservations INTEGER NOT NULL, MaxReservationTimeSec INTEGER NOT NULL,
+              DevicesAllowed TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS Admins (
+              AdminID INTEGER PRIMARY KEY AUTOINCREMENT, Username TEXT NOT NULL UNIQUE);
+            """
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            "SELECT 1 FROM Users WHERE Username=? UNION ALL "
+            "SELECT 1 FROM PowerUsers WHERE Username=? UNION ALL "
+            "SELECT 1 FROM Admins WHERE Username=? LIMIT 1",
+            (username, username, username),
+        ).fetchone()
+        if exists is None:
+            conn.execute("INSERT INTO Users(Username) VALUES (?)", (username,))
+    return PreparedFederatedAccount(account_id, username)
 
 
 class FederatedPrincipalStore:

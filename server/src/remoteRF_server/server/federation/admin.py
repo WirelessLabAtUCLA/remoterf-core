@@ -13,6 +13,7 @@ from remoterf_federation_core import ContractError, canonical_json, strict_json
 
 from ..global_access import identity
 from .contracts import ContractStore
+from .enrollment import ServerEnrollmentCodeStore
 from .trust import TrustedKeyStore
 
 
@@ -54,7 +55,7 @@ def _emit(value) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="remoterf-federation-admin",
-        description="Local-only Gate D trust and bilateral contract administration.",
+        description="Local-only federation trust, contracts, and enrollment invitations.",
     )
     parser.add_argument("--db", required=True, help="Path to usergroups.db")
     parser.add_argument("--identity-dir", help="Deployment identity directory")
@@ -107,10 +108,34 @@ def _build_parser() -> argparse.ArgumentParser:
         command.add_argument("--admin-ref", required=True)
         if name in {"suspend", "revoke"}:
             command.add_argument("--reason-code")
+
+    enrollment = groups.add_parser("enrollment")
+    enrollment_commands = enrollment.add_subparsers(dest="command", required=True)
+    create = enrollment_commands.add_parser("create")
+    create.add_argument("--group-id", required=True, type=int)
+    create.add_argument("--uses", required=True, type=int)
+    create.add_argument("--duration", required=True, type=int)
+    create.add_argument("--federation-contract", required=True)
+    create.add_argument("--contract-version", required=True, type=int)
+    create.add_argument("--allowed-issuer", required=True)
     return parser
 
 
 def _run(args) -> None:
+    if args.group == "enrollment":
+        deployment_id, _, _ = _identity_values(args)
+        invitation = ServerEnrollmentCodeStore(
+            args.db, local_deployment_id=deployment_id
+        ).create_federated(
+            group_id=args.group_id,
+            uses=args.uses,
+            duration_sec=args.duration,
+            contract_id=args.federation_contract,
+            contract_version=args.contract_version,
+            allowed_issuer_deployment_id=args.allowed_issuer,
+        )
+        print(invitation)
+        return
     if args.group == "trust":
         if args.command == "export-identity":
             deployment_id, private_key, kid = _identity_values(args)

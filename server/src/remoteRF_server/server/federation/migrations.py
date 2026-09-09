@@ -28,6 +28,8 @@ GATE_E_MIGRATION_VERSION = 4
 GATE_E_MIGRATION_NAME = "gate_e_grant_jtis_v1"
 GATE_E1_MIGRATION_VERSION = 5
 GATE_E1_MIGRATION_NAME = "gate_e1_clock_floor_v1"
+GATE_F_MIGRATION_VERSION = 6
+GATE_F_MIGRATION_NAME = "gate_f_enrollment_receipts_v1"
 FEDERATED_PASSWORD_SALT = "!remoterf-federated-salt-v2!"
 FEDERATED_PASSWORD_HASH = "!remoterf-federated-no-password-v2!"
 
@@ -245,6 +247,85 @@ INSERT OR IGNORE INTO FederationClockState(singleton_id,max_seen_at) VALUES (1,0
 
 _GATE_E1_MIGRATION_CHECKSUM = hashlib.sha256(
     _GATE_E1_DDL.encode("utf-8")
+).hexdigest()
+
+_GATE_F_COLUMNS = (
+    ("federation_contract_id", "TEXT"),
+    ("federation_contract_version", "INTEGER"),
+    ("allowed_issuer_deployment_id", "TEXT"),
+    ("federation_expires_at", "INTEGER"),
+)
+
+_GATE_F_DDL = """
+CREATE TABLE IF NOT EXISTS EnrollmentRedemptions (
+    id TEXT PRIMARY KEY,
+    code_id INTEGER NOT NULL,
+    code_sha256 TEXT NOT NULL,
+    group_id INTEGER NOT NULL,
+    principal_id TEXT NOT NULL,
+    local_account_id INTEGER NOT NULL,
+    issuer_deployment_id TEXT NOT NULL,
+    remote_subject_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+    request_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    redeemed_at INTEGER NOT NULL,
+    membership_added INTEGER NOT NULL CHECK(membership_added IN (0,1)),
+    UNIQUE(issuer_deployment_id,remote_subject_id,request_id),
+    CHECK(length(id)=36),
+    CHECK(length(code_sha256)=64),
+    CHECK(length(principal_id)=36),
+    CHECK(length(issuer_deployment_id)=36),
+    CHECK(length(remote_subject_id)=36),
+    CHECK(length(contract_id)=36),
+    CHECK(length(request_id)=36),
+    CHECK(length(request_sha256)=64)
+);
+CREATE INDEX IF NOT EXISTS EnrollmentRedemptions_request_lookup
+ON EnrollmentRedemptions(issuer_deployment_id,remote_subject_id,request_id);
+CREATE TRIGGER IF NOT EXISTS EnrollmentRedemptions_append_only_update
+BEFORE UPDATE ON EnrollmentRedemptions
+BEGIN SELECT RAISE(ABORT,'enrollment receipts are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS EnrollmentRedemptions_append_only_delete
+BEFORE DELETE ON EnrollmentRedemptions
+BEGIN SELECT RAISE(ABORT,'enrollment receipts are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS EnrollmentCodes_federation_shape_insert
+BEFORE INSERT ON EnrollmentCodes
+WHEN NOT (
+  (NEW.federation_contract_id IS NULL
+   AND NEW.federation_contract_version IS NULL
+   AND NEW.allowed_issuer_deployment_id IS NULL
+   AND NEW.federation_expires_at IS NULL)
+  OR
+  (NEW.federation_contract_id IS NOT NULL
+   AND NEW.federation_contract_version > 0
+   AND NEW.allowed_issuer_deployment_id IS NOT NULL
+   AND ((NEW.duration_sec = 0 AND NEW.federation_expires_at IS NULL)
+        OR (NEW.duration_sec > 0 AND NEW.federation_expires_at IS NOT NULL)))
+)
+BEGIN SELECT RAISE(ABORT,'invalid federation enrollment code shape'); END;
+CREATE TRIGGER IF NOT EXISTS EnrollmentCodes_federation_shape_update
+BEFORE UPDATE OF federation_contract_id,federation_contract_version,
+  allowed_issuer_deployment_id,federation_expires_at,duration_sec
+ON EnrollmentCodes
+WHEN NOT (
+  (NEW.federation_contract_id IS NULL
+   AND NEW.federation_contract_version IS NULL
+   AND NEW.allowed_issuer_deployment_id IS NULL
+   AND NEW.federation_expires_at IS NULL)
+  OR
+  (NEW.federation_contract_id IS NOT NULL
+   AND NEW.federation_contract_version > 0
+   AND NEW.allowed_issuer_deployment_id IS NOT NULL
+   AND ((NEW.duration_sec = 0 AND NEW.federation_expires_at IS NULL)
+        OR (NEW.duration_sec > 0 AND NEW.federation_expires_at IS NOT NULL)))
+)
+BEGIN SELECT RAISE(ABORT,'invalid federation enrollment code shape'); END;
+"""
+
+_GATE_F_MIGRATION_CHECKSUM = hashlib.sha256(
+    (repr(_GATE_F_COLUMNS) + _GATE_F_DDL).encode("utf-8")
 ).hexdigest()
 
 
@@ -496,6 +577,65 @@ def migrate_gate_e(db_dir: str | Path) -> None:
     migrate_gate_c(db_dir)
     with sqlite3.connect(Path(db_dir) / "usergroups.db") as conn:
         migrate_gate_e_usergroups_schema(conn)
+
+
+def migrate_gate_f_usergroups_schema(conn: sqlite3.Connection) -> None:
+    """Add only destination code restrictions and durable redemption receipts."""
+
+    migrate_gate_e_usergroups_schema(conn)
+    row = conn.execute(
+        "SELECT checksum FROM SchemaMigrations WHERE name=?",
+        (GATE_F_MIGRATION_NAME,),
+    ).fetchone()
+    if row is not None and row[0] != _GATE_F_MIGRATION_CHECKSUM:
+        raise SchemaNotReady("Gate F migration checksum mismatch")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS UserGroups (
+            group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_name TEXT NOT NULL UNIQUE,
+            devices_whitelist TEXT NOT NULL DEFAULT '[]',
+            max_reservation_time_sec INTEGER NOT NULL,
+            max_reservations INTEGER NOT NULL,
+            lifetime_sec INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS UsersLookup (
+            user_id INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            PRIMARY KEY(user_id,group_id)
+        );
+        CREATE TABLE IF NOT EXISTS EnrollmentCodes (
+            code_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code_name TEXT NOT NULL UNIQUE,
+            group_id INTEGER NOT NULL,
+            uses INTEGER NOT NULL,
+            duration_sec INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(EnrollmentCodes)")}
+    for name, sql_type in _GATE_F_COLUMNS:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE EnrollmentCodes ADD COLUMN {name} {sql_type}")
+    conn.executescript(_GATE_F_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO SchemaMigrations "
+        "(version,name,checksum,applied_at) VALUES (?,?,?,?)",
+        (
+            GATE_F_MIGRATION_VERSION,
+            GATE_F_MIGRATION_NAME,
+            _GATE_F_MIGRATION_CHECKSUM,
+            int(time.time()),
+        ),
+    )
+
+
+def migrate_gate_f(db_dir: str | Path) -> None:
+    migrate_gate_c(db_dir)
+    with sqlite3.connect(Path(db_dir) / "usergroups.db") as conn:
+        migrate_gate_f_usergroups_schema(conn)
 
 
 def initialize_native_subjects(
@@ -840,3 +980,66 @@ def check_gate_e_ready(
 
             validate_sha256(row[6], code="invalid_terms_hash")
             validate_sha256(row[9], code="invalid_request_hash")
+
+
+def check_gate_f_ready(
+    usergroups_path: str | Path, *, local_deployment_id: str | None = None
+) -> None:
+    """Validate Gate F additive columns, receipt ledger, and stored rows."""
+
+    from remoterf_federation_core import validate_sha256
+
+    check_gate_e_ready(
+        usergroups_path, local_deployment_id=local_deployment_id
+    )
+    with sqlite3.connect(Path(usergroups_path)) as conn:
+        configure_connection(conn)
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        ledger = conn.execute(
+            "SELECT checksum FROM SchemaMigrations WHERE name=?",
+            (GATE_F_MIGRATION_NAME,),
+        ).fetchone()
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(EnrollmentCodes)")
+        }
+        if (
+            "EnrollmentRedemptions" not in tables
+            or ledger is None
+            or ledger[0] != _GATE_F_MIGRATION_CHECKSUM
+            or not {name for name, _ in _GATE_F_COLUMNS}.issubset(columns)
+        ):
+            raise SchemaNotReady("Gate F migration ledger is missing or invalid")
+        for row in conn.execute(
+            "SELECT federation_contract_id,federation_contract_version,"
+            "allowed_issuer_deployment_id,federation_expires_at,duration_sec "
+            "FROM EnrollmentCodes"
+        ):
+            unrestricted = all(row[index] is None for index in range(4))
+            restricted = (
+                row[0] is not None
+                and type(row[1]) is int
+                and row[1] > 0
+                and row[2] is not None
+                and ((row[4] == 0 and row[3] is None) or (row[4] > 0 and row[3] is not None))
+            )
+            if not unrestricted and not restricted:
+                raise SchemaNotReady("Gate F enrollment-code restriction shape is invalid")
+            if restricted:
+                canonical_uuid(row[0])
+                canonical_uuid(row[2])
+        for row in conn.execute(
+            "SELECT id,code_sha256,principal_id,issuer_deployment_id,remote_subject_id,"
+            "contract_id,contract_version,request_id,request_sha256,membership_added "
+            "FROM EnrollmentRedemptions"
+        ):
+            for value in (row[0], row[2], row[3], row[4], row[5], row[7]):
+                canonical_uuid(value)
+            validate_sha256(row[1], code="invalid_code_hash")
+            validate_sha256(row[8], code="invalid_request_hash")
+            if type(row[6]) is not int or row[6] <= 0 or row[9] not in (0, 1):
+                raise SchemaNotReady("Gate F enrollment receipt is invalid")

@@ -44,7 +44,7 @@ from remoterf_federation_core import (
     validate_typed_result,
 )
 
-from .migrations import configure_connection, migrate_gate_e_usergroups_schema
+from .migrations import configure_connection, migrate_gate_f_usergroups_schema
 
 
 class FederationBusinessError(Exception):
@@ -158,6 +158,7 @@ class VerifiedAction:
     request: object
     terms: object
     state: str
+    prepared: object | None = None
 
 
 def error_response(code: str, *, retryable: bool = False) -> dict:
@@ -214,7 +215,7 @@ class ServerFederationExecutor:
         self.clock = clock or (lambda: int(time.time()))
         self.registry = registry or ActionRegistry()
         with sqlite3.connect(self.path) as conn:
-            migrate_gate_e_usergroups_schema(conn)
+            migrate_gate_f_usergroups_schema(conn)
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=10.0)
@@ -420,6 +421,58 @@ class ServerFederationExecutor:
             return now, (row, terms), "principal_disabled"
         return now, (row, terms), None
 
+    def _preparation_authorized(self, claims):
+        """Read-only current-authority gate before any split-store preparation."""
+        now = int(self.clock())
+        with self._connect() as conn:
+            clock_row = conn.execute(
+                "SELECT max_seen_at FROM FederationClockState WHERE singleton_id=1"
+            ).fetchone()
+            if clock_row is None or now < clock_row["max_seen_at"] - 5:
+                return False
+            row = conn.execute(
+                "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
+                (claims["contract_id"], claims["contract_version"]),
+            ).fetchone()
+            if row is None or row["terms_sha256"] != claims["terms_sha256"]:
+                return False
+            terms = self._terms(row)
+            try:
+                validate_grant_claims(claims, now=now)
+                issuer_kid, issuer_fp = terms.key_binding(claims["iss"])
+                local_kid, local_fp = terms.key_binding(self.local_deployment_id)
+                issuer_key = self._key_row(conn, claims["iss"], issuer_kid, issuer_fp)
+                local_key = self._key_row(
+                    conn, self.local_deployment_id, local_kid, local_fp
+                )
+            except (ContractError, FederationError):
+                return False
+            if (
+                local_kid != self.signing_kid
+                or local_fp != self.signing_fingerprint
+                or not key_is_current(dict(issuer_key), now)
+                or not key_is_current(dict(local_key), now)
+                or claims["exp"] > terms.valid_until
+                or (
+                    issuer_key["valid_until"] is not None
+                    and claims["exp"] > issuer_key["valid_until"]
+                )
+                or not contract_allows(
+                    terms,
+                    row["state"],
+                    claims["capability"],
+                    now=now,
+                    superseded=row["superseded_by_version"] is not None,
+                )
+            ):
+                return False
+            principal = conn.execute(
+                "SELECT status FROM FederatedPrincipals "
+                "WHERE issuer_deployment_id=? AND remote_subject_id=?",
+                (claims["iss"], claims["sub"]),
+            ).fetchone()
+            return principal is None or principal["status"] == "active"
+
     @staticmethod
     def _consume(conn, claims, now):
         conn.execute(
@@ -465,6 +518,29 @@ class ServerFederationExecutor:
                 "membership_present": None,
             },
             action=claims["action"],
+        )
+
+    @staticmethod
+    def _audit_rejection(conn, claims, code, now):
+        from uuid import uuid4
+
+        conn.execute(
+            "INSERT INTO FederationAuditEvents"
+            "(id,occurred_at,actor_kind,actor_ref,event_type,principal_id,"
+            "contract_id,version,request_id,result_code,metadata_json) "
+            "VALUES (?,?,?,?,?,NULL,?,?,?,?,?)",
+            (
+                str(uuid4()),
+                now,
+                "deployment",
+                claims["iss"],
+                "federation_action_rejected",
+                claims["contract_id"],
+                claims["contract_version"],
+                claims["request_id"],
+                code,
+                "{}",
+            ),
         )
 
     def _encode_result(self, claims, result, *, now, expires):
@@ -548,7 +624,7 @@ class ServerFederationExecutor:
         """Return exactly one of signed_result/error; raw tokens are never logged."""
 
         try:
-            request, claims, _ = self._prevalidate(
+            request, claims, terms = self._prevalidate(
                 protocol_version, grant, request_json
             )
         except FederationError as exc:
@@ -556,6 +632,20 @@ class ServerFederationExecutor:
             return error_response(safe)
         except (ContractError, ValidationError, sqlite3.Error):
             return error_response("internal_error", retryable=False)
+
+        handler = self.registry.get(claims["action"])
+        prepared = None
+        if (
+            handler is not None
+            and callable(getattr(handler, "prepare", None))
+            and self._preparation_authorized(claims)
+        ):
+            try:
+                prepared = handler.prepare(
+                    VerifiedAction(claims, request, terms, "active")
+                )
+            except Exception:
+                return error_response("internal_error", retryable=False)
 
         result = None
         state = "active"
@@ -574,10 +664,13 @@ class ServerFederationExecutor:
                         result = self._typed_error(claims, state, "replayed", now)
                     else:
                         if rejection is not None:
+                            self._audit_rejection(conn, claims, rejection, now)
                             result = self._typed_error(claims, state, rejection, now)
                         else:
-                            handler = self.registry.get(claims["action"])
                             if handler is None:
+                                self._audit_rejection(
+                                    conn, claims, "action_unavailable", now
+                                )
                                 result = self._typed_error(
                                     claims, state, "action_unavailable", now
                                 )
@@ -591,6 +684,7 @@ class ServerFederationExecutor:
                                             request=request,
                                             terms=current[1],
                                             state=state,
+                                            prepared=prepared,
                                         ),
                                     )
                                     result = validate_typed_result(
@@ -620,6 +714,9 @@ class ServerFederationExecutor:
                                 except FederationBusinessError as exc:
                                     conn.execute("ROLLBACK TO federation_action")
                                     conn.execute("RELEASE federation_action")
+                                    self._audit_rejection(
+                                        conn, claims, exc.code, now
+                                    )
                                     result = self._typed_error(
                                         claims, state, exc.code, now
                                     )
