@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 import threading
+import logging
 import socket
 import os
 import sys
@@ -39,6 +40,8 @@ import time
 from typing import Any
 
 import grpc
+
+logger = logging.getLogger("remoteRF_server.grpc")
 
 from ..common.grpc import *
 from .reservation import reservation_handler
@@ -296,6 +299,7 @@ def start_server_runtime(
                 home_federation_enroller = configured.enroller
                 home_federation_permissions = configured.permissions
     except Exception:
+        logger.error("federation_readiness_failure component=server_composition")
         writer_lock.close()
         raise
     if cert_dir is None:
