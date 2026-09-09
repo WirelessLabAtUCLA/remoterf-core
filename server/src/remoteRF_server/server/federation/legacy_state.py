@@ -10,10 +10,12 @@ private restore archive before touching any row.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import os
 import shutil
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from remoterf_federation_core import canonical_json, canonical_uuid, strict_json
@@ -33,10 +35,43 @@ GLOBAL_TABLES = {
     "GlobalLocalSessions",
     "GlobalCatalogState",
 }
+WRITER_LOCK_NAME = ".remoterf-writer.lock"
 
 
 class DisposalError(RuntimeError):
     pass
+
+
+def acquire_runtime_writer_lock(db_dir: str | Path):
+    """Hold a cooperative shared lock for the lifetime of a live Server."""
+
+    root = Path(db_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    handle = (root / WRITER_LOCK_NAME).open("a+b")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise DisposalError("database directory is locked for disposal") from None
+    return handle
+
+
+@contextmanager
+def _disposal_writer_lock(root: Path):
+    handle = (root / WRITER_LOCK_NAME).open("a+b")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise DisposalError(
+                "database writers are active; stop the Server before disposal"
+            ) from None
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def _sha256(path: Path) -> str:
@@ -69,8 +104,11 @@ def _source_record(path: Path) -> dict:
     }
 
 
-def build_preflight(db_dir: str | Path) -> dict:
+def build_preflight(db_dir: str | Path, *, _lock: bool = True) -> dict:
     root = Path(db_dir).resolve()
+    if _lock:
+        with _disposal_writer_lock(root):
+            return build_preflight(root, _lock=False)
     sources = {name: _source_record(root / name) for name in SOURCE_NAMES}
     blockers: list[str] = []
     for name in SOURCE_NAMES:
@@ -310,7 +348,7 @@ def _require_review(manifest: dict) -> None:
 
 
 def _verify_exact_candidates(manifest: dict, root: Path) -> None:
-    fresh = build_preflight(root)
+    fresh = build_preflight(root, _lock=False)
     if fresh["blockers"]:
         raise DisposalError("source preflight now contains blockers")
 
@@ -329,78 +367,106 @@ def apply_disposal(
     *,
     archive_dir: str | Path,
     deployment_id: str,
+    failure_hook=None,
 ) -> dict:
     manifest = _load_manifest(manifest_path)
     _require_review(manifest)
     deployment_id = canonical_uuid(deployment_id)
     root = Path(manifest["db_dir"]).resolve()
-    _verify_sources(manifest, root)
-    _verify_exact_candidates(manifest, root)
+    with _disposal_writer_lock(root):
+        _verify_sources(manifest, root)
+        _verify_exact_candidates(manifest, root)
 
-    archive = Path(archive_dir).resolve()
-    archive.mkdir(mode=0o700, parents=True, exist_ok=False)
-    for name in SOURCE_NAMES:
-        source = root / name
-        if source.exists():
-            target = archive / name
-            shutil.copy2(source, target)
-            if _sha256(target) != manifest["sources"][name]["sha256"]:
-                raise DisposalError(f"archive verification failed: {name}")
-            os.chmod(target, 0o600)
-    manifest_copy = archive / "reviewed-disposal-manifest.json"
-    shutil.copy2(manifest_path, manifest_copy)
-    os.chmod(manifest_copy, 0o600)
+        archive = Path(archive_dir).resolve()
+        archive.mkdir(mode=0o700, parents=True, exist_ok=False)
+        for name in SOURCE_NAMES:
+            source = root / name
+            if source.exists():
+                target = archive / name
+                shutil.copy2(source, target)
+                if _sha256(target) != manifest["sources"][name]["sha256"]:
+                    raise DisposalError(f"archive verification failed: {name}")
+                os.chmod(target, 0o600)
+        manifest_copy = archive / "reviewed-disposal-manifest.json"
+        shutil.copy2(manifest_path, manifest_copy)
+        os.chmod(manifest_copy, 0o600)
 
-    candidates = manifest["candidates"]
-    with sqlite3.connect(root / "usergroups.db") as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        for row in candidates["memberships"]:
-            cur = conn.execute(
-                "DELETE FROM UsersLookup WHERE user_id = ? AND group_id = ?",
-                (row["user_id"], row["group_id"]),
-            )
-            if cur.rowcount != 1:
-                raise DisposalError("reviewed membership row no longer matches")
-    with sqlite3.connect(root / "perms.db") as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        for row in candidates["roles"]:
-            table, id_column = row["table"], row["id_column"]
-            if (table, id_column) not in {
-                ("Users", "UserID"),
-                ("PowerUsers", "UserID"),
-                ("Admins", "AdminID"),
-            }:
-                raise DisposalError("invalid reviewed role target")
-            cur = conn.execute(
-                f"DELETE FROM {table} WHERE {id_column} = ? AND Username = ?",
-                (row["row_id"], row["username"]),
-            )
-            if cur.rowcount != 1:
-                raise DisposalError("reviewed role row no longer matches")
-    with sqlite3.connect(root / "reservations.db") as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        for row in candidates["reservations"]:
-            cur = conn.execute(
-                "DELETE FROM Reservations WHERE res_id = ? AND username = ?",
-                (row["res_id"], row["username"]),
-            )
-            if cur.rowcount != 1:
-                raise DisposalError("reviewed reservation row no longer matches")
-        for row in candidates["accounts"]:
-            cur = conn.execute(
-                "DELETE FROM Accounts WHERE acc_id = ? AND username = ? "
-                "AND email = ? AND auth_type = 'remoterf_global'",
-                (row["acc_id"], row["username"], row["email"]),
-            )
-            if cur.rowcount != 1:
-                raise DisposalError("reviewed account row no longer matches")
+        candidates = manifest["candidates"]
+        mutation_started = False
+        try:
+            mutation_started = True
+            with sqlite3.connect(root / "usergroups.db") as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for row in candidates["memberships"]:
+                    cur = conn.execute(
+                        "DELETE FROM UsersLookup WHERE user_id = ? AND group_id = ?",
+                        (row["user_id"], row["group_id"]),
+                    )
+                    if cur.rowcount != 1:
+                        raise DisposalError("reviewed membership row no longer matches")
+            if failure_hook is not None:
+                failure_hook("membership_removal")
+            with sqlite3.connect(root / "perms.db") as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for row in candidates["roles"]:
+                    table, id_column = row["table"], row["id_column"]
+                    if (table, id_column) not in {
+                        ("Users", "UserID"),
+                        ("PowerUsers", "UserID"),
+                        ("Admins", "AdminID"),
+                    }:
+                        raise DisposalError("invalid reviewed role target")
+                    cur = conn.execute(
+                        f"DELETE FROM {table} WHERE {id_column} = ? AND Username = ?",
+                        (row["row_id"], row["username"]),
+                    )
+                    if cur.rowcount != 1:
+                        raise DisposalError("reviewed role row no longer matches")
+            if failure_hook is not None:
+                failure_hook("role_removal")
+            with sqlite3.connect(root / "reservations.db") as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for row in candidates["reservations"]:
+                    cur = conn.execute(
+                        "DELETE FROM Reservations WHERE res_id = ? AND username = ?",
+                        (row["res_id"], row["username"]),
+                    )
+                    if cur.rowcount != 1:
+                        raise DisposalError("reviewed reservation row no longer matches")
+                for row in candidates["accounts"]:
+                    cur = conn.execute(
+                        "DELETE FROM Accounts WHERE acc_id = ? AND username = ? "
+                        "AND email = ? AND auth_type = 'remoterf_global'",
+                        (row["acc_id"], row["username"], row["email"]),
+                    )
+                    if cur.rowcount != 1:
+                        raise DisposalError("reviewed account row no longer matches")
+            if failure_hook is not None:
+                failure_hook("reservation_account_removal")
 
-    legacy = root / "global.db"
-    if legacy.exists():
-        legacy.unlink()
-    migrate_gate_c(root)
-    subjects = initialize_native_subjects(root / "reservations.db", deployment_id)
-    check_gate_c_ready(root)
+            legacy = root / "global.db"
+            if legacy.exists():
+                legacy.unlink()
+            if failure_hook is not None:
+                failure_hook("global_disposal")
+            migrate_gate_c(root)
+            if failure_hook is not None:
+                failure_hook("schema_install")
+            subjects = initialize_native_subjects(
+                root / "reservations.db", deployment_id
+            )
+            check_gate_c_ready(root)
+            if failure_hook is not None:
+                failure_hook("validation")
+        except Exception as original:
+            if mutation_started:
+                try:
+                    _restore_archive(root, archive, manifest)
+                except Exception as restore_error:
+                    raise DisposalError(
+                        f"disposal failed and automatic restore failed: {restore_error}"
+                    ) from original
+            raise
     return {
         "accounts_removed": len(candidates["accounts"]),
         "reservations_removed": len(candidates["reservations"]),
@@ -409,3 +475,18 @@ def apply_disposal(
         "native_subjects": len(subjects),
         "archive_dir": str(archive),
     }
+
+
+def _restore_archive(root: Path, archive: Path, manifest: dict) -> None:
+    """Restore every coordinated source and verify the pre-mutation hashes."""
+
+    for name in SOURCE_NAMES:
+        destination = root / name
+        for suffix in ("", "-wal", "-journal", "-shm"):
+            (root / (name + suffix)).unlink(missing_ok=True)
+        expected = manifest["sources"][name]
+        if expected["present"]:
+            shutil.copy2(archive / name, destination)
+            os.chmod(destination, 0o600)
+            if _sha256(destination) != expected["sha256"]:
+                raise DisposalError(f"automatic restore verification failed: {name}")

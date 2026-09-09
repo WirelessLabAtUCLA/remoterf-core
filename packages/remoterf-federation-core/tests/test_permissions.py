@@ -2,6 +2,8 @@ import pytest
 
 from remoterf_federation_core import (
     HomePermissionsError,
+    MAX_HOME_PERMISSIONS_SUMMARY_BYTES,
+    canonical_json,
     validate_home_permissions_summary,
 )
 
@@ -50,6 +52,47 @@ def test_home_permissions_model_preserves_authority_and_sorts():
         "local-users",
     ]
     assert result["federation"][0]["provenance"] == "destination_signed"
+    assert result["incomplete"] is False
+    assert result["omitted_count"] == 0
+
+
+def test_home_permissions_explicit_incomplete_semantics_are_typed():
+    value = summary(entry())
+    value.update({"incomplete": True, "omitted_count": 3})
+    assert validate_home_permissions_summary(value)["omitted_count"] == 3
+    for bad in (
+        {"incomplete": False, "omitted_count": 1},
+        {"incomplete": True, "omitted_count": 0},
+        {"incomplete": 1, "omitted_count": 1},
+    ):
+        malformed = summary(entry())
+        malformed.update(bad)
+        with pytest.raises(HomePermissionsError):
+            validate_home_permissions_summary(malformed)
+
+
+def test_home_permissions_producer_rejects_oversize_before_return():
+    destinations = []
+    for index in range(64):
+        groups = [
+            {
+                "group_id": str(group),
+                "group_name": f"{index:02d}-{group:03d}-" + "x" * 115,
+            }
+            for group in range(256)
+        ]
+        destinations.append(
+            entry(
+                deployment_id=f"{index + 2:08x}-0000-4000-8000-000000000000",
+                contract_id=f"{index + 100:08x}-0000-4000-8000-000000000000",
+                groups=groups,
+            )
+        )
+    value = summary(entry())
+    value["federation"] = destinations
+    assert len(canonical_json(value).encode()) > MAX_HOME_PERMISSIONS_SUMMARY_BYTES
+    with pytest.raises(HomePermissionsError, match="home_permissions_too_large"):
+        validate_home_permissions_summary(value)
 
 
 @pytest.mark.parametrize(

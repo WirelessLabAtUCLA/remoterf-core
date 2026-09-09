@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ from remoterf_federation_core import (
     DEFAULT_ACTION_RETRY_POLICIES,
     FEDERATION_GRANT_TYP,
     MAX_PROTOCOL_INTEGER,
+    PERMISSIONS_CONNECT_TIMEOUT_SECONDS,
     ActionRetryPolicy,
     ContractError,
     FederationError,
@@ -49,6 +52,7 @@ from .migrations import configure_connection, migrate_gate_e_usergroups_schema
 
 FORWARD_PATH = "/v2/broker/federation/forward"
 MAX_FORWARD_RESPONSE_BYTES = 32768
+logger = logging.getLogger("remoteRF_server.federation.home")
 
 
 @dataclass(frozen=True)
@@ -138,11 +142,14 @@ class ServerHomeGrantIssuer:
             raise FederationError("contract_key_mismatch")
         return row
 
-    def _native_subject(self, local_account_id: int) -> str:
+    def _native_subject(self, local_account_id: int, *, conn=None) -> str:
         if type(local_account_id) is not int or local_account_id <= 0:
             raise FederationError("native_account_required")
-        with sqlite3.connect(self.reservations_path) as conn:
+        owned = conn is None
+        if owned:
+            conn = sqlite3.connect(self.reservations_path)
             conn.row_factory = sqlite3.Row
+        try:
             row = conn.execute(
                 "SELECT a.auth_type,s.subject_id,s.status,b.local_account_id AS binding_id "
                 "FROM Accounts a "
@@ -151,6 +158,9 @@ class ServerHomeGrantIssuer:
                 "WHERE a.acc_id=?",
                 (local_account_id,),
             ).fetchone()
+        finally:
+            if owned:
+                conn.close()
         if (
             row is None
             or row["auth_type"] != "local_password"
@@ -171,15 +181,36 @@ class ServerHomeGrantIssuer:
         request_id: str | None = None,
         code_name: str | None = None,
     ) -> IssuedGrant:
-        subject = self._native_subject(local_account_id)
         destination = canonical_uuid(destination_deployment_id)
         request_id = canonical_uuid(request_id or str(uuid4()))
         if type(contract_version) is not int or not 0 < contract_version <= MAX_PROTOCOL_INTEGER:
             raise FederationError("invalid_contract_version")
+        try:
+            conn = sqlite3.connect(self.usergroups_path, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            configure_connection(conn)
+            conn.execute("BEGIN IMMEDIATE")
+        except Exception:
+            raise
+        try:
+            subject_conn = sqlite3.connect(
+                self.reservations_path, timeout=10.0, check_same_thread=False
+            )
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+        subject_conn.row_factory = sqlite3.Row
+        try:
+            configure_connection(subject_conn)
+            subject_conn.execute("BEGIN IMMEDIATE")
+            subject = self._native_subject(local_account_id, conn=subject_conn)
+        except Exception:
+            conn.rollback()
+            conn.close()
+            subject_conn.close()
+            raise
         now = int(self.clock())
-        conn = sqlite3.connect(self.usergroups_path)
-        conn.row_factory = sqlite3.Row
-        configure_connection(conn)
         try:
             row = conn.execute(
                 "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
@@ -233,6 +264,13 @@ class ServerHomeGrantIssuer:
                 expires = min(expires, home_key["valid_until"])
             if expires - now < 5:
                 raise FederationError("insufficient_grant_validity")
+            # Re-read while the reservations writer lock is still held.  The
+            # signed subject and every authorization input are therefore one
+            # serialized snapshot, not a pre-sign check separated by a race.
+            issuance_hook = getattr(self, "_issuance_lock_hook", None)
+            if issuance_hook is not None:
+                issuance_hook()
+            subject = self._native_subject(local_account_id, conn=subject_conn)
             claims = build_grant_claims(
                 issuer_deployment_id=self.local_deployment_id,
                 subject_id=subject,
@@ -255,7 +293,10 @@ class ServerHomeGrantIssuer:
             )
             return IssuedGrant(token, claims, request)
         finally:
+            conn.rollback()
             conn.close()
+            subject_conn.rollback()
+            subject_conn.close()
 
     def verify_result(self, token: str, issued: IssuedGrant) -> dict:
         header, unchecked = parse_unverified_result(token)
@@ -346,10 +387,14 @@ class HomeFederationOutbound:
         self.timeout = float(timeout)
         if self.timeout <= 0:
             raise FederationError("invalid_transport_timeout")
-        self.connect_timeout = min(self.timeout, 3.0)
+        self.connect_timeout = min(self.timeout, PERMISSIONS_CONNECT_TIMEOUT_SECONDS)
         self.read_timeout = self.timeout
         self.overall_timeout = self.timeout * 2
         self.sender = sender
+        self._sender_accepts_deadline = bool(
+            sender is not None
+            and len(inspect.signature(sender).parameters) >= 3
+        )
         policies = dict(DEFAULT_ACTION_RETRY_POLICIES)
         for action, policy in dict(retry_policies or {}).items():
             if action not in policies or type(policy) is not ActionRetryPolicy:
@@ -392,8 +437,13 @@ class HomeFederationOutbound:
                 if length > MAX_FORWARD_RESPONSE_BYTES:
                     raise TransportFailure("response_too_large", retryable=False)
             raw = bytearray()
-            for chunk in response.iter_content(chunk_size=4096):
-                if time.monotonic() > deadline:
+            # A one-byte iterator is deliberate: requests/urllib3 otherwise
+            # waits to fill a large requested chunk while a peer can drip data
+            # forever just inside the inactivity timeout.  The body is only
+            # 32 KiB, so checking the absolute monotonic deadline per received
+            # byte is bounded and closes the response immediately on expiry.
+            for chunk in response.iter_content(chunk_size=1):
+                if time.monotonic() >= deadline:
                     raise TimeoutError()
                 if len(raw) + len(chunk) > MAX_FORWARD_RESPONSE_BYTES:
                     raise TransportFailure("response_too_large", retryable=False)
@@ -435,6 +485,7 @@ class HomeFederationOutbound:
         request_id: str | None = None,
         code_name: str | None = None,
         retry_ambiguous: bool = True,
+        deadline: float | None = None,
     ) -> dict:
         logical_request_id = canonical_uuid(request_id or str(uuid4()))
         if type(retry_ambiguous) is not bool:
@@ -445,7 +496,8 @@ class HomeFederationOutbound:
             raise FederationError("unknown_action") from None
         may_retry = retry_ambiguous and policy is not ActionRetryPolicy.NO_RETRY
         attempts = 2 if may_retry else 1
-        deadline = time.monotonic() + self.overall_timeout
+        own_deadline = time.monotonic() + self.overall_timeout
+        deadline = own_deadline if deadline is None else min(float(deadline), own_deadline)
         for attempt in range(attempts):
             if time.monotonic() >= deadline:
                 raise TransportFailure("route_unavailable", retryable=False)
@@ -468,7 +520,9 @@ class HomeFederationOutbound:
             outer = self._broker_token(body)
             try:
                 received = (
-                    self.sender(body, outer)
+                    self.sender(body, outer, deadline)
+                    if self._sender_accepts_deadline
+                    else self.sender(body, outer)
                     if self.sender is not None
                     else self._send(body, outer, deadline)
                 )
@@ -492,7 +546,13 @@ class HomeFederationOutbound:
                 )
             try:
                 result = self.issuer.verify_result(response["signed_result"], issued)
-            except FederationError:
+            except FederationError as exc:
+                logger.warning(
+                    "federation_result_verification_failed destination=%s action=%s code=%s",
+                    issued.claims["aud"],
+                    issued.claims["action"],
+                    exc.code,
+                )
                 raise TransportFailure("invalid_signed_result", retryable=False) from None
             if result["status"] == "error":
                 raise OwnerSignedFailure(result)

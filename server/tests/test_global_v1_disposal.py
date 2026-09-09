@@ -9,6 +9,7 @@ from pathlib import Path
 
 from remoteRF_server.server.federation.legacy_state import (
     DisposalError,
+    acquire_runtime_writer_lock,
     apply_disposal,
     build_preflight,
     write_preflight,
@@ -204,3 +205,60 @@ class DisposalTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT user_id,group_id FROM UsersLookup").fetchall(), [(7,3)])
             self.assertEqual(conn.execute("SELECT code_name FROM EnrollmentCodes").fetchone()[0], "keep-code")
         check_gate_c_ready(self.root)
+
+    def test_active_writer_lock_blocks_preflight(self):
+        seed(self.root)
+        lock = acquire_runtime_writer_lock(self.root)
+        try:
+            with self.assertRaises(DisposalError):
+                build_preflight(self.root)
+        finally:
+            lock.close()
+
+    def test_every_partial_failure_restores_complete_checkpoint(self):
+        boundaries = (
+            "membership_removal",
+            "role_removal",
+            "reservation_account_removal",
+            "global_disposal",
+            "schema_install",
+            "validation",
+        )
+        for boundary in boundaries:
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw) / "db"
+                root.mkdir()
+                seed(root)
+                config = Path(raw) / "server.yml"
+                identity = Path(raw) / "deployment-private.pem"
+                config.write_bytes(b"protected-config\n")
+                identity.write_bytes(b"protected-identity\n")
+                before = {
+                    name: (root / name).read_bytes()
+                    for name in ("reservations.db", "usergroups.db", "perms.db", "global.db")
+                }
+                manifest_path = Path(raw) / "manifest.json"
+                write_preflight(root, manifest_path)
+                value = json.loads(manifest_path.read_text())
+                value["reviewed"] = True
+                for rows in value["candidates"].values():
+                    for row in rows:
+                        row["delete"] = True
+                manifest_path.write_text(json.dumps(value))
+
+                def fail(name):
+                    if name == boundary:
+                        raise RuntimeError("injected disposal failure")
+
+                with self.assertRaises(RuntimeError):
+                    apply_disposal(
+                        manifest_path,
+                        archive_dir=Path(raw) / "archive",
+                        deployment_id=DEPLOYMENT,
+                        failure_hook=fail,
+                    )
+                self.assertEqual(
+                    {name: (root / name).read_bytes() for name in before}, before
+                )
+                self.assertEqual(config.read_bytes(), b"protected-config\n")
+                self.assertEqual(identity.read_bytes(), b"protected-identity\n")

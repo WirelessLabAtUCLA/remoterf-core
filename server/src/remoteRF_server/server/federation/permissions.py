@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
+import inspect
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from uuid import uuid4
 
 from remoterf_federation_core import (
     FederationError,
+    MAX_HOME_PERMISSION_DESTINATIONS,
     OwnerSignedFailure,
+    PERMISSIONS_AGGREGATION_TIMEOUT_SECONDS,
+    PERMISSIONS_DESTINATION_TIMEOUT_SECONDS,
     TransportFailure,
     canonical_json,
     canonical_uuid,
@@ -25,18 +30,22 @@ from .destination import FederationBusinessError
 from .enrollment import _legacy_created_epoch
 from .migrations import configure_connection, migrate_gate_f_usergroups_schema
 
-MAX_REMOTE_PERMISSION_CONTRACTS = 64
+MAX_REMOTE_PERMISSION_CONTRACTS = MAX_HOME_PERMISSION_DESTINATIONS
 DEFAULT_PERMISSION_CONCURRENCY = 4
-DEFAULT_PERMISSION_DESTINATION_TIMEOUT = 11.0
-DEFAULT_PERMISSION_AGGREGATION_TIMEOUT = 15.0
+DEFAULT_PERMISSION_DESTINATION_TIMEOUT = PERMISSIONS_DESTINATION_TIMEOUT_SECONDS
+DEFAULT_PERMISSION_AGGREGATION_TIMEOUT = PERMISSIONS_AGGREGATION_TIMEOUT_SECONDS
 
 
 def _server_group_current(row, now: int, *, invalid_is_error: bool) -> bool:
-    lifetime = int(row[2])
-    if lifetime <= 0:
-        return True
     try:
+        lifetime = row[2]
+        if type(lifetime) is not int or lifetime < 0 or lifetime > (1 << 63) - 1:
+            raise ValueError("invalid lifetime")
+        if lifetime == 0:
+            return True
         created = _legacy_created_epoch(row[3])
+        if created < 0 or created > (1 << 63) - 1 - lifetime:
+            raise ValueError("invalid created timestamp")
     except (TypeError, ValueError, OverflowError, OSError):
         if invalid_is_error:
             raise FederationBusinessError("group_lifetime_invalid") from None
@@ -138,8 +147,16 @@ class ServerHomePermissions:
             raise FederationError("invalid_permissions_concurrency")
         if self.per_destination_timeout <= 0 or self.overall_timeout <= 0:
             raise FederationError("invalid_permissions_timeout")
+        self._work_slots = threading.BoundedSemaphore(self.max_concurrency)
+        self._pool = ThreadPoolExecutor(
+            max_workers=self.max_concurrency,
+            thread_name_prefix="remoterf-permissions",
+        )
         with sqlite3.connect(self.path) as conn:
             migrate_gate_f_usergroups_schema(conn)
+
+    def close(self):
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _terms(row):
@@ -191,11 +208,8 @@ class ServerHomePermissions:
             rows = conn.execute(
                 "SELECT * FROM FederationContracts "
                 "WHERE state='active' AND superseded_by_version IS NULL "
-                "ORDER BY contract_id,version LIMIT ?",
-                (MAX_REMOTE_PERMISSION_CONTRACTS + 1,),
+                "ORDER BY contract_id,version",
             ).fetchall()
-        if len(rows) > MAX_REMOTE_PERMISSION_CONTRACTS:
-            rows = rows[:MAX_REMOTE_PERMISSION_CONTRACTS]
         for row in rows:
             try:
                 terms = self._terms(row)
@@ -223,7 +237,8 @@ class ServerHomePermissions:
                     "state": row["state"],
                 }
             )
-        return candidates
+        omitted = max(0, len(candidates) - MAX_REMOTE_PERMISSION_CONTRACTS)
+        return candidates[:MAX_REMOTE_PERMISSION_CONTRACTS], omitted
 
     @staticmethod
     def _unavailable(candidate):
@@ -249,7 +264,7 @@ class ServerHomePermissions:
             "error_code": code,
         }
 
-    def _query(self, local_account_id, candidate):
+    def _query(self, local_account_id, candidate, deadline):
         try:
             result = self.outbound.execute(
                 local_account_id=local_account_id,
@@ -257,6 +272,7 @@ class ServerHomePermissions:
                 contract_id=candidate["contract_id"],
                 contract_version=candidate["contract_version"],
                 action="permissions_read",
+                deadline=deadline,
             )
         except OwnerSignedFailure as exc:
             result = exc.result
@@ -291,58 +307,68 @@ class ServerHomePermissions:
             "error_code": None,
         }
 
+    def _run_query(self, local_account_id, candidate, deadline):
+        try:
+            if len(inspect.signature(self._query).parameters) >= 3:
+                return self._query(local_account_id, candidate, deadline)
+            return self._query(local_account_id, candidate)
+        finally:
+            self._work_slots.release()
+
     def summary(self, *, local_account_id: int):
         now = int(self.clock())
-        candidates = self._candidates(now)
+        candidate_result = self._candidates(now)
+        if (
+            type(candidate_result) is tuple
+            and len(candidate_result) == 2
+            and type(candidate_result[1]) is int
+        ):
+            candidates, omitted_count = candidate_result
+        else:
+            candidates, omitted_count = candidate_result, 0
         remote = []
         pending = list(candidates)
         active = {}
         deadline = time.monotonic() + self.overall_timeout
-        pool = ThreadPoolExecutor(
-            max_workers=self.max_concurrency,
-            thread_name_prefix="remoterf-permissions",
-        )
-        try:
-            while pending or active:
-                while pending and len(active) < self.max_concurrency:
-                    candidate = pending.pop(0)
-                    future = pool.submit(self._query, local_account_id, candidate)
-                    active[future] = [candidate, time.monotonic(), False]
-                current = time.monotonic()
-                if current >= deadline:
+        while pending or active:
+            while pending and len(active) < self.max_concurrency:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-                nearest = min(
-                    started + self.per_destination_timeout
-                    for _candidate, started, reported in active.values()
-                    if not reported
-                ) if any(not value[2] for value in active.values()) else deadline
-                done, _ = wait(
-                    active,
-                    timeout=max(0.0, min(deadline, nearest) - current),
-                    return_when=FIRST_COMPLETED,
+                if not self._work_slots.acquire(timeout=remaining):
+                    break
+                candidate = pending.pop(0)
+                operation_deadline = min(
+                    deadline, time.monotonic() + self.per_destination_timeout
                 )
-                current = time.monotonic()
-                for future, value in list(active.items()):
-                    candidate, started, reported = value
-                    if future in done:
-                        if not reported:
-                            try:
-                                remote.append(future.result())
-                            except Exception:
-                                remote.append(self._unavailable(candidate))
-                        del active[future]
-                    elif not reported and current >= started + self.per_destination_timeout:
+                future = self._pool.submit(
+                    self._run_query,
+                    local_account_id,
+                    candidate,
+                    operation_deadline,
+                )
+                active[future] = candidate
+            current = time.monotonic()
+            if current >= deadline:
+                break
+            if not active:
+                continue
+            done, _ = wait(
+                active,
+                timeout=max(0.0, deadline - current),
+                return_when=FIRST_COMPLETED,
+            )
+            for future, candidate in list(active.items()):
+                if future in done:
+                    try:
+                        remote.append(future.result())
+                    except Exception:
                         remote.append(self._unavailable(candidate))
-                        value[2] = True
-                if not done and current < nearest:
-                    continue
-            for future, (candidate, _started, reported) in active.items():
-                if not reported:
-                    remote.append(self._unavailable(candidate))
-                future.cancel()
-            remote.extend(self._unavailable(candidate) for candidate in pending)
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+                    del active[future]
+        for future, candidate in active.items():
+            remote.append(self._unavailable(candidate))
+            future.cancel()
+        remote.extend(self._unavailable(candidate) for candidate in pending)
         return validate_home_permissions_summary(
             {
                 "local": {
@@ -351,6 +377,8 @@ class ServerHomePermissions:
                     "groups": self._local_groups(local_account_id, now),
                 },
                 "federation": remote,
+                "incomplete": omitted_count > 0,
+                "omitted_count": omitted_count,
             }
         )
 

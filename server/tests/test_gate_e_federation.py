@@ -749,6 +749,65 @@ def test_server_native_issuance_rejects_external_binding_incoherence(tmp_path):
         issue(pair)
 
 
+@pytest.mark.parametrize("change", ["disable_native", "suspend", "revoke_home_key"])
+def test_home_issuance_serializes_local_authority_changes(tmp_path, change):
+    ordered = tmp_path / "signs-first"
+    ordered.mkdir()
+    pair = active_pair(ordered)
+    locked, allow_sign = threading.Event(), threading.Event()
+    attempted, changed = threading.Event(), threading.Event()
+    pair["issuer"]._issuance_lock_hook = lambda: (
+        locked.set(),
+        allow_sign.wait(timeout=5),
+    )
+
+    def mutate(target):
+        attempted.set()
+        path = target["reservations"] if change == "disable_native" else target["home_db"]
+        with sqlite3.connect(path, timeout=10) as conn:
+            if change == "disable_native":
+                conn.execute(
+                    "UPDATE LocalAccountSubjects SET status='disabled' "
+                    "WHERE local_account_id=1"
+                )
+            elif change == "suspend":
+                conn.execute(
+                    "UPDATE FederationContracts SET state='suspended' "
+                    "WHERE contract_id=? AND version=1",
+                    (CONTRACT,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE TrustedDeploymentKeys SET state='revoked' "
+                    "WHERE deployment_id=?",
+                    (HOME,),
+                )
+        changed.set()
+
+    outcome = []
+    issuance = threading.Thread(
+        target=lambda: outcome.append(issue(pair)), name="home-issuance"
+    )
+    issuance.start()
+    assert locked.wait(timeout=5)
+    writer = threading.Thread(target=mutate, args=(pair,), name="authority-change")
+    writer.start()
+    assert attempted.wait(timeout=5)
+    assert not changed.wait(timeout=0.1)
+    allow_sign.set()
+    issuance.join(timeout=5)
+    writer.join(timeout=5)
+    assert len(outcome) == 1
+    assert changed.is_set()
+
+    changed_first = tmp_path / "change-first"
+    changed_first.mkdir()
+    rejected = active_pair(changed_first)
+    mutate(rejected)
+    with pytest.raises(FederationError):
+        issue(rejected)
+
+
 @pytest.mark.parametrize(
     "change",
     [

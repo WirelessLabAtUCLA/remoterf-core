@@ -321,6 +321,19 @@ class ReservationHandler:
     
     @db_connection
     def remove_user(self, *, username):
+        # A federated proxy is an authentication adapter, not the owner of a
+        # reservation.  Once that adapter is removed its username becomes
+        # indistinguishable from the deliberately-supported legacy
+        # accountless reservation shape.  Quarantine those rows in the same
+        # transaction so they can never be materialized by update_devices().
+        # Native account deletion keeps the historical accountless behavior.
+        if self._account_security_state_locked(username) in (
+            "federated",
+            "incoherent",
+        ):
+            self.cursor.execute(
+                "DELETE FROM Reservations WHERE username = ?", (username,)
+            )
         self.cursor.execute('DELETE FROM Accounts WHERE username = ?', (username,))
         perms.delete_user_from_reservation_handler(username)
         return {"UC": map_arg(f'Removed {username}')}
@@ -1090,32 +1103,71 @@ def sanitize_for_logging(obj):
     else:
         return repr(obj)
 
+
+# Activity evidence is deliberately an allowlist.  Account arguments and
+# result values routinely carry passwords, enrollment invitations/codes,
+# reservation credentials, or future token types; adding another redaction
+# name must never be required to keep a new secret out of this file.
+_SAFE_ACTIVITY_ARGS = {
+    "create_user": ("un", "em"),
+    "login": ("un",),
+    "reserve_device": ("un", "dd", "st", "et"),
+    "get_res": ("un",),
+    "get_dev": ("un",),
+    "get_perms": ("un",),
+    "cancel_res": ("un", "res_id"),
+    "set_enroll": ("un",),
+}
+
+
+def _activity_log_entry(*, function_name, args, result=None, error=None):
+    safe_args = {
+        name: sanitize_for_logging(args[name])
+        for name in _SAFE_ACTIVITY_ARGS.get(function_name, ())
+        if name in args
+    }
+    result_keys = (
+        sorted(str(key) for key in result)
+        if isinstance(result, dict)
+        else []
+    )
+    username = (
+        sanitize_for_logging(unmap_arg(args["un"])) if "un" in args else "N/A"
+    )
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "action": function_name,
+        "username": username,
+        "details": {
+            "args": safe_args,
+            "outcome": "exception" if error is not None else "returned",
+            "result_keys": result_keys,
+            "error_type": type(error).__name__ if error is not None else None,
+        },
+    }
+
 def handle_call_wrapper(self, *, function_name, args):
     """
     Wrapper around the original handle_call.
     The RPC call runs WITHOUT holding log_lock so a slow/stalled disk write
     can never block the server. Logging happens after the call returns.
     """
-    # Make a sanitized copy of args before the call (no lock needed here)
-    sanitized_args = sanitize_for_logging(dict(args))
-    if 'pw' in sanitized_args:
-        sanitized_args['pw'] = '*'
-
     # Run the actual RPC — NOT inside log_lock
-    result = self._original_handle_call(function_name=function_name, args=args)
+    try:
+        result = self._original_handle_call(function_name=function_name, args=args)
+    except Exception as exc:
+        entry = _activity_log_entry(
+            function_name=function_name, args=args, error=exc
+        )
+        threading.Thread(target=_append_log, args=(entry,), daemon=True).start()
+        raise
 
-    # Log asynchronously after the call completes
-    sanitized_result = sanitize_for_logging(result)
-    username = sanitize_for_logging(unmap_arg(args['un'])) if 'un' in args else 'N/A'
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "action": function_name,
-        "username": username,
-        "details": {
-            "args": sanitized_args,
-            "result": sanitized_result
-        }
-    }
+    # Log only allowlisted request metadata and result key names.  Never log
+    # result values, because successful reservation/enrollment responses may
+    # contain reusable credentials.
+    entry = _activity_log_entry(
+        function_name=function_name, args=args, result=result
+    )
     threading.Thread(target=_append_log, args=(entry,), daemon=True).start()
 
     return result

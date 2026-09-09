@@ -13,6 +13,14 @@ from remoterf_federation_core import federated_proxy_adapter
 from remoteRF_server.common.utils.api_token import hash_token
 from remoteRF_server.server.acc_perms import perms_db
 from remoteRF_server.server.federation.migrations import SchemaNotReady
+from remoteRF_server.server.federation.identity import (
+    DeploymentState,
+    init_identity,
+    save_state,
+)
+from remoteRF_server.server.federation.runtime import (
+    build_configured_server_federation,
+)
 from remoteRF_server.server.reservation import (
     FEDERATED_PASSWORD_HASH,
     FEDERATED_PASSWORD_SALT,
@@ -121,6 +129,53 @@ class NativeSubjectTests(GateCFixture):
             self.reservations.get_uid("fresh")
         )
         self.assertNotEqual(first, second)
+
+
+class StockFederationRuntimeTests(GateCFixture):
+    def test_explicit_config_builds_complete_server_federation_runtime(self):
+        identity_dir = self.root / "identity"
+        init_identity(identity_dir)
+        save_state(
+            identity_dir,
+            DeploymentState(
+                deployment_id=DEPLOYMENT,
+                display_name="Configured Server",
+                protocol_version="2",
+            ),
+        )
+        config = self.root / "federation.yml"
+        config.write_text(
+            "protocol_version: '2'\n"
+            f"identity_dir: {identity_dir}\n"
+            "display_name: Configured Server\n"
+            "broker:\n"
+            "  origin: https://broker.example\n"
+            "  deployment_id: 99999999-9999-4999-8999-999999999999\n"
+            "databases:\n"
+            f"  reservations: {self.root / 'reservations.db'}\n"
+            f"  usergroups: {self.root / 'usergroups.db'}\n"
+            f"  permissions: {self.root / 'perms.db'}\n",
+            encoding="utf-8",
+        )
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "REMOTERF_FEDERATION_ENABLED": "1",
+                    "REMOTERF_FEDERATION_CONFIG_PATH": str(config),
+                },
+            ),
+            patch("remoteRF_server.server.acc_perms.perms", self.perms),
+            patch(
+                "remoteRF_server.server.user_group_handler.user_group_handler",
+                self.groups,
+            ),
+        ):
+            runtime = build_configured_server_federation(self.reservations)
+        assert runtime.executor is not None
+        assert runtime.enroller.outbound is runtime.permissions.outbound
+        assert runtime.permissions.local_deployment_id == DEPLOYMENT
+        runtime.permissions.close()
 
 
 class FederatedProxyTests(GateCFixture):
@@ -299,6 +354,46 @@ class FederatedProxyTests(GateCFixture):
         ):
             self.reservations.update_devices()
         set_device.assert_called_once_with("7", "", "")
+
+        # Supported proxy retirement quarantines the residual row in the same
+        # transaction, so it cannot later fall through as a legacy accountless
+        # native reservation.
+        self.reservations.remove_user(username=username)
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM Reservations WHERE username=?", (username,)
+                ).fetchone()[0],
+                0,
+            )
+        with (
+            patch("remoteRF_server.server.reservation.get_all_devices", return_value={7: object()}),
+            patch("remoteRF_server.server.reservation.set_device") as set_device,
+        ):
+            self.reservations.update_devices()
+        set_device.assert_called_once_with("7", "", "")
+
+    def test_legacy_accountless_native_reservation_still_materializes(self):
+        token_salt, token_hash = hash_token("accountless-native-token")
+        with sqlite3.connect(self.root / "reservations.db") as conn:
+            conn.execute(
+                "INSERT INTO Reservations "
+                "(username,device_id,start_time,end_time,salt,hash) VALUES (?,?,?,?,?,?)",
+                (
+                    "historical-accountless",
+                    8,
+                    datetime.now() - timedelta(minutes=1),
+                    datetime.now() + timedelta(minutes=10),
+                    token_salt,
+                    token_hash,
+                ),
+            )
+        with (
+            patch("remoteRF_server.server.reservation.get_all_devices", return_value={8: object()}),
+            patch("remoteRF_server.server.reservation.set_device") as set_device,
+        ):
+            self.reservations.update_devices()
+        set_device.assert_called_once_with("8", token_salt, token_hash)
 
 
 class LegacyAuthTypeReadinessTests(unittest.TestCase):

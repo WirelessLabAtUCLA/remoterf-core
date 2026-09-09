@@ -163,7 +163,9 @@ def test_server_home_summary_is_exact_additive_and_active_contract_scoped(tmp_pa
         )
         conn.execute("INSERT INTO UsersLookup(user_id,group_id) VALUES (1,3)")
     summary = home.summary(local_account_id=1)
-    assert set(summary) == {"local", "federation"}
+    assert set(summary) == {"local", "federation", "incomplete", "omitted_count"}
+    assert summary["incomplete"] is False
+    assert summary["omitted_count"] == 0
     assert summary["local"]["groups"] == [
         {"group_id": "3", "group_name": "local-readers"}
     ]

@@ -11,10 +11,20 @@ from __future__ import annotations
 import re
 
 from .contracts import CONTRACT_STATES
-from .schemas import canonical_uuid
+from .schemas import canonical_json, canonical_uuid
 
-MAX_HOME_PERMISSION_DESTINATIONS = 256
+MAX_HOME_PERMISSION_DESTINATIONS = 64
 MAX_HOME_PERMISSION_GROUPS = 256
+PERMISSIONS_AGGREGATION_TIMEOUT_SECONDS = 15.0
+PERMISSIONS_DESTINATION_TIMEOUT_SECONDS = 11.0
+PERMISSIONS_CONNECT_TIMEOUT_SECONDS = 3.0
+PERMISSIONS_CLIENT_OVERALL_TIMEOUT_SECONDS = PERMISSIONS_AGGREGATION_TIMEOUT_SECONDS + 3.0
+# A destination result is already bounded to 12 KiB.  Sixty-four such results,
+# plus the HOME-local section and envelope overhead, fit below this producer
+# ceiling.  Consumers use the companion HTTP ceiling so every valid response a
+# HOME can emit is receivable without making unrelated account calls unbounded.
+MAX_HOME_PERMISSIONS_SUMMARY_BYTES = 1024 * 1024
+MAX_HOME_PERMISSIONS_HTTP_RESPONSE_BYTES = MAX_HOME_PERMISSIONS_SUMMARY_BYTES + 128 * 1024
 HOME_PERMISSION_STATUSES = frozenset({"ok", "unavailable", "blocked"})
 HOME_PERMISSION_PROVENANCE = frozenset(
     {"local", "destination_signed", "transport"}
@@ -63,8 +73,19 @@ def _groups(value):
 def validate_home_permissions_summary(value):
     """Return the normalized exact Phase-1 HOME permissions model."""
 
-    if type(value) is not dict or set(value) != {"local", "federation"}:
+    if type(value) is not dict or set(value) not in (
+        {"local", "federation"},
+        {"local", "federation", "incomplete", "omitted_count"},
+    ):
         raise HomePermissionsError("invalid_home_permissions_summary")
+    incomplete = value.get("incomplete", False)
+    omitted_count = value.get("omitted_count", 0)
+    if type(incomplete) is not bool or type(omitted_count) is not int:
+        raise HomePermissionsError("invalid_home_permissions_completeness")
+    if omitted_count < 0 or omitted_count > 1_000_000:
+        raise HomePermissionsError("invalid_home_permissions_completeness")
+    if incomplete != (omitted_count > 0):
+        raise HomePermissionsError("invalid_home_permissions_completeness")
     local = value["local"]
     if type(local) is not dict or set(local) != {
         "deployment_id",
@@ -179,4 +200,12 @@ def validate_home_permissions_summary(value):
             item["contract_version"],
         )
     )
-    return {"local": normalized_local, "federation": normalized_federation}
+    result = {
+        "local": normalized_local,
+        "federation": normalized_federation,
+        "incomplete": incomplete,
+        "omitted_count": omitted_count,
+    }
+    if len(canonical_json(result).encode("utf-8")) > MAX_HOME_PERMISSIONS_SUMMARY_BYTES:
+        raise HomePermissionsError("home_permissions_too_large")
+    return result

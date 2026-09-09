@@ -184,6 +184,8 @@ class ServerRuntime:
     bind_host: str
     grpc_port: int
     cert_port: int
+    writer_lock: Any = None
+    federation_permissions: Any = None
     _stop_lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
 
@@ -213,6 +215,12 @@ class ServerRuntime:
                 and self.update_thread is not threading.current_thread()
             ):
                 self.update_thread.join(timeout=2.0)
+            if self.writer_lock is not None:
+                self.writer_lock.close()
+                self.writer_lock = None
+            close_permissions = getattr(self.federation_permissions, "close", None)
+            if close_permissions is not None:
+                close_permissions()
 
 
 def _load_server_credentials(cert_dir: Path):
@@ -264,6 +272,32 @@ def start_server_runtime(
     certificate_port = int(
         cert_port if certificate_port is None else certificate_port
     )
+    from remoteRF_server.common.utils.db_location import get_db_dir
+    from .federation.legacy_state import acquire_runtime_writer_lock
+
+    writer_lock = acquire_runtime_writer_lock(get_db_dir())
+    from .federation.runtime import federation_enabled
+
+    try:
+        if federation_enabled():
+            supplied = (
+                federation_executor,
+                home_federation_enroller,
+                home_federation_permissions,
+            )
+            if any(value is not None for value in supplied):
+                if not all(value is not None for value in supplied):
+                    raise RuntimeError("Refusing partial federation activation")
+            else:
+                from .federation.runtime import build_configured_server_federation
+
+                configured = build_configured_server_federation(reservation_handler)
+                federation_executor = configured.executor
+                home_federation_enroller = configured.enroller
+                home_federation_permissions = configured.permissions
+    except Exception:
+        writer_lock.close()
+        raise
     if cert_dir is None:
         xdg_config = Path(
             os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")
@@ -298,12 +332,14 @@ def start_server_runtime(
     try:
         server_credentials = _load_server_credentials(cert_dir)
     except Exception as e:
+        writer_lock.close()
         _print_tls_credentials_error(cert_dir, e)
         raise SystemExit(2)
 
     if include_host_tunnel:
         reg = hts.get_tunnel_registry()
         if reg is None:
+            writer_lock.close()
             raise RuntimeError("host tunnel registry is unavailable")
         hts.TUNNEL_REGISTRY = reg
         host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
@@ -316,6 +352,7 @@ def start_server_runtime(
         server_credentials,
     )
     if bound_grpc_port == 0:
+        writer_lock.close()
         raise RuntimeError(
             f"could not bind secure gRPC server to {bind_host}:{grpc_port}"
         )
@@ -349,6 +386,10 @@ def start_server_runtime(
         host_session_proxy.close_all()
         if cert_server is not None:
             stop_cert_provider(cert_server)
+        close_permissions = getattr(home_federation_permissions, "close", None)
+        if close_permissions is not None:
+            close_permissions()
+        writer_lock.close()
         raise
 
     return ServerRuntime(
@@ -359,6 +400,8 @@ def start_server_runtime(
         bind_host=bind_host,
         grpc_port=int(bound_grpc_port),
         cert_port=int(cert_server.server_address[1]),
+        writer_lock=writer_lock,
+        federation_permissions=home_federation_permissions,
     )
 
 
