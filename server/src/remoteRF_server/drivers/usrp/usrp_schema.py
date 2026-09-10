@@ -315,8 +315,16 @@ def _construct(value):
     if kind == "StreamArgs":
         obj = uhd.usrp.StreamArgs(value["cpu_format"], value["otw_format"])
         obj.channels = value.get("channels", [])
-        if value.get("args"):
-            obj.args = _device_args(value["args"])
+        raw_args = value.get("args")
+        if raw_args:
+            # Dynamic v2 represents StreamArgs.args as a tagged DeviceAddr.
+            # Preserve that type instead of flattening the envelope itself
+            # into invalid keys such as ``__uhd_type__`` and ``items``.
+            obj.args = (
+                _construct(raw_args)
+                if _payload_type(raw_args) == "DeviceAddr"
+                else _device_args(raw_args)
+            )
         return obj
 
     if kind == "TXMetadata":

@@ -486,6 +486,33 @@ class DeviceSchemaTests(unittest.TestCase):
         self.assertEqual(stream_args.args, "spp=256")
         self.assertEqual(stream_args.channels, [0, 1])
 
+        empty_v2_stream_args = usrp_schema._construct({
+            "__uhd_type__": "StreamArgs",
+            "cpu_format": "fc32",
+            "otw_format": "sc16",
+            "args": {
+                "__uhd_type__": "DeviceAddr",
+                "items": {},
+            },
+            "channels": [0],
+        })
+        self.assertIsInstance(empty_v2_stream_args.args, DeviceAddr)
+        self.assertEqual(empty_v2_stream_args.args.value, "")
+
+        populated_v2_stream_args = usrp_schema._construct({
+            "__uhd_type__": "StreamArgs",
+            "cpu_format": "fc32",
+            "otw_format": "sc16",
+            "args": {
+                "__uhd_type__": "DeviceAddr",
+                "items": {"spp": "512"},
+            },
+            "channels": [0, 1],
+        })
+        self.assertIsInstance(populated_v2_stream_args.args, DeviceAddr)
+        self.assertEqual(populated_v2_stream_args.args.value, "spp=512")
+        self.assertEqual(populated_v2_stream_args.channels, [0, 1])
+
         stream_cmd = usrp_schema._construct({
             "__uhd_type__": "StreamCMD",
             "mode": "num_done",
