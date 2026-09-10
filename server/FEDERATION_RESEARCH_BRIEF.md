@@ -72,7 +72,7 @@ The workspace contains at least two relevant codebases:
 | `RemoteRF-Server` | Main server: user accounts, groups, reservations, TLS gRPC services, device management, and host-tunnel registry/routing. |
 | `RemoteRF-Host` | Host-side agent: inventories locally attached SDR hardware, connects to one RemoteRF Server, announces devices, and executes forwarded requests locally. |
 
-The server package is Python (`remoteRF-server` 1.0.19) and the host package
+The server package is Python (`remoteRF-server` 1.0.21) and the host package
 is also Python.  The server README describes Linux deployment and explicitly
 supports HostRF-owned devices, but there is no existing federation protocol or
 deployment invitation workflow.
