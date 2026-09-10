@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import types
 import unittest
 from unittest.mock import patch
 
@@ -211,6 +212,42 @@ class DynamicV2BridgeTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_usrp_stream_args_reconstruct_tagged_device_addr(self):
+        from remoteRF_host.drivers.usrp import usrp_schema
+
+        class DeviceAddr:
+            def __init__(self, value=""):
+                self.value = value
+
+        class StreamArgs:
+            def __init__(self, cpu_format, otw_format):
+                self.cpu_format = cpu_format
+                self.otw_format = otw_format
+                self.args = ""
+                self.channels = []
+
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(DeviceAddr=DeviceAddr),
+            usrp=types.SimpleNamespace(StreamArgs=StreamArgs),
+        )
+        with patch.object(usrp_schema, "uhd", fake_uhd):
+            for items, expected in (({}, ""), ({"spp": "512"}, "spp=512")):
+                with self.subTest(items=items):
+                    stream_args = usrp_schema._construct({
+                        "__uhd_type__": "StreamArgs",
+                        "cpu_format": "fc32",
+                        "otw_format": "sc16",
+                        "args": {
+                            "__uhd_type__": "DeviceAddr",
+                            "items": items,
+                        },
+                        "channels": [0, 1],
+                    })
+
+                    self.assertIsInstance(stream_args.args, DeviceAddr)
+                    self.assertEqual(stream_args.args.value, expected)
+                    self.assertEqual(stream_args.channels, [0, 1])
 
     def test_rx_sample_frames_keep_binary_payloads_across_tunnel_calls(self):
         opened = self.open_session()
