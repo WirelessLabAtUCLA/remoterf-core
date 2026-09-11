@@ -674,6 +674,24 @@ def get_all_devices() -> Dict[int, Tuple[object, str, str]]:
                 out[gid] = (st.dev, st.salt, st.hsh)  # dev may be VirtualDevice for host
         return out
 
+def get_registered_devices() -> Dict[int, Tuple[object, str, str]]:
+    """Devices known to this deployment's inventory (local devices.yml entries
+    and host devices known to the tunnel directory), regardless of whether
+    they are currently connected.
+
+    This defines reservation ELIGIBILITY: a registered device may be reserved
+    for a future interval even while it is offline right now, because live
+    connectivity is operational state, not scheduling eligibility. Use
+    get_all_devices() instead when live connected state is what matters, e.g.
+    granting a client active I/O access to a device.
+    """
+    _sync_host_devices()
+
+    with _state_lock:
+        return {
+            gid: (st.dev, st.salt, st.hsh) for gid, st in _devices.items()
+        }
+
 def get_all_devices_str() -> Dict[int, str]:
     _sync_host_devices()
 

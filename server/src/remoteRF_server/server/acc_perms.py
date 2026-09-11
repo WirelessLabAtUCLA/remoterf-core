@@ -19,7 +19,7 @@ from typing import Tuple
 from datetime import datetime
 
 from ..common.utils import *
-from .device_manager import get_all_devices
+from .device_manager import get_registered_devices
 from .user_group_handler import user_group_handler
 
 class userperms:
@@ -116,10 +116,14 @@ class perms_db:
         if end_time < datetime.now():
             return False, 'End time must not be in the past'
         
-        # check if device exists
-        devices = get_all_devices()
+        # check if device is registered (Policy B: live connectivity is
+        # operational state, not reservation eligibility -- a registered
+        # device may be reserved for a future interval even while it is
+        # currently offline; connectivity is enforced separately, when the
+        # reservation is actually exercised)
+        devices = get_registered_devices()
         if device_id not in devices:
-            return False, 'Invalid device ID. Device either does not exist or is disconnected.'
+            return False, 'Invalid device ID. Device does not exist.'
         
         # check reservation duration
         reservation_duration = (end_time - start_time).total_seconds()
