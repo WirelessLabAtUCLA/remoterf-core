@@ -190,16 +190,24 @@ def _flag(value: object, code: str) -> bool:
     return value
 
 
-def decode_device_b64(value: object, *, code: str, max_bytes: int) -> bytes:
-    """Decode a strictly canonical, size-bounded base64 device frame."""
+def decode_device_b64(
+    value: object, *, code: str, max_bytes: int, allow_empty: bool = False
+) -> bytes:
+    """Decode a strictly canonical, size-bounded base64 device frame.
+
+    A response frame may legitimately be empty: a setter answers with no
+    results, and an empty GenericRPCResponse serializes to zero bytes.
+    """
 
     if (
         type(value) is not str
-        or not value
+        or (not value and not allow_empty)
         or len(value) > max_bytes
         or _BASE64.fullmatch(value) is None
     ):
         raise DeviceProtocolError(code)
+    if not value:
+        return b""
     try:
         raw = base64.b64decode(value, validate=True)
     except (ValueError, binascii.Error):
@@ -421,6 +429,7 @@ def validate_device_payload_result(value: object, *, action: str) -> dict:
         value["response_b64"],
         code="invalid_device_response",
         max_bytes=MAX_DEVICE_RESULT_BYTES,
+        allow_empty=True,
     )
     return {"response_b64": value["response_b64"]}
 

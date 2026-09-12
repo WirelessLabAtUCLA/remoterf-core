@@ -240,7 +240,7 @@ federation HOME aggregator is configured, its exact local/federation summary
 is additive in `details.home_permissions`; local output survives remote
 failure and is safe with zero devices.
 
-Gate H (`remoterf-federation-core==0.10.0`) adds the federated device plane:
+Gate H (`remoterf-federation-core==0.10.1`) adds the federated device plane:
 `device_list`, `device_reservations`, `device_reserve`, `device_cancel`, and
 `device_rpc` under the `DEVICE_READ`, `DEVICE_RESERVE`, and `DEVICE_CONTROL`
 contract capabilities. A contract without them still grants no hardware

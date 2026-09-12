@@ -63,6 +63,8 @@ class FakeRpcManager:
         self.device_calls.append((gid, function_name, dict(args)))
         if function_name.endswith(":explode"):
             raise RuntimeError("device disappeared / not connected")
+        if function_name.endswith(":SET"):
+            return {}  # a setter answers with no results: an empty frame
         return dict(self.response)
 
     def run_rpc(self, *, function_name, args):
@@ -417,6 +419,16 @@ def test_reserve_is_idempotent_per_request_and_authorizes_device_rpc(world):
     assert (gid, function_name) == (world["allowed"], "test:ip:CALL0")
     assert "a" not in args
 
+    # A setter's empty response frame is a valid ok result, not an error.
+    setter, _ = world["call"](
+        "device_rpc",
+        local_device_id=str(world["allowed"]),
+        request_b64=_frame("test:rx_lo:SET", rx_lo=915000000),
+    )
+    assert setter["status"] == "ok", setter
+    assert setter["payload"]["response_b64"] == ""
+    assert _decode(setter["payload"]["response_b64"]) == {}
+
     # Replaying the very same grant is rejected before any hardware call.
     calls_before = len(world["rpc"].device_calls)
     replay = world["executor"].execute("2", issued.grant, issued.request.json)
@@ -429,7 +441,7 @@ def test_reserve_is_idempotent_per_request_and_authorizes_device_rpc(world):
     with sqlite3.connect(world["dest_db"]) as conn:
         assert conn.execute(
             "SELECT result_code FROM FederatedDeviceReceipts WHERE action='device_rpc'"
-        ).fetchall() == [("authorized",)]
+        ).fetchall() == [("authorized",), ("authorized",)]
 
 
 def test_device_rpc_without_live_reservation_or_capability_is_refused(world):
