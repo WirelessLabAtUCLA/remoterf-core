@@ -18,6 +18,8 @@ OPERATIONS = frozenset({
     "ACC:logout", "ACC:me", "ACC:set_enroll", "ACC:get_perms", "ACC:get_dev",
     "ACC:get_res", "ACC:reserve_device", "ACC:cancel_res",
     "ACC:forgot_password", "ACC:reset_password",
+    # A HOME that relays serialized device RPC frames to federated hardware.
+    "DEV:rpc",
 })
 POLICY_FIELDS = frozenset({"enabled", "username_required", "email_required",
                           "email_verification_required", "enrollment_code_required"})

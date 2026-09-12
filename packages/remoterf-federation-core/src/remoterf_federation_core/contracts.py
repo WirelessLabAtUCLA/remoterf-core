@@ -26,7 +26,18 @@ MAX_BROKER_REQUEST_TOKEN_BYTES = 8192
 MAX_BROKER_REQUEST_SECONDS = 120
 MAX_PROTOCOL_INTEGER = (1 << 63) - 1
 
-CONTRACT_CAPABILITIES = frozenset({"FEDERATED_ENROLL", "PERMISSIONS_READ"})
+CONTRACT_CAPABILITIES = frozenset(
+    {
+        "FEDERATED_ENROLL",
+        "PERMISSIONS_READ",
+        # Device-plane capabilities. A contract that omits one still
+        # cannot carry the corresponding action, so an existing
+        # control-plane contract grants no hardware reach.
+        "DEVICE_READ",
+        "DEVICE_RESERVE",
+        "DEVICE_CONTROL",
+    }
+)
 CONTRACT_STATES = frozenset(
     {"proposed", "accepted", "active", "suspended", "revoked", "expired"}
 )

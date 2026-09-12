@@ -70,7 +70,7 @@ import json
 from .reservation import reservation_handler
 from ..common.utils import *
 from ..common.grpc import grpc_pb2 as generic_pb2
-from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_device_by_id, resolve_gid_for_token
+from .device_manager import acquire_device, acquire_device_by_gid, VirtualDevice, get_device_schema, find_device_id_by_name, get_device_by_id, resolve_gid_for_token
 from ..host import host_tunnel_server as hts
 
 
@@ -113,28 +113,52 @@ class RpcManager:
 
         try:
             with acquire_device(api_token) as (gid, dev):
-                self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
-
-                if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
-                    return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
-
-                if isinstance(dev, VirtualDevice):
-                    fwd_args = dict(args)
-                    fwd_args.pop('a', None)
-                    fwd_args['g'] = map_arg(int(gid))
-                    return hts.handle_host_device(
-                        hts.get_tunnel_registry(create=False),
-                        host_id=dev.host_id,
-                        device_id=dev.device_id,
-                        function_name=function_name,
-                        args=fwd_args,
-                        timeout_sec=10.0,
-                    )
-
-                return self._dispatch_local_schema(function_name=function_name, args=args, dev=dev)
+                return self._dispatch_acquired(
+                    function_name=function_name, args=args, gid=gid, dev=dev
+                )
 
         except Exception as e:
             return {'a': map_arg(str(e))}
+
+    def run_device_rpc_for_gid(self, *, gid: int, function_name: str, args: dict) -> dict:
+        """Run an ordinary device RPC against an already-authorized device.
+
+        The federated device path uses this: the destination has already
+        verified a one-time grant and a current reservation for this exact
+        principal and device, so there is no bearer token to resolve. The
+        driver dispatch below is the same one a native token-bearing call
+        takes, so hardware behaviour and locking are identical.
+        """
+
+        if not self._looks_like_device_rpc(function_name):
+            raise ValueError(f"not a device RPC: {function_name!r}")
+        with acquire_device_by_gid(int(gid)) as (resolved, dev):
+            return self._dispatch_acquired(
+                function_name=function_name, args=args, gid=resolved, dev=dev
+            )
+
+    def _dispatch_acquired(
+        self, *, function_name: str, args: dict, gid: int, dev: object
+    ) -> dict:
+        self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
+
+        if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
+            return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
+
+        if isinstance(dev, VirtualDevice):
+            fwd_args = dict(args)
+            fwd_args.pop('a', None)
+            fwd_args['g'] = map_arg(int(gid))
+            return hts.handle_host_device(
+                hts.get_tunnel_registry(create=False),
+                host_id=dev.host_id,
+                device_id=dev.device_id,
+                function_name=function_name,
+                args=fwd_args,
+                timeout_sec=10.0,
+            )
+
+        return self._dispatch_local_schema(function_name=function_name, args=args, dev=dev)
 
     def _validate_device_rpc_type(self, *, function_name: str, gid: int, dev: object) -> None:
         requested_type = function_name.split(':', 1)[0]

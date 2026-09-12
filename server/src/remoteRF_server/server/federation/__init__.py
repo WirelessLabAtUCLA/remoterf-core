@@ -6,9 +6,9 @@ permission aggregation, resources, reservations, or broker authorization.
 
 import remoterf_federation_core as _federation_core
 
-if _federation_core.__version__ != "0.9.0":
+if _federation_core.__version__ != "0.10.0":
     raise RuntimeError(
-        "RemoteRF Server federation requires remoterf-federation-core==0.9.0; "
+        "RemoteRF Server federation requires remoterf-federation-core==0.10.0; "
         f"found {_federation_core.__version__}"
     )
 

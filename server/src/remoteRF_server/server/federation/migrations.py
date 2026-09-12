@@ -30,6 +30,20 @@ GATE_E1_MIGRATION_VERSION = 5
 GATE_E1_MIGRATION_NAME = "gate_e1_clock_floor_v1"
 GATE_F_MIGRATION_VERSION = 6
 GATE_F_MIGRATION_NAME = "gate_f_enrollment_receipts_v1"
+GATE_H_MIGRATION_VERSION = 7
+GATE_H_MIGRATION_NAME = "gate_h_device_federation_v1"
+# The Gate E replay table pinned the two control actions in a CHECK. Device
+# actions consume the same one-time JTIs, so the constraint is widened here by
+# an ordinary SQLite table rebuild; evidence rows are copied, never dropped.
+GATE_H_JTI_ACTIONS = (
+    "federated_enroll",
+    "permissions_read",
+    "device_list",
+    "device_reserve",
+    "device_reservations",
+    "device_cancel",
+    "device_rpc",
+)
 FEDERATED_PASSWORD_SALT = "!remoterf-federated-salt-v2!"
 FEDERATED_PASSWORD_HASH = "!remoterf-federated-no-password-v2!"
 
@@ -326,6 +340,111 @@ BEGIN SELECT RAISE(ABORT,'invalid federation enrollment code shape'); END;
 
 _GATE_F_MIGRATION_CHECKSUM = hashlib.sha256(
     (repr(_GATE_F_COLUMNS) + _GATE_F_DDL).encode("utf-8")
+).hexdigest()
+
+
+_GATE_H_JTI_ACTION_CHECK = ",".join(f"'{name}'" for name in GATE_H_JTI_ACTIONS)
+
+_GATE_H_JTI_REBUILD = f"""
+CREATE TABLE IF NOT EXISTS FederationGrantJTIsGateH (
+    issuer_deployment_id TEXT NOT NULL,
+    jti TEXT NOT NULL,
+    remote_subject_id TEXT NOT NULL,
+    destination_deployment_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+    terms_sha256 TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ({_GATE_H_JTI_ACTION_CHECK})),
+    request_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    retain_until INTEGER NOT NULL,
+    consumed_at INTEGER NOT NULL,
+    PRIMARY KEY(issuer_deployment_id,jti),
+    CHECK(length(issuer_deployment_id)=36),
+    CHECK(length(jti)=36),
+    CHECK(length(remote_subject_id)=36),
+    CHECK(length(destination_deployment_id)=36),
+    CHECK(length(contract_id)=36),
+    CHECK(length(terms_sha256)=64),
+    CHECK(length(request_id)=36),
+    CHECK(length(request_sha256)=64),
+    CHECK(retain_until=expires_at+5),
+    CHECK(consumed_at < expires_at)
+);
+INSERT OR IGNORE INTO FederationGrantJTIsGateH
+SELECT issuer_deployment_id,jti,remote_subject_id,destination_deployment_id,
+       contract_id,contract_version,terms_sha256,action,request_id,
+       request_sha256,expires_at,retain_until,consumed_at
+FROM FederationGrantJTIs;
+DROP TABLE FederationGrantJTIs;
+ALTER TABLE FederationGrantJTIsGateH RENAME TO FederationGrantJTIs;
+CREATE INDEX IF NOT EXISTS FederationGrantJTIs_retention
+ON FederationGrantJTIs(retain_until);
+CREATE TRIGGER IF NOT EXISTS FederationGrantJTIs_append_only_update
+BEFORE UPDATE ON FederationGrantJTIs
+BEGIN SELECT RAISE(ABORT,'federation grant JTI evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS FederationGrantJTIs_retain_delete
+BEFORE DELETE ON FederationGrantJTIs
+WHEN CAST(strftime('%s','now') AS INTEGER) <= OLD.retain_until
+BEGIN SELECT RAISE(ABORT,'federation grant JTI is retained'); END;
+"""
+
+_GATE_H_DDL = """
+CREATE TABLE IF NOT EXISTS FederatedDeviceReceipts (
+    receipt_id TEXT PRIMARY KEY,
+    issuer_deployment_id TEXT NOT NULL,
+    remote_subject_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    local_device_id INTEGER,
+    reservation_id INTEGER,
+    contract_id TEXT NOT NULL,
+    contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+    occurred_at INTEGER NOT NULL,
+    result_code TEXT NOT NULL,
+    UNIQUE(issuer_deployment_id,request_id,action),
+    CHECK(length(receipt_id)=36),
+    CHECK(length(issuer_deployment_id)=36),
+    CHECK(length(remote_subject_id)=36),
+    CHECK(length(request_id)=36),
+    CHECK(length(contract_id)=36)
+);
+CREATE INDEX IF NOT EXISTS FederatedDeviceReceipts_principal
+ON FederatedDeviceReceipts(issuer_deployment_id,remote_subject_id);
+CREATE TRIGGER IF NOT EXISTS FederatedDeviceReceipts_append_only_update
+BEFORE UPDATE ON FederatedDeviceReceipts
+BEGIN SELECT RAISE(ABORT,'federated device receipts are append-only'); END;
+"""
+
+_GATE_H_MIGRATION_CHECKSUM = hashlib.sha256(
+    (_GATE_H_JTI_REBUILD + _GATE_H_DDL).encode("utf-8")
+).hexdigest()
+
+# Written into reservations.db so a federated reservation row and the record
+# authorizing it commit together in one transaction.
+_GATE_H_RESERVATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS FederatedReservations (
+    res_id INTEGER PRIMARY KEY,
+    issuer_deployment_id TEXT NOT NULL,
+    remote_subject_id TEXT NOT NULL,
+    local_account_id INTEGER NOT NULL,
+    contract_id TEXT NOT NULL,
+    contract_version INTEGER NOT NULL CHECK(contract_version > 0),
+    request_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(issuer_deployment_id,request_id),
+    CHECK(length(issuer_deployment_id)=36),
+    CHECK(length(remote_subject_id)=36),
+    CHECK(length(contract_id)=36),
+    CHECK(length(request_id)=36)
+);
+CREATE INDEX IF NOT EXISTS FederatedReservations_principal
+ON FederatedReservations(issuer_deployment_id,remote_subject_id);
+"""
+
+_GATE_H_RESERVATIONS_CHECKSUM = hashlib.sha256(
+    _GATE_H_RESERVATIONS_DDL.encode("utf-8")
 ).hexdigest()
 
 
@@ -636,6 +755,53 @@ def migrate_gate_f(db_dir: str | Path) -> None:
     migrate_gate_c(db_dir)
     with sqlite3.connect(Path(db_dir) / "usergroups.db") as conn:
         migrate_gate_f_usergroups_schema(conn)
+
+
+def _gate_h_jti_needs_rebuild(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        ("FederationGrantJTIs",),
+    ).fetchone()
+    return row is not None and "'device_rpc'" not in (row[0] or "")
+
+
+def migrate_gate_h_usergroups_schema(conn: sqlite3.Connection) -> None:
+    """Widen one-time grant replay state to device actions, additively."""
+
+    migrate_gate_f_usergroups_schema(conn)
+    row = conn.execute(
+        "SELECT checksum FROM SchemaMigrations WHERE name=?",
+        (GATE_H_MIGRATION_NAME,),
+    ).fetchone()
+    if row is not None and row[0] != _GATE_H_MIGRATION_CHECKSUM:
+        raise SchemaNotReady("Gate H migration checksum mismatch")
+    if _gate_h_jti_needs_rebuild(conn):
+        conn.executescript(_GATE_H_JTI_REBUILD)
+    conn.executescript(_GATE_H_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO SchemaMigrations "
+        "(version,name,checksum,applied_at) VALUES (?,?,?,?)",
+        (
+            GATE_H_MIGRATION_VERSION,
+            GATE_H_MIGRATION_NAME,
+            _GATE_H_MIGRATION_CHECKSUM,
+            int(time.time()),
+        ),
+    )
+
+
+def migrate_gate_h_reservations_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(_GATE_H_RESERVATIONS_DDL)
+
+
+def migrate_gate_h(db_dir: str | Path) -> None:
+    migrate_gate_c(db_dir)
+    with sqlite3.connect(Path(db_dir) / "usergroups.db") as conn:
+        configure_connection(conn)
+        migrate_gate_h_usergroups_schema(conn)
+    with sqlite3.connect(Path(db_dir) / "reservations.db") as conn:
+        configure_connection(conn)
+        migrate_gate_h_reservations_schema(conn)
 
 
 def initialize_native_subjects(

@@ -20,9 +20,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from remoterf_federation_core import (
+    ACTION_CAPABILITIES,
     BROKER_REQUEST_TYP,
     DEFAULT_ACTION_RETRY_POLICIES,
     FEDERATION_GRANT_TYP,
+    MAX_DEVICE_FORWARD_RESPONSE_BYTES,
     MAX_PROTOCOL_INTEGER,
     PERMISSIONS_CONNECT_TIMEOUT_SECONDS,
     ActionRetryPolicy,
@@ -38,6 +40,8 @@ from remoterf_federation_core import (
     canonical_uuid,
     contract_terms_sha256,
     contract_allows,
+    device_action_timeout,
+    is_device_action,
     key_is_current,
     parse_unverified_result,
     public_key_bytes,
@@ -53,6 +57,16 @@ from .migrations import configure_connection, migrate_gate_e_usergroups_schema
 FORWARD_PATH = "/v2/broker/federation/forward"
 MAX_FORWARD_RESPONSE_BYTES = 32768
 logger = logging.getLogger("remoteRF_server.federation.home")
+
+
+def max_forward_response_bytes(action: str) -> int:
+    """Decoded HTTP body ceiling for one forwarded action's response."""
+
+    return (
+        MAX_DEVICE_FORWARD_RESPONSE_BYTES
+        if is_device_action(action)
+        else MAX_FORWARD_RESPONSE_BYTES
+    )
 
 
 @dataclass(frozen=True)
@@ -180,6 +194,7 @@ class ServerHomeGrantIssuer:
         action: str,
         request_id: str | None = None,
         code_name: str | None = None,
+        device_payload: Mapping | None = None,
     ) -> IssuedGrant:
         destination = canonical_uuid(destination_deployment_id)
         request_id = canonical_uuid(request_id or str(uuid4()))
@@ -228,10 +243,7 @@ class ServerHomeGrantIssuer:
             )
             if peer != destination:
                 raise FederationError("counterparty_mismatch")
-            capability = {
-                "federated_enroll": "FEDERATED_ENROLL",
-                "permissions_read": "PERMISSIONS_READ",
-            }.get(action)
+            capability = ACTION_CAPABILITIES.get(action)
             if capability is None:
                 raise FederationError("unknown_action")
             if not contract_allows(
@@ -258,6 +270,7 @@ class ServerHomeGrantIssuer:
                 contract_version=terms.version,
                 terms_sha256=row["terms_sha256"],
                 code_name=code_name,
+                device_payload=device_payload,
             )
             expires = min(now + 60, terms.valid_until)
             if home_key["valid_until"] is not None:
@@ -402,7 +415,13 @@ class HomeFederationOutbound:
             policies[action] = policy
         self.retry_policies = policies
 
-    def _send(self, body: bytes, authorization: str, deadline: float) -> dict:
+    def _send(
+        self,
+        body: bytes,
+        authorization: str,
+        deadline: float,
+        max_response_bytes: int = MAX_FORWARD_RESPONSE_BYTES,
+    ) -> dict:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError()
@@ -416,7 +435,11 @@ class HomeFederationOutbound:
             },
             timeout=(
                 min(self.connect_timeout, remaining),
-                min(self.read_timeout, remaining),
+                # Device bodies carry a hardware call whose budget is the
+                # caller's deadline, not the control-plane inactivity timeout.
+                remaining
+                if max_response_bytes > MAX_FORWARD_RESPONSE_BYTES
+                else min(self.read_timeout, remaining),
             ),
             allow_redirects=False,
             stream=True,
@@ -434,22 +457,24 @@ class HomeFederationOutbound:
                     raise TransportFailure(
                         "invalid_transport_response", retryable=False
                     )
-                if length > MAX_FORWARD_RESPONSE_BYTES:
+                if length > max_response_bytes:
                     raise TransportFailure("response_too_large", retryable=False)
             raw = bytearray()
-            # A one-byte iterator is deliberate: requests/urllib3 otherwise
+            # A small chunk iterator is deliberate: requests/urllib3 otherwise
             # waits to fill a large requested chunk while a peer can drip data
-            # forever just inside the inactivity timeout.  The body is only
-            # 32 KiB, so checking the absolute monotonic deadline per received
-            # byte is bounded and closes the response immediately on expiry.
-            for chunk in response.iter_content(chunk_size=1):
+            # forever just inside the inactivity timeout.  Control-plane bodies
+            # are 32 KiB and device bodies under 2 MiB, so checking the
+            # absolute monotonic deadline per chunk stays bounded and closes
+            # the response immediately on expiry.
+            chunk_size = 1 if max_response_bytes <= MAX_FORWARD_RESPONSE_BYTES else 4096
+            for chunk in response.iter_content(chunk_size=chunk_size):
                 if time.monotonic() >= deadline:
                     raise TimeoutError()
-                if len(raw) + len(chunk) > MAX_FORWARD_RESPONSE_BYTES:
+                if len(raw) + len(chunk) > max_response_bytes:
                     raise TransportFailure("response_too_large", retryable=False)
                 raw.extend(chunk)
         try:
-            return strict_json(bytes(raw), max_bytes=MAX_FORWARD_RESPONSE_BYTES)
+            return strict_json(bytes(raw), max_bytes=max_response_bytes)
         except (FederationError, ValidationError):
             raise TransportFailure(
                 "invalid_transport_response", retryable=False
@@ -484,6 +509,7 @@ class HomeFederationOutbound:
         action: str,
         request_id: str | None = None,
         code_name: str | None = None,
+        device_payload: Mapping | None = None,
         retry_ambiguous: bool = True,
         deadline: float | None = None,
     ) -> dict:
@@ -496,7 +522,14 @@ class HomeFederationOutbound:
             raise FederationError("unknown_action") from None
         may_retry = retry_ambiguous and policy is not ActionRetryPolicy.NO_RETRY
         attempts = 2 if may_retry else 1
-        own_deadline = time.monotonic() + self.overall_timeout
+        # A device action's budget is the destination's hardware budget, not
+        # the 5 s control-plane one.
+        budget = (
+            max(self.overall_timeout, device_action_timeout(action) + 5.0)
+            if is_device_action(action)
+            else self.overall_timeout
+        )
+        own_deadline = time.monotonic() + budget
         deadline = own_deadline if deadline is None else min(float(deadline), own_deadline)
         for attempt in range(attempts):
             if time.monotonic() >= deadline:
@@ -509,6 +542,7 @@ class HomeFederationOutbound:
                 action=action,
                 request_id=logical_request_id,
                 code_name=code_name,
+                device_payload=device_payload,
             )
             body = canonical_json(
                 {
@@ -524,14 +558,18 @@ class HomeFederationOutbound:
                     if self._sender_accepts_deadline
                     else self.sender(body, outer)
                     if self.sender is not None
-                    else self._send(body, outer, deadline)
+                    else self._send(
+                        body, outer, deadline, max_forward_response_bytes(action)
+                    )
                 )
             except (requests.RequestException, TimeoutError, ConnectionError, OSError):
                 if attempt + 1 < attempts:
                     continue
                 raise TransportFailure("route_unavailable", retryable=False) from None
             try:
-                response = validate_transport_response(received)
+                response = validate_transport_response(
+                    received, expected_action=action
+                )
             except (FederationError, ValidationError):
                 raise TransportFailure("invalid_transport_response", retryable=False) from None
             if response["error"] is not None:

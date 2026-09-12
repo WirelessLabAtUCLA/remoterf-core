@@ -240,11 +240,20 @@ federation HOME aggregator is configured, its exact local/federation summary
 is additive in `details.home_permissions`; local output survives remote
 failure and is safe with zero devices.
 
-Phase 1 does not grant a federated principal device visibility, reservations,
-leases, sessions, RX, TX, streaming, or radio operations. The old Global-v1
-connector/catalog and relay-ingress account gate have been removed from the
-Server runtime. Production remains unchanged until a separate cutover is
-authorized.
+Gate H (`remoterf-federation-core==0.10.0`) adds the federated device plane:
+`device_list`, `device_reservations`, `device_reserve`, `device_cancel`, and
+`device_rpc` under the `DEVICE_READ`, `DEVICE_RESERVE`, and `DEVICE_CONTROL`
+contract capabilities. A contract without them still grants no hardware
+reach. The destination decides everything from its own tables (enrolled proxy,
+local device permissions, quotas, overlap, a federation-created reservation
+that is live now) and runs the RPC after the grant transaction commits through
+the ordinary `RpcManager` dispatch; the reservation's bearer token never leaves
+this Server. See [federated devices](docs/federated-devices-gate-h.md).
+
+Streaming, the sample plane, and DynamicControlV2 are not federated. The old
+Global-v1 connector/catalog and relay-ingress account gate have been removed
+from the Server runtime. Production remains unchanged until a separate cutover
+is authorized.
 
 See [federated enrollment](docs/federated-enrollment-v2.md); the cross-project
 runtime boundary is documented in `remoterf-vps-global/docs/phase1-runtime.md`.

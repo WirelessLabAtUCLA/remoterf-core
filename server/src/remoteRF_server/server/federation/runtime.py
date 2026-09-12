@@ -11,11 +11,12 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from remoterf_federation_core import canonical_uuid
 
+from .devices import build_server_gate_h_executor
 from .enrollment import ServerFederatedEnrollmentHome
 from .home import HomeFederationOutbound, ServerHomeGrantIssuer
 from .identity import PROTOCOL_VERSION, load_private_key, load_state
 from .migrations import initialize_native_subjects
-from .permissions import ServerHomePermissions, build_server_gate_g_executor
+from .permissions import ServerHomePermissions
 
 
 def federation_enabled() -> bool:
@@ -130,7 +131,7 @@ def build_configured_server_federation(reservation_handler):
         broker_private_key=key,
         broker_kid=signing_kid,
     )
-    executor = build_server_gate_g_executor(
+    executor = build_server_gate_h_executor(
         usergroups_path=database_paths["usergroups"],
         reservations_path=database_paths["reservations"],
         perms_path=database_paths["permissions"],
@@ -138,6 +139,7 @@ def build_configured_server_federation(reservation_handler):
         private_key=key,
         signing_kid=signing_kid,
         display_name=config["display_name"],
+        reservation_handler=reservation_handler,
     )
     return ServerFederationRuntime(
         executor=executor,

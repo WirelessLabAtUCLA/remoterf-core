@@ -23,6 +23,18 @@ from .contracts import (
     validate_kid,
     validate_sha256,
 )
+from .devices import (
+    DEVICE_ACTION_CAPABILITIES,
+    DEVICE_ACTIONS,
+    DEVICE_PAYLOAD_FIELDS,
+    MAX_DEVICE_ACTION_REQUEST_BYTES,
+    MAX_DEVICE_RESULT_BYTES,
+    MAX_DEVICE_RESULT_TOKEN_BYTES,
+    READ_ONLY_DEVICE_ACTIONS,
+    is_device_action,
+    validate_device_payload,
+    validate_device_result,
+)
 from .schemas import (
     PROTOCOL_VERSION,
     ValidationError,
@@ -59,8 +71,9 @@ INVITATION_FIELDS = frozenset(
 ACTION_CAPABILITIES = {
     "federated_enroll": "FEDERATED_ENROLL",
     "permissions_read": "PERMISSIONS_READ",
+    **DEVICE_ACTION_CAPABILITIES,
 }
-READ_ONLY_ACTIONS = frozenset({"permissions_read"})
+READ_ONLY_ACTIONS = frozenset({"permissions_read"}) | READ_ONLY_DEVICE_ACTIONS
 
 
 class ActionRetryPolicy(Enum):
@@ -75,6 +88,13 @@ DEFAULT_ACTION_RETRY_POLICIES = MappingProxyType(
     {
         "federated_enroll": ActionRetryPolicy.RECEIPT_IDEMPOTENT,
         "permissions_read": ActionRetryPolicy.READ_ONLY,
+        "device_list": ActionRetryPolicy.READ_ONLY,
+        "device_reservations": ActionRetryPolicy.READ_ONLY,
+        # A reservation write and a device RPC may already have taken effect
+        # at the destination when an unsigned transport failure is observed.
+        "device_reserve": ActionRetryPolicy.NO_RETRY,
+        "device_cancel": ActionRetryPolicy.NO_RETRY,
+        "device_rpc": ActionRetryPolicy.NO_RETRY,
     }
 )
 ACTION_REQUEST_FIELDS = frozenset({"protocol_version", "action", "payload"})
@@ -279,6 +299,28 @@ def action_capability(action: object) -> str:
     return ACTION_CAPABILITIES[action]
 
 
+def max_action_request_bytes(action: object) -> int:
+    """Request ceiling for an action family; control actions are unchanged."""
+
+    return (
+        MAX_DEVICE_ACTION_REQUEST_BYTES
+        if is_device_action(action)
+        else MAX_ACTION_REQUEST_BYTES
+    )
+
+
+def max_result_bytes(action: object) -> int:
+    return MAX_DEVICE_RESULT_BYTES if is_device_action(action) else MAX_RESULT_BYTES
+
+
+def max_result_token_bytes(action: object) -> int:
+    return (
+        MAX_DEVICE_RESULT_TOKEN_BYTES
+        if is_device_action(action)
+        else MAX_RESULT_TOKEN_BYTES
+    )
+
+
 def canonical_action_request(value: object) -> CanonicalActionRequest:
     """Validate and canonicalize the entire action request object."""
 
@@ -289,11 +331,14 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
     action = value["action"]
     action_capability(action)
     payload = value["payload"]
-    expected = (
-        ENROLL_PAYLOAD_FIELDS
-        if action == "federated_enroll"
-        else PERMISSIONS_PAYLOAD_FIELDS
-    )
+    if is_device_action(action):
+        expected = DEVICE_PAYLOAD_FIELDS[action]
+    else:
+        expected = (
+            ENROLL_PAYLOAD_FIELDS
+            if action == "federated_enroll"
+            else PERMISSIONS_PAYLOAD_FIELDS
+        )
     if type(payload) is not dict or set(payload) != expected:
         raise FederationError("invalid_payload_fields")
     clean = {
@@ -313,6 +358,11 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
         clean["code_name"] = _printable(
             payload["code_name"], "invalid_code_name", 256
         )
+    elif is_device_action(action):
+        try:
+            clean.update(validate_device_payload(action, payload))
+        except ValidationError as exc:
+            raise FederationError(str(exc)) from None
     normalized = {
         "protocol_version": PROTOCOL_VERSION,
         "action": action,
@@ -320,7 +370,7 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
     }
     encoded = canonical_json(normalized)
     raw = encoded.encode("utf-8")
-    if len(raw) > MAX_ACTION_REQUEST_BYTES:
+    if len(raw) > max_action_request_bytes(action):
         raise FederationError("request_too_large")
     return CanonicalActionRequest(
         value=normalized,
@@ -330,7 +380,7 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
 
 
 def parse_canonical_action_request(value: str | bytes) -> CanonicalActionRequest:
-    parsed = strict_json(value, max_bytes=MAX_ACTION_REQUEST_BYTES)
+    parsed = strict_json(value, max_bytes=MAX_DEVICE_ACTION_REQUEST_BYTES)
     request = canonical_action_request(parsed)
     supplied = value.encode("utf-8") if isinstance(value, str) else value
     if supplied != request.json.encode("utf-8"):
@@ -347,6 +397,7 @@ def build_action_request(
     contract_version: int,
     terms_sha256: str,
     code_name: str | None = None,
+    device_payload: Mapping | None = None,
 ) -> CanonicalActionRequest:
     payload = {
         "request_id": request_id,
@@ -358,6 +409,10 @@ def build_action_request(
     if action == "federated_enroll":
         payload["code_name"] = code_name
     elif code_name is not None:
+        raise FederationError("invalid_payload_fields")
+    if is_device_action(action):
+        payload.update(dict(device_payload or {}))
+    elif device_payload is not None:
         raise FederationError("invalid_payload_fields")
     return canonical_action_request(
         {"protocol_version": PROTOCOL_VERSION, "action": action, "payload": payload}
@@ -512,8 +567,21 @@ def validate_grant_claims(
     }
 
 
+def validate_action_result(value: object, *, action: str) -> dict:
+    """Validate a result body with the grammar its action family defines."""
+
+    if is_device_action(action):
+        try:
+            return validate_device_result(value, action=action)
+        except ValidationError as exc:
+            raise FederationError(str(exc)) from None
+    return validate_typed_result(value, action=action)
+
+
 def validate_typed_result(value: object, *, action: str) -> dict:
     action_capability(action)
+    if is_device_action(action):
+        raise FederationError("invalid_result_fields")
     if type(value) is not dict or set(value) != TYPED_RESULT_FIELDS:
         raise FederationError("invalid_result_fields")
     status = value["status"]
@@ -677,7 +745,7 @@ def validate_result_claims(
         raise FederationError("invalid_result_time")
     if issued_at > checked_now + 5 or checked_now >= expires_at:
         raise FederationError("result_expired")
-    result = validate_typed_result(value["result"], action=value["action"])
+    result = validate_action_result(value["result"], action=value["action"])
     if not (
         issued_at - MAX_RESULT_SNAPSHOT_AGE_SECONDS
         <= result["retrieved_at"]
@@ -707,6 +775,8 @@ def validate_result_claims(
         or result["contract_version"] != version
     ):
         raise FederationError("result_payload_mismatch")
+    if is_device_action(value["action"]) and result["state"] not in RESULT_STATES:
+        raise FederationError("invalid_contract_state")
     return {
         "token_type": FEDERATION_RESULT_TOKEN_TYPE,
         "protocol_version": PROTOCOL_VERSION,
@@ -726,17 +796,19 @@ def validate_result_claims(
     }
 
 
-def _decode_segment(value: str) -> object:
+def _decode_segment(value: str, *, max_bytes: int = MAX_RESULT_BYTES) -> object:
     if type(value) is not str or not value:
         raise FederationError("invalid_token")
     try:
         raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
     except (ValueError, binascii.Error):
         raise FederationError("invalid_token") from None
-    return strict_json(raw, max_bytes=MAX_RESULT_BYTES)
+    return strict_json(raw, max_bytes=max_bytes)
 
 
-def parse_unverified_jwt(token: object, *, max_bytes: int) -> tuple[dict, dict]:
+def parse_unverified_jwt(
+    token: object, *, max_bytes: int, max_claims_bytes: int | None = None
+) -> tuple[dict, dict]:
     """Strictly parse only routing candidates; this establishes no trust."""
 
     if type(token) is not str or not token or len(token.encode("utf-8")) > max_bytes:
@@ -745,7 +817,9 @@ def parse_unverified_jwt(token: object, *, max_bytes: int) -> tuple[dict, dict]:
     if len(segments) != 3 or not segments[2]:
         raise FederationError("invalid_token")
     header = _decode_segment(segments[0])
-    claims = _decode_segment(segments[1])
+    claims = _decode_segment(
+        segments[1], max_bytes=max_claims_bytes or MAX_RESULT_BYTES
+    )
     if type(header) is not dict or type(claims) is not dict:
         raise FederationError("invalid_token")
     return header, claims
@@ -757,12 +831,21 @@ def parse_unverified_grant(token: object) -> tuple[dict, dict]:
 
 
 def parse_unverified_result(token: object) -> tuple[dict, dict]:
-    header, claims = parse_unverified_jwt(token, max_bytes=MAX_RESULT_TOKEN_BYTES)
+    header, claims = parse_unverified_jwt(
+        token,
+        max_bytes=MAX_DEVICE_RESULT_TOKEN_BYTES,
+        max_claims_bytes=MAX_DEVICE_RESULT_BYTES + 4096,
+    )
     return validate_result_header(header), claims
 
 
-def validate_transport_response(value: object) -> dict:
-    """Require exactly one of a destination token or an unsigned safe error."""
+def validate_transport_response(value: object, *, expected_action: str | None = None) -> dict:
+    """Require exactly one of a destination token or an unsigned safe error.
+
+    ``expected_action`` lets a caller that already knows which action it sent
+    keep the tight control-plane token ceiling instead of the permissive
+    device one.
+    """
 
     if type(value) is not dict or set(value) != {
         "protocol_version",
@@ -775,8 +858,13 @@ def validate_transport_response(value: object) -> dict:
     signed, error = value["signed_result"], value["error"]
     if (signed is None) == (error is None):
         raise FederationError("invalid_transport_response")
+    ceiling = (
+        MAX_DEVICE_RESULT_TOKEN_BYTES
+        if expected_action is None
+        else max_result_token_bytes(expected_action)
+    )
     if signed is not None:
-        if type(signed) is not str or not signed or len(signed.encode()) > MAX_RESULT_TOKEN_BYTES:
+        if type(signed) is not str or not signed or len(signed.encode()) > ceiling:
             raise FederationError("invalid_transport_response")
         return {"protocol_version": PROTOCOL_VERSION, "signed_result": signed, "error": None}
     if type(error) is not dict or set(error) != {"code", "message", "retryable"}:

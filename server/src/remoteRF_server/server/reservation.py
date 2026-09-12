@@ -29,13 +29,21 @@ from remoterf_federation_core import (
     federated_identity,
     federated_proxy_adapter,
 )
-from .device_manager import get_all_devices, set_device, get_all_devices_str, start_transmitter
+from .device_manager import (
+    device_inventory_snapshot,
+    get_all_devices,
+    get_registered_devices,
+    set_device,
+    get_all_devices_str,
+    start_transmitter,
+)
 from .acc_perms import perms
 from .user_group_handler import user_group_handler
 from .federation.migrations import (
     FEDERATED_PASSWORD_HASH,
     FEDERATED_PASSWORD_SALT,
     configure_connection,
+    migrate_gate_h_reservations_schema,
     migrate_reservations_schema,
 )
 
@@ -68,6 +76,7 @@ class ReservationHandler:
         self.cursor = self.db.cursor()
 
         migrate_reservations_schema(self.db)
+        migrate_gate_h_reservations_schema(self.db)
 
         self.cursor.execute('''
         CREATE TABLE IF NOT EXISTS Reservations (
@@ -1011,6 +1020,287 @@ class ReservationHandler:
     
     from datetime import datetime
 
+    # ── Federated device plane ───────────────────────────────────────
+    #
+    # These entry points are reachable ONLY from the federation destination
+    # executor, after it has verified a one-time Ed25519 grant bound to an
+    # active bilateral contract that allows the matching capability. They
+    # deliberately do not accept a password and never call login_user(), so
+    # the native containment of proxy accounts (a federated principal has no
+    # usable native credential) is unchanged. Local permissions, quotas,
+    # overlap, and Policy B eligibility are enforced by exactly the same code
+    # a native reservation goes through.
+
+    def _federated_reservation_authorized(self, res_id: int) -> bool:
+        row = self.cursor.execute(
+            "SELECT 1 FROM FederatedReservations WHERE res_id = ? LIMIT 1",
+            (int(res_id),),
+        ).fetchone()
+        return row is not None
+
+    @db_connection
+    def federated_visible_devices(self, *, local_account_id: int) -> list[dict]:
+        """Devices this federated principal is permitted to see.
+
+        Permission comes from the destination's own group/role tables, the
+        same source a native listing uses, so a federation peer cannot widen
+        what its users can see by asking differently.
+        """
+
+        username = self._username_for_account_locked(int(local_account_id))
+        if username is None:
+            return []
+        allowed = self._permitted_device_ids_locked(username)
+        inventory = device_inventory_snapshot()
+        entries = []
+        for gid, info in sorted(inventory.items(), key=lambda kv: int(kv[0])):
+            if allowed is not None and int(gid) not in allowed:
+                continue
+            entries.append(
+                {
+                    "local_device_id": str(int(gid)),
+                    "display_name": str(info.get("name") or f"device {gid}"),
+                    "device_type": info.get("device_type") or None,
+                    "online": bool(info.get("online")),
+                    "max_reservation_time_sec": self._device_block_seconds_locked(
+                        username, int(gid)
+                    ),
+                }
+            )
+        return entries
+
+    @db_connection
+    def federated_reserve(
+        self,
+        *,
+        local_account_id: int,
+        device_id: int,
+        start_time: datetime,
+        end_time: datetime,
+        issuer_deployment_id: str,
+        remote_subject_id: str,
+        contract_id: str,
+        contract_version: int,
+        request_id: str,
+    ) -> dict:
+        """Create one reservation for a federated principal, idempotently.
+
+        Returns the reservation, or {"error": <code>} for an ordinary local
+        refusal (permission, quota, conflict, unknown device, bad interval).
+        The plaintext device token is never returned: it stays inside this
+        deployment and is materialized straight onto the device.
+        """
+
+        issuer = canonical_uuid(issuer_deployment_id)
+        subject = canonical_uuid(remote_subject_id)
+        request_id = canonical_uuid(request_id)
+
+        existing = self.cursor.execute(
+            "SELECT r.res_id, r.device_id, r.start_time, r.end_time "
+            "FROM FederatedReservations f "
+            "JOIN Reservations r ON r.res_id = f.res_id "
+            "WHERE f.issuer_deployment_id = ? AND f.request_id = ?",
+            (issuer, request_id),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "reservation_id": str(int(existing[0])),
+                "local_device_id": str(int(existing[1])),
+                "start_time": int(_parse_reservation_datetime(existing[2]).timestamp()),
+                "end_time": int(_parse_reservation_datetime(existing[3]).timestamp()),
+            }
+
+        username = self._username_for_account_locked(int(local_account_id))
+        if username is None:
+            return {"error": "principal_unknown"}
+        if self._account_security_state_locked(username) != "federated":
+            return {"error": "principal_not_federated"}
+
+        device_id = int(device_id)
+        self._clean_expired_reservations(device_id)
+
+        reserved_device_ids = self.get_reserved_device_ids_for_user(username)
+        reserved_device_ids = reserved_device_ids + [device_id]
+        validation = perms.validate_reservation_request(
+            int(local_account_id),
+            username,
+            device_id,
+            start_time,
+            end_time,
+            self.get_reservation_count(username),
+            is_server=False,
+            reserved_device_ids=reserved_device_ids,
+        )
+        if validation[0] is False:
+            return {"error": "reservation_refused", "detail": str(validation[1])}
+
+        self.cursor.execute(
+            "SELECT 1 FROM Reservations WHERE device_id = ? AND start_time < ? AND end_time > ?",
+            (device_id, end_time, start_time),
+        )
+        if self.cursor.fetchone():
+            return {"error": "reservation_conflict"}
+
+        token = generate_token()
+        self.cursor.execute(
+            "INSERT INTO Reservations (username, device_id, start_time, end_time, salt, hash) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (username, device_id, start_time, end_time, token[0], token[1]),
+        )
+        res_id = int(self.cursor.lastrowid)
+        self.cursor.execute(
+            "INSERT INTO FederatedReservations "
+            "(res_id, issuer_deployment_id, remote_subject_id, local_account_id, "
+            "contract_id, contract_version, request_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                res_id,
+                issuer,
+                subject,
+                int(local_account_id),
+                canonical_uuid(contract_id),
+                int(contract_version),
+                request_id,
+                int(time.time()),
+            ),
+        )
+        return {
+            "reservation_id": str(res_id),
+            "local_device_id": str(device_id),
+            "start_time": int(start_time.timestamp()),
+            "end_time": int(end_time.timestamp()),
+        }
+
+    @db_connection
+    def federated_reservations(self, *, local_account_id: int) -> list[dict]:
+        """Reservations on devices this federated principal may see.
+
+        Rows the principal does not own are returned as occupancy only, with
+        an opaque label instead of the owning account's username.
+        """
+
+        username = self._username_for_account_locked(int(local_account_id))
+        if username is None:
+            return []
+        allowed = self._permitted_device_ids_locked(username)
+        rows = self.cursor.execute(
+            "SELECT res_id, username, device_id, start_time, end_time FROM Reservations "
+            "ORDER BY device_id, start_time, res_id"
+        ).fetchall()
+        entries = []
+        for res_id, owner, device_id, start, end in rows:
+            if allowed is not None and int(device_id) not in allowed:
+                continue
+            mine = owner == username
+            try:
+                start_ts = int(_parse_reservation_datetime(start).timestamp())
+                end_ts = int(_parse_reservation_datetime(end).timestamp())
+            except ValueError:
+                continue
+            if end_ts <= start_ts:
+                continue
+            entries.append(
+                {
+                    "reservation_id": str(int(res_id)),
+                    "local_device_id": str(int(device_id)),
+                    "display_name": "you" if mine else "reserved",
+                    "start_time": start_ts,
+                    "end_time": end_ts,
+                    "mine": mine,
+                }
+            )
+        return entries
+
+    @db_connection
+    def federated_cancel(self, *, local_account_id: int, reservation_id: int) -> dict:
+        username = self._username_for_account_locked(int(local_account_id))
+        if username is None:
+            return {"error": "principal_unknown"}
+        row = self.cursor.execute(
+            "SELECT r.username FROM Reservations r "
+            "JOIN FederatedReservations f ON f.res_id = r.res_id "
+            "WHERE r.res_id = ?",
+            (int(reservation_id),),
+        ).fetchone()
+        if row is None or row[0] != username:
+            return {"error": "reservation_not_found"}
+        self.cursor.execute(
+            "DELETE FROM Reservations WHERE res_id = ?", (int(reservation_id),)
+        )
+        self.cursor.execute(
+            "DELETE FROM FederatedReservations WHERE res_id = ?",
+            (int(reservation_id),),
+        )
+        return {"cancelled": True}
+
+    @db_connection
+    def federated_active_reservation(
+        self, *, local_account_id: int, device_id: int, now: datetime | None = None
+    ) -> bool:
+        """True only for a federation-created reservation live right now."""
+
+        username = self._username_for_account_locked(int(local_account_id))
+        if username is None:
+            return False
+        moment = now or datetime.now()
+        rows = self.cursor.execute(
+            "SELECT r.start_time, r.end_time FROM Reservations r "
+            "JOIN FederatedReservations f ON f.res_id = r.res_id "
+            "WHERE r.username = ? AND r.device_id = ?",
+            (username, int(device_id)),
+        ).fetchall()
+        for start, end in rows:
+            try:
+                if _parse_reservation_datetime(start) <= moment < _parse_reservation_datetime(end):
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    # Helpers below assume the caller already holds the @db_connection cursor.
+
+    def _username_for_account_locked(self, local_account_id: int) -> str | None:
+        row = self.cursor.execute(
+            "SELECT username FROM Accounts WHERE acc_id = ? LIMIT 1",
+            (int(local_account_id),),
+        ).fetchone()
+        return row[0] if row else None
+
+    def _permitted_device_ids_locked(self, username: str) -> set[int] | None:
+        """Permitted device ids, or None for an unrestricted (Admin) role."""
+
+        rows = perms.get_perms(username)
+        if not rows:
+            return set()
+        role = rows[0]
+        if role[0] == "Admin":
+            return None
+        if role[0] == "Power User":
+            return {int(x) for x in str_to_list(role[5])}
+        uid = self.get_uid(username)
+        return {int(x) for x in user_group_handler.get_users_devices(uid=uid)}
+
+    def _device_block_seconds_locked(self, username: str, device_id: int) -> int | None:
+        rows = perms.get_perms(username)
+        if not rows:
+            return None
+        role = rows[0]
+        try:
+            if role[0] == "Power User":
+                return int(role[4]) if role[4] else None
+            if role[0] == "Normal User":
+                # Same source as validate_reservation_request(): the highest
+                # max_reservation_time_sec across the groups granting this device.
+                allowed, max_seconds = user_group_handler.get_users_max_reservation_time(
+                    uid=self.get_uid(username), device_id=int(device_id)
+                )
+                if not allowed:
+                    return None
+                return int(max_seconds) if max_seconds else None
+        except Exception:
+            return None
+        return None
+
     @db_connection
     def update_devices(self):
         devices = get_all_devices()  # whatever your local inventory is
@@ -1035,7 +1325,14 @@ class ReservationHandler:
 
             if start <= now < end:
                 security_state = self._account_security_state_locked(reservation[1])
-                if security_state in ("federated", "incoherent"):
+                if security_state == "incoherent":
+                    continue
+                if security_state == "federated" and not self._federated_reservation_authorized(
+                    int(reservation[0])
+                ):
+                    # An out-of-band row on a proxy account is never honoured.
+                    # Only a reservation this deployment itself created from a
+                    # verified federation grant carries an authorization record.
                     continue
                 dev_id = str(reservation[2]).strip()
 

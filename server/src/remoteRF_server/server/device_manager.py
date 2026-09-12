@@ -1042,6 +1042,56 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
     finally:
         lock.release()
 
+@contextmanager
+def acquire_device_by_gid(gid: int) -> Iterator[Tuple[int, object]]:
+    """Acquire an already-authorized device by its local id.
+
+    This performs NO authorization: the caller must already have established
+    that the principal may drive this device (a verified federation grant plus
+    a current reservation, for example). It exists so an authorized caller
+    need not be handed the device's bearer API token just to take the same
+    per-device I/O lock that acquire_device() takes.
+    """
+
+    _sync_host_devices()
+
+    with _state_lock:
+        st = _devices.get(int(gid))
+        if not st or not _is_connected(st) or st.dev is None:
+            raise RuntimeError("device disappeared / not connected")
+        lock = st.io_lock
+        dev = st.dev
+
+    lock.acquire()
+    try:
+        yield int(gid), dev
+    finally:
+        lock.release()
+
+
+def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
+    """Structured inventory for federated discovery.
+
+    Unlike get_all_devices_str(), which returns one pre-formatted display
+    string, this keeps name, type, and connectivity separate so a federation
+    peer can present them itself. It reports registered devices (Policy B),
+    marking current connectivity rather than hiding offline hardware.
+    """
+
+    _sync_host_devices()
+
+    with _state_lock:
+        return {
+            gid: {
+                "name": st.name or f"device {gid}",
+                "device_type": st.dtype or None,
+                "online": _is_connected(st),
+                "origin": st.origin,
+            }
+            for gid, st in _devices.items()
+        }
+
+
 # Optional: reload device definitions (atomic swap)
 
 def reload_devices() -> None:

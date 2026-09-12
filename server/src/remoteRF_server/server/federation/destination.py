@@ -4,6 +4,11 @@ The broker is deliberately absent.  This adapter verifies only local pins and
 the exact local contract, serializes authorization with owner state, consumes
 the grant JTI in that transaction, commits, and only then signs the result.
 No production action handler is registered by default.
+
+Gate H adds an optional post-commit ``finalize`` step for handlers whose
+observation cannot run inside the owner transaction (a device RPC against
+real hardware).  Authorization and JTI consumption are still decided and
+committed first; finalize only replaces the result payload that is signed.
 """
 
 from __future__ import annotations
@@ -25,7 +30,6 @@ from remoterf_federation_core import (
     ACTION_CAPABILITIES,
     FEDERATION_RESULT_TYP,
     MAX_PROTOCOL_INTEGER,
-    MAX_RESULT_TOKEN_BYTES,
     ContractError,
     FederationError,
     ValidationError,
@@ -33,18 +37,29 @@ from remoterf_federation_core import (
     canonical_uuid,
     contract_terms_sha256,
     contract_allows,
+    empty_device_payload,
+    is_device_action,
     key_is_current,
+    max_result_token_bytes,
     parse_canonical_action_request,
     parse_unverified_grant,
     public_key_bytes,
     strict_json,
+    validate_action_result,
     validate_contract_terms,
     validate_grant_claims,
     validate_trusted_key_material,
-    validate_typed_result,
 )
 
 from .migrations import configure_connection, migrate_gate_f_usergroups_schema
+
+
+# A handler with a post-commit ``finalize`` returns this typed error from the
+# owner transaction to mean "authorized; observation follows after commit".
+# It is a valid signed-error shape, so if finalization is somehow skipped the
+# HOME receives a stable error rather than a fabricated success, and the
+# executor refuses to sign it unless finalize has replaced it.
+FINALIZE_PENDING = "finalize_pending"
 
 
 class FederationBusinessError(Exception):
@@ -503,22 +518,29 @@ class ServerFederationExecutor:
         )
 
     def _typed_error(self, claims, state, code, now):
-        return validate_typed_result(
-            {
-                "status": "error",
-                "error_code": code,
-                "deployment_id": self.local_deployment_id,
-                "display_name": self.display_name,
-                "contract_id": claims["contract_id"],
-                "contract_version": claims["contract_version"],
-                "state": state,
+        action = claims["action"]
+        common = {
+            "status": "error",
+            "error_code": code,
+            "deployment_id": self.local_deployment_id,
+            "display_name": self.display_name,
+            "contract_id": claims["contract_id"],
+            "contract_version": claims["contract_version"],
+            "state": state,
+            "retrieved_at": now,
+        }
+        if is_device_action(action):
+            # A device error carries the canonical empty payload for its
+            # action so it can never be rendered as an authoritative answer.
+            body = {**common, "payload": empty_device_payload(action)}
+        else:
+            body = {
+                **common,
                 "groups": [],
-                "retrieved_at": now,
                 "redemption_id": None,
                 "membership_present": None,
-            },
-            action=claims["action"],
-        )
+            }
+        return validate_action_result(body, action=action)
 
     @staticmethod
     def _audit_rejection(conn, claims, code, now):
@@ -582,10 +604,12 @@ class ServerFederationExecutor:
         token = self._encode_result(claims, result, now=now, expires=expires)
         # 64 bytes covers the maximum possible decimal-width growth of both
         # JWT timestamps between this prediction and the immediate final sign.
-        if len(token.encode("utf-8")) > MAX_RESULT_TOKEN_BYTES - 64:
+        if len(token.encode("utf-8")) > max_result_token_bytes(claims["action"]) - 64:
             raise FederationError("result_too_large")
 
     def _sign_after_commit(self, claims, result):
+        if result["status"] == "error" and result["error_code"] == FINALIZE_PENDING:
+            raise FederationError("finalize_incomplete")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             now = int(self.clock())
@@ -616,9 +640,56 @@ class ServerFederationExecutor:
             if hook is not None:
                 hook()
             token = self._encode_result(claims, result, now=now, expires=expires)
-            if len(token.encode("utf-8")) > MAX_RESULT_TOKEN_BYTES:
+            if len(token.encode("utf-8")) > max_result_token_bytes(claims["action"]):
                 raise FederationError("result_too_large")
         return {"protocol_version": "2", "signed_result": token, "error": None}
+
+    def _finalize_after_commit(self, handler, verified, claims, state, result):
+        """Run a handler's post-commit observation and re-shape the result.
+
+        Only a ``finalize_pending`` marker is finalized: any other result was
+        decided inside the owner transaction and is already final.  Whatever
+        finalize returns is validated with the action's own grammar and
+        re-stamped with the current clock, because the observation happened
+        now, not at authorization time.  A finalize failure becomes a
+        destination-signed error; the grant JTI is already consumed either
+        way, so the outcome is never ambiguous.
+        """
+
+        finalize = getattr(handler, "finalize", None)
+        pending = (
+            result["status"] == "error" and result["error_code"] == FINALIZE_PENDING
+        )
+        if not pending:
+            return result
+        if not callable(finalize):
+            return self._typed_error(
+                claims, state, "finalize_failed", int(self.clock())
+            )
+        try:
+            candidate = finalize(verified, result)
+            candidate = validate_action_result(
+                {**candidate, "retrieved_at": int(self.clock())},
+                action=claims["action"],
+            )
+            if candidate["error_code"] == FINALIZE_PENDING:
+                raise FederationError("finalize_incomplete")
+        except FederationBusinessError as exc:
+            return self._typed_error(claims, state, exc.code, int(self.clock()))
+        except Exception:
+            return self._typed_error(
+                claims, state, "finalize_failed", int(self.clock())
+            )
+        # Predict the signed size before committing to this payload so an
+        # oversized hardware response degrades to a stable signed error
+        # instead of an unsigned transport failure.
+        probe_now = int(self.clock())
+        probe = self._encode_result(
+            claims, candidate, now=probe_now, expires=probe_now + 60
+        )
+        if len(probe.encode("utf-8")) > max_result_token_bytes(claims["action"]) - 64:
+            return self._typed_error(claims, state, "result_too_large", probe_now)
+        return candidate
 
     def execute(self, protocol_version: str, grant: str, request_json: str) -> dict:
         """Return exactly one of signed_result/error; raw tokens are never logged."""
@@ -649,6 +720,7 @@ class ServerFederationExecutor:
 
         result = None
         state = "active"
+        verified = None
         try:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -677,20 +749,25 @@ class ServerFederationExecutor:
                             else:
                                 conn.execute("SAVEPOINT federation_action")
                                 try:
-                                    candidate = handler(
-                                        FederationActionTransaction(conn),
-                                        VerifiedAction(
-                                            claims=claims,
-                                            request=request,
-                                            terms=current[1],
-                                            state=state,
-                                            prepared=prepared,
-                                        ),
+                                    verified = VerifiedAction(
+                                        claims=claims,
+                                        request=request,
+                                        terms=current[1],
+                                        state=state,
+                                        prepared=prepared,
                                     )
-                                    result = validate_typed_result(
+                                    candidate = handler(
+                                        FederationActionTransaction(conn), verified
+                                    )
+                                    result = validate_action_result(
                                         candidate, action=claims["action"]
                                     )
-                                    if result["status"] != "ok":
+                                    pending = (
+                                        result["status"] == "error"
+                                        and result["error_code"] == FINALIZE_PENDING
+                                        and callable(getattr(handler, "finalize", None))
+                                    )
+                                    if result["status"] != "ok" and not pending:
                                         raise FederationError(
                                             "handler_must_raise_business_error"
                                         )
@@ -729,6 +806,10 @@ class ServerFederationExecutor:
                     )
         except Exception:
             return error_response("internal_error", retryable=False)
+        if verified is not None and handler is not None:
+            result = self._finalize_after_commit(
+                handler, verified, claims, state, result
+            )
         try:
             return self._sign_after_commit(claims, result)
         except Exception:
