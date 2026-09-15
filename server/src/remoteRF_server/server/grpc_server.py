@@ -68,6 +68,7 @@ from prompt_toolkit.output import DummyOutput
 
 from ..tools.gist_status import start_status_publisher
 from .cert_provider import start_cert_provider, stop_cert_provider
+from . import direct_path
 
 from pathlib import Path
 
@@ -214,6 +215,7 @@ class ServerRuntime:
         try:
             termination.wait(timeout=max(1.0, float(grace_sec) + 2.0))
         finally:
+            direct_path.shutdown()
             session_manager.close_all()
             host_session_proxy.close_all()
             close_local_devices()
@@ -320,6 +322,7 @@ def start_server_runtime(
             )
         )
     cert_dir = Path(cert_dir)
+    direct_path.CERT_DIR = cert_dir
 
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),

@@ -25,6 +25,8 @@ dependencies = [
   "pyserial>=3.5,<4.0",
   "pyjwt>=2.8,<3.0",
   "cryptography>=42,<44",
+  "aioice>=0.10,<0.11",
+  "aioquic>=1.2,<2.0",
 ]
 readme = "README.md"
 classifiers = [

@@ -556,6 +556,29 @@ def is_relayed(peer: str) -> bool:
     return host in {local_bind_host(), "127.0.0.1", "::1"}
 
 
+def is_offsite(host: str) -> bool:
+    """Whether a direct-path (Gate I) peer address lies outside this network.
+
+    Such a peer is treated exactly like a relayed one. Loopback, RFC 1918 and
+    the /24 of this machine's LAN address count as local.
+    ponytail: /24 heuristic, refine with a real mask when a deployment needs it.
+    """
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(host.removeprefix("::ffff:"))
+    except ValueError:
+        return True
+    if addr.is_loopback or addr.is_private:
+        return False
+    try:
+        return addr not in ipaddress.ip_network(
+            f"{detected_lan_ip() or local_bind_host()}/24", strict=False
+        )
+    except ValueError:
+        return True
+
+
 def lan_only_hint(what: str) -> str:
     """The refusal a relayed caller sees for LAN-only material."""
     return (

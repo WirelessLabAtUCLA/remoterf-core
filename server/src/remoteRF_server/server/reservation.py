@@ -153,6 +153,14 @@ class ReservationHandler:
             elif function_name == 'logout':
                 self.revoke_session(unmap_arg(args['pw']))
                 return {"UC": map_arg("Logged out.")}
+            elif function_name == 'direct_offer':
+                username = unmap_arg(args['un'])
+                password = unmap_arg(args['pw'])
+                if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+                    from .direct_path import offer
+                    return offer(self._session_hash(password), username, unmap_arg(args['ice']))
+                else:
+                    return {"ace": map_arg("Invalid login credentials.")}
             elif function_name == 'cancel_res':
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
@@ -1497,6 +1505,7 @@ _SAFE_ACTIVITY_ARGS = {
     "get_perms": ("un",),
     "cancel_res": ("un", "res_id"),
     "set_enroll": ("un",),
+    "direct_offer": ("un",),
 }
 
 
