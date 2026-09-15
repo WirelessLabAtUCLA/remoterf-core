@@ -194,7 +194,9 @@ class _Protocol(QuicConnectionProtocol):
 
     def quic_event_received(self, event) -> None:
         if isinstance(event, events.ConnectionTerminated):
-            self.terminated = event.reason_phrase or f"QUIC error {event.error_code:#x}"
+            self.terminated = event.reason_phrase or (
+                f"QUIC error {event.error_code:#x}" if event.error_code else ""
+            )
         super().quic_event_received(event)
 
 
