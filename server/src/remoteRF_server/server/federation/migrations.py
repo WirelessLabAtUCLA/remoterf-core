@@ -738,6 +738,11 @@ def migrate_gate_f_usergroups_schema(conn: sqlite3.Connection) -> None:
     for name, sql_type in _GATE_F_COLUMNS:
         if name not in columns:
             conn.execute(f"ALTER TABLE EnrollmentCodes ADD COLUMN {name} {sql_type}")
+    # Outside the checksummed Gate F material on purpose: a plain additive
+    # column, applied in place, that every schema path has to agree on.
+    group_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(UserGroups)")}
+    if "lan_only" not in group_columns:
+        conn.execute("ALTER TABLE UserGroups ADD COLUMN lan_only INTEGER NOT NULL DEFAULT 0")
     conn.executescript(_GATE_F_DDL)
     conn.execute(
         "INSERT OR IGNORE INTO SchemaMigrations "

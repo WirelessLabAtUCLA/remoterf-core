@@ -296,20 +296,12 @@ class perms_db:
     
     @db_connection
     def print_perms(self):
-        print("Printing all permissions:")
-        print("Users:")
-        # SQL query to select all users from the Users table
-        query = 'SELECT * FROM Users'
+        from ..common.utils.panel import print_table
 
-        # Execute the query
-        self.cursor.execute(query)
-
-        # Fetch all results
-        results = self.cursor.fetchall()
-
-        # Print the results
-        for result in results:
-            print(result)
+        self.cursor.execute("SELECT * FROM Users")
+        columns = [item[0] for item in self.cursor.description or []]
+        rows = [dict(zip(columns, r)) for r in self.cursor.fetchall() or []]
+        print_table("Permissions", rows, columns, empty="No users found.")
             
         print("\nPowerUsers:")
         # SQL query to select all users from the PowerUsers table

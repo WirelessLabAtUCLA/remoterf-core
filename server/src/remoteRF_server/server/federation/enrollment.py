@@ -230,11 +230,14 @@ class ServerEnrollmentCodeStore:
                     raise FederationError("contract_key_mismatch")
             group = conn.execute(
                 "SELECT group_id,group_name,devices_whitelist,max_reservation_time_sec,"
-                "max_reservations,lifetime_sec,created_at FROM UserGroups WHERE group_id=?",
+                "max_reservations,lifetime_sec,created_at,lan_only FROM UserGroups WHERE group_id=?",
                 (group_id,),
             ).fetchone()
             if not _group_current(group, now):
                 raise FederationError("group_expired")
+            if group[7]:
+                # Federation is the opposite of LAN-only.
+                raise FederationError("group_lan_only")
             code_name = secrets.token_urlsafe(24)
             expires = None if duration_sec == 0 else now + duration_sec
             conn.execute(
@@ -387,10 +390,14 @@ class ServerFederatedEnrollHandler:
                 raise FederationBusinessError("principal_disabled")
             group = tx.execute(
                 "SELECT group_id,group_name,devices_whitelist,max_reservation_time_sec,"
-                "max_reservations,lifetime_sec,created_at FROM UserGroups WHERE group_id=?",
+                "max_reservations,lifetime_sec,created_at,lan_only FROM UserGroups WHERE group_id=?",
                 (receipt[3],),
             ).fetchone()
-            present = membership_exists_tx(tx, int(receipt[5]), int(receipt[3])) and _group_current(group, now)
+            present = (
+                membership_exists_tx(tx, int(receipt[5]), int(receipt[3]))
+                and _group_current(group, now)
+                and not group[7]
+            )
             groups = (
                 [{"group_id": str(group[0]), "group_name": group[1]}]
                 if present
@@ -434,11 +441,13 @@ class ServerFederatedEnrollHandler:
             raise FederationBusinessError("code_exhausted")
         group = tx.execute(
             "SELECT group_id,group_name,devices_whitelist,max_reservation_time_sec,"
-            "max_reservations,lifetime_sec,created_at FROM UserGroups WHERE group_id=?",
+            "max_reservations,lifetime_sec,created_at,lan_only FROM UserGroups WHERE group_id=?",
             (code[2],),
         ).fetchone()
         if not _group_current(group, now):
             raise FederationBusinessError("group_expired")
+        if group[7]:
+            raise FederationBusinessError("group_lan_only")
         prepared = action.prepared
         if not isinstance(prepared, PreparedFederatedAccount):
             raise RuntimeError("federated proxy preparation unavailable")

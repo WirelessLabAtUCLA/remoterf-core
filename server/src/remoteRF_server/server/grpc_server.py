@@ -173,8 +173,15 @@ class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
         #         results=remote_admin_call(function_name=function_name_args[1], args=request.args)
         #     )
 
-        # Normal RPC
-        response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
+        # Normal RPC. Everything below reads RELAYED instead of the peer:
+        # LAN-only groups do not exist to a call that came through the relay.
+        from .global_onboarding import RELAYED, is_relayed
+
+        token = RELAYED.set(is_relayed(context.peer()))
+        try:
+            response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
+        finally:
+            RELAYED.reset(token)
         return grpc_pb2.GenericRPCResponse(results=response)
 
 
@@ -432,11 +439,16 @@ def serve() -> None:
 start_time = datetime.now()
 
 def welcome():
+    # Breathing room after first-run setup and driver bookkeeping.
+    print()
     printf(f"Server running nominally.", Sty.BOLD)
     printf(BANNER_CREDIT, Sty.GRAY)
     printf(f"Local IP: ", Sty.DEFAULT, f"{local_ip}", Sty.ITALIC, f" | Port: ", Sty.DEFAULT, f"{local_port}", Sty.ITALIC)
     # printf(f"   -> Started at ", Sty.DEFAULT, f"{start_time}", Sty.DEFAULT)
     printf("Input ", Sty.DEFAULT, "'help'", Sty.BOLD," for help menu.", Sty.DEFAULT)
+    from . import console
+    if console.attached():
+        printf("Ctrl-C leaves this console (server keeps running); ", Sty.GRAY, "quit", Sty.MAGENTA, " stops it.", Sty.GRAY)
 
 def clear():
     os.system('clear')
@@ -562,11 +574,10 @@ def set_acc():
         print("Canceled. Exiting ...")
 
 def get_devices():
-    data = get_all_devices_str()
-    
-    printf("Devices:", Sty.BOLD)
-    for key, value in data.items():
-        printf(f"Device ID:", Sty.DEFAULT, f' {key}', Sty.MAGENTA, f" Device Name: ", Sty.DEFAULT, f"{(value)}", Sty.GRAY)
+    from ..common.utils.panel import print_table
+
+    rows = [{"device_id": key, "name": value} for key, value in sorted(get_all_devices_str().items())]
+    print_table("Devices", rows, ["device_id", "name"], empty="No devices configured.")
 
 def _fmt_ms_ago(ms: int) -> str:
     if not ms:
@@ -580,68 +591,45 @@ def _fmt_ms_ago(ms: int) -> str:
     return f"{dt/60_000:.1f}m"
 
 def _cmd_hosts_status() -> None:
+    from ..common.utils.panel import print_table
+
     reg = hts.get_tunnel_registry()
     assert reg is not None
-    
-    # print("\n[hosts status] registry debug")
-    # print(f"  hts module: {hts.__name__}")
-    # reg = hts.get_tunnel_registry(create=False)
-    # print(f"  registry id: {id(reg) if reg else None}\n")
-
     hosts = reg.list_hosts()     # host_id -> HostStatus
     devices = reg.list_devices() # device_id -> DeviceStatus
+    by_host: dict[str, int] = {}
+    for ds in devices.values():
+        by_host[ds.host_id or "-"] = by_host.get(ds.host_id or "-", 0) + 1
+    rows = [
+        {
+            "host_id": hid,
+            "online": hs.online,
+            "last_seen": f"{_fmt_ms_ago(hs.last_seen_ms)} ago",
+            "devices": by_host.get(hid, 0),
+        }
+        for hid, hs in sorted(hosts.items(), key=lambda kv: kv[0])
+    ]
+    print_table("Hosts (live)", rows, ["host_id", "online", "last_seen", "devices"])
 
-    # Build host -> device list
-    by_host: dict[str, list[str]] = {}
-    for did, ds in devices.items():
-        by_host.setdefault(ds.host_id or "-", []).append(did)
-
-    printf("Hosts:", Sty.BOLD)
-    if not hosts:
-        printf("  (none)", Sty.GRAY)
-        return
-
-    for hid, hs in sorted(hosts.items(), key=lambda kv: kv[0]):
-        dlist = sorted(by_host.get(hid, []))
-        printf(
-            "  ", Sty.DEFAULT,
-            f"{hid}", Sty.MAGENTA,
-            "  online=", Sty.DEFAULT, f"{hs.online}", Sty.GRAY if hs.online else Sty.GRAY,
-            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(hs.last_seen_ms)} ago", Sty.GRAY,
-            "  devices=", Sty.DEFAULT, f"{len(dlist)}", Sty.GRAY
-        )
-        for did in dlist:
-            ds = devices.get(did)
-            if ds is None:
-                continue
-            printf(
-                "     - ", Sty.DEFAULT,
-                f"{did}", Sty.MAGENTA,
-                "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
-                "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GRAY if ds.online else Sty.GRAY,
-                "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.GRAY
-            )
 
 def _cmd_devices_status() -> None:
+    from ..common.utils.panel import print_table
+
     reg = hts.get_tunnel_registry()
     assert reg is not None
+    rows = [
+        {
+            "device_id": did,
+            "host": ds.host_id or "-",
+            "local_id": ds.host_local_id,
+            "online": ds.online,
+            "last_seen": f"{_fmt_ms_ago(ds.last_seen_ms)} ago",
+        }
+        for did, ds in sorted(reg.list_devices().items(), key=lambda kv: kv[0])
+    ]
+    print_table("Devices (live)", rows, ["device_id", "host", "local_id", "online", "last_seen"])
 
-    devices = reg.list_devices()
-    printf("Devices (live):", Sty.BOLD)
-    if not devices:
-        printf("  (none)", Sty.GRAY)
-        return
 
-    for did, ds in sorted(devices.items(), key=lambda kv: kv[0]):
-        printf(
-            "  ", Sty.DEFAULT,
-            f"{did}", Sty.MAGENTA,
-            "  host=", Sty.DEFAULT, f"{ds.host_id or '-'}", Sty.GRAY,
-            "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
-            "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GREEN if ds.online else Sty.RED,
-            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
-        )
-        
 def _repo_root_guess() -> Path:
     """
     Best-effort: find <repo>/src/... and return <repo>.
@@ -1026,67 +1014,122 @@ from typing import Callable
 def _norm_cmd(s: str) -> str:
     return " ".join((s or "").strip().split()).lower()
 
+def _cmd_detach() -> None:
+    from . import console
+
+    if console.attached():
+        printf("Server keeps running. ", Sty.GRAY, "serverrf -s", Sty.MAGENTA, " to come back.", Sty.GRAY)
+        console.detach()
+    else:
+        printf("Not in the console; the server runs in this terminal. Use quit to stop it.", Sty.GRAY)
+
+
 def _cmd_status() -> None:
+    from ..common.utils.panel import marker, print_panel
+    from . import global_onboarding as g
+
     try:
-        uptime = datetime.now() - start_time
-        printf("Status:", Sty.BOLD)
-        printf("  Started: ", Sty.DEFAULT, f"{start_time}", Sty.BLUE)
-        printf("  Uptime : ", Sty.DEFAULT, f"{str(uptime).split('.')[0]}", Sty.BLUE)
-        printf("  Bind   : ", Sty.DEFAULT, f"{local_ip}:{local_port}", Sty.MAGENTA)
-        printf("  Cert   : ", Sty.DEFAULT, f"{local_ip}:{cert_port}", Sty.MAGENTA)
-    except Exception:
-        printf("Status unavailable.", Sty.RED)
+        uptime = str(datetime.now() - start_time).split(".")[0]
+        fields = [
+            ("started", str(start_time).split(".")[0]),
+            ("uptime", uptime),
+            ("bind", f"{local_ip}:{local_port}"),
+            ("cert", f"{local_ip}:{cert_port}"),
+            ("devices", str(len(get_all_devices_str()))),
+        ]
+        kv = g.load()
+        if g.participating():
+            state = kv.get("GLOBAL_STATE", "unregistered")
+            fields += [
+                ("", ""),
+                ("global", f"{state} -- {g._STATE_SUMMARY.get(state, '')}".rstrip(" -")),
+                ("hostname", g.hostname() or "-"),
+                ("share LAN", kv.get("GLOBAL_SHARE_LAN", "no")),
+                ("tunnel", g.tunnel_state()),
+                ("last report", (kv.get("GLOBAL_LAST_REPORT_AT") or "-").split(".")[0]),
+            ]
+        else:
+            fields += [("", ""), ("global", "not participating (serverrf global join)")]
+        width = max(len(name) for name, _ in fields)
+        rows = [f"{marker()} Server running since {fields[0][1]}", ""]
+        rows += [f"{name:<{width}}  {value}" if name else "" for name, value in fields]
+        print()
+        print_panel("Server status", rows, literal=True)
+        print()
+    except Exception as exc:  # noqa: BLE001
+        printf(f"Status unavailable: {exc}", Sty.RED)
+
+# Canonical spellings only; the aliases in DISPATCH are deliberately unlisted.
+_HELP_SECTIONS = (
+    ("Server", (
+        ("help, h", "Show this help"),
+        ("clear", "Clear the screen"),
+        ("status", "Server uptime, bind, devices, RemoteRF Global"),
+        ("quit / kill", "Stop the server"),
+        ("detach", "Leave the console; the server keeps running (also Ctrl-C)"),
+    )),
+    ("Users", (
+        ("users list", "List accounts"),
+        ("users manage", "Manage a user (perms / delete / reservations)"),
+        ("users purge", "Remove ALL users"),
+    )),
+    ("Devices", (
+        ("devices list", "List devices"),
+        ("devices status", "Live device online/last_seen/route"),
+    )),
+    ("Reservations", (
+        ("reservations list", "List reservations"),
+        ("reservations purge", "Remove ALL reservations"),
+    )),
+    ("Groups", (
+        ("groups list", "List user groups"),
+        ("groups create", "Create a user group (interactive)"),
+        ("groups edit", "Edit a user group (interactive)"),
+        ("groups delete", "Delete a user group (interactive)"),
+        ("groups csv", "Export ALL user groups as CSV to Downloads"),
+    )),
+    ("Enrollment codes", (
+        ("codes list", "List enrollment codes"),
+        ("codes create", "Create enrollment codes (interactive)"),
+        ("codes delete", "Delete an enrollment code (interactive)"),
+        ("codes csv", "Export ALL enrollment codes as CSV to Downloads"),
+    )),
+    ("Host tunnel (live)", (
+        ("hosts status", "Live host online/last_seen/devices"),
+        ("hosts wipe [-y]", "Wipe persisted host directory state"),
+    )),
+    ("Database", (
+        ("db purge", "Remove all database entries"),
+    )),
+)
+
 
 def help() -> None:
-    printf("RemoteRF Server Shell", Sty.BOLD)
-    printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands. Type ", Sty.DEFAULT, "quit", Sty.MAGENTA, " to exit.", Sty.DEFAULT)
-    print()
+    from ..common.utils.panel import panel_lines
 
-    printf("Server:", Sty.BOLD)
-    printf("  help, h                  ", Sty.MAGENTA, "- Show this help", Sty.DEFAULT)
-    printf("  clear                    ", Sty.MAGENTA, "- Clear the screen", Sty.DEFAULT)
-    printf("  status                   ", Sty.MAGENTA, "- Show server status (uptime/bind)", Sty.DEFAULT)
-    printf("  quit / exit              ", Sty.MAGENTA, "- Exit the shell", Sty.DEFAULT)
-    print()
-
-    printf("Users:", Sty.BOLD)
-    printf("  users list               ", Sty.MAGENTA, "- List accounts", Sty.DEFAULT)
-    printf("  users manage             ", Sty.MAGENTA, "- Manage a user (perms / delete / reservations)", Sty.DEFAULT)
-    printf("  users purge              ", Sty.MAGENTA, "- Remove ALL users", Sty.DEFAULT)
-    print()
-
-    printf("Devices:", Sty.BOLD)
-    printf("  devices list             ", Sty.MAGENTA, "- List devices", Sty.DEFAULT)
-    printf("  devices status          ", Sty.MAGENTA, "- Live device online/last_seen/route", Sty.DEFAULT)
-    print()
-
-    printf("Reservations:", Sty.BOLD)
-    printf("  reservations list        ", Sty.MAGENTA, "- List reservations", Sty.DEFAULT)
-    printf("  reservations purge       ", Sty.MAGENTA, "- Remove ALL reservations", Sty.DEFAULT)
-    print()
-
-    printf("Groups:", Sty.BOLD)
-    printf("  groups list              ", Sty.MAGENTA, "- List user groups", Sty.DEFAULT)
-    printf("  groups create            ", Sty.MAGENTA, "- Create a user group (interactive)", Sty.DEFAULT)
-    printf("  groups edit              ", Sty.MAGENTA, "- Edit a user group (interactive)", Sty.DEFAULT)
-    printf("  groups delete            ", Sty.MAGENTA, "- Delete a user group (interactive)", Sty.DEFAULT)
-    printf("  groups csv               ", Sty.MAGENTA, "- Export ALL user groups as CSV to Downloads", Sty.DEFAULT)
-    print()
-
-    printf("Enrollment Codes:", Sty.BOLD)
-    printf("  codes list               ", Sty.MAGENTA, "- List enrollment codes", Sty.DEFAULT)
-    printf("  codes create             ", Sty.MAGENTA, "- Create enrollment codes (interactive)", Sty.DEFAULT)
-    printf("  codes delete             ", Sty.MAGENTA, "- Delete an enrollment code (interactive)", Sty.DEFAULT)
-    printf("  codes csv                ", Sty.MAGENTA, "- Export ALL enrollment codes as CSV to Downloads", Sty.DEFAULT)
-    print()
-    
-    printf("Host Tunnel (live):", Sty.BOLD)
-    printf("  hosts status            ", Sty.MAGENTA, "- Live host online/last_seen/devices", Sty.DEFAULT)
-    printf("  hosts wipe              ", Sty.MAGENTA, "- Wipe persisted host directory state (and clear in-memory)", Sty.DEFAULT)
-
-    printf("Database:", Sty.BOLD)
-    printf("  db purge                 ", Sty.MAGENTA, "- Remove all database entries", Sty.DEFAULT)
-    print()
+    width = max(len(command) for _, rows in _HELP_SECTIONS for command, _ in rows)
+    body: list[str] = []
+    for title, rows in _HELP_SECTIONS:
+        if body:
+            body.append("")
+        body.append(title)
+        body += [f"  {command:<{width}}  {text}" for command, text in rows]
+    lines = panel_lines("RemoteRF Server Shell", body, literal=True)
+    # Frame + one space of padding, then the two-space command indent.
+    command_at = 2 + 2
+    printf("", Sty.DEFAULT)
+    for index, line in enumerate(lines):
+        inner = line[1:-1]
+        if index in (0, len(lines) - 1) or not inner.strip():
+            printf(line, Sty.DEFAULT)
+        elif inner.startswith("   "):
+            printf(line[:command_at], Sty.DEFAULT,
+                   line[command_at:command_at + width], Sty.MAGENTA,
+                   line[command_at + width:-1], Sty.DEFAULT,
+                   line[-1], Sty.DEFAULT)
+        else:
+            printf(line[0], Sty.DEFAULT, inner, Sty.BOLD, line[-1], Sty.DEFAULT)
+    printf("", Sty.DEFAULT)
 
 def server_input(inpu: str) -> bool:
     cmd = _norm_cmd(inpu)
@@ -1112,6 +1155,8 @@ def server_input(inpu: str) -> bool:
         "quit": lambda: False,
         "exit": lambda: False,
         "q": lambda: False,
+        "kill": lambda: False,
+        "detach": lambda: _stay(_cmd_detach),
 
         # ---- users ----
         "users list": lambda: _stay(reservation_handler.print_all_accounts),
@@ -1201,15 +1246,22 @@ def server_input(inpu: str) -> bool:
     return fn()
 
 def main() -> int:
+    from . import console
+
     runtime = start_server_runtime()
     welcome()
     try:
-        while server_input(
-            session.prompt(stylize("server@remoterf: ", Sty.BOLD))
-        ):
-            pass
-    except (EOFError, KeyboardInterrupt):
-        pass
+        while True:
+            try:
+                if not server_input(session.prompt(stylize("server@remoterf: ", Sty.BOLD))):
+                    break
+            except (EOFError, KeyboardInterrupt):
+                if not console.attached():
+                    break
+                # In the console, Ctrl-C leaves; only `quit` stops the server.
+                printf("Server keeps running. Type ", Sty.GRAY, "quit", Sty.MAGENTA,
+                       " to stop it; ", Sty.GRAY, "serverrf -s", Sty.MAGENTA, " to come back.", Sty.GRAY)
+                console.detach()
     finally:
         runtime.stop()
     return 0

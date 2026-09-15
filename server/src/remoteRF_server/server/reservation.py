@@ -39,6 +39,7 @@ from .device_manager import (
 )
 from .acc_perms import perms
 from .user_group_handler import user_group_handler
+from .global_onboarding import RELAYED, lan_only_hint
 from .federation.migrations import (
     FEDERATED_PASSWORD_HASH,
     FEDERATED_PASSWORD_SALT,
@@ -93,6 +94,18 @@ class ReservationHandler:
         self.cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_reservations_device_id ON Reservations(device_id);
         ''')
+
+        # "Stay logged in" for the deployment protocol: a random token the
+        # client keeps instead of the password. Only its hash lives here, so
+        # the table reveals nothing; a row is revoked by logout or purge.
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ClientSessions (
+            token_hash TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            last_used_at TIMESTAMP NOT NULL
+        )
+        ''')
         
         self.cursor.close()
         self.db.commit()
@@ -132,7 +145,14 @@ class ReservationHandler:
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
             elif function_name == 'login':
-                return self.login_user(unmap_arg(args['un']), unmap_arg(args['pw']))
+                username = unmap_arg(args['un'])
+                result = self.login_user(username, unmap_arg(args['pw']))
+                if "UC" in result and unmap_arg(args.get('remember', map_arg(False))):
+                    result = {**result, "token": map_arg(self.issue_session(username))}
+                return result
+            elif function_name == 'logout':
+                self.revoke_session(unmap_arg(args['pw']))
+                return {"UC": map_arg("Logged out.")}
             elif function_name == 'cancel_res':
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
@@ -270,6 +290,8 @@ class ReservationHandler:
                             "UC": map_arg("Federated enrollment confirmed."),
                             "federation": map_arg(canonical_json(result)),
                         }
+                    if RELAYED.get() and user_group_handler.code_is_lan_only(code_name=code_name):
+                        return {"UE": map_arg(lan_only_hint("This enrollment code"))}
                     if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
                         return {'UC': map_arg(f'Enrolled {username}.')}
                     else:
@@ -303,6 +325,8 @@ class ReservationHandler:
             return {"UE": map_arg("Invalid email address.")}
         
         try:
+            if RELAYED.get() and user_group_handler.code_is_lan_only(code_name=ec):
+                return {"UE": map_arg(lan_only_hint("This enrollment code"))}
             if not user_group_handler.validate_enrollment_code(code_name=ec):
                 return {"UE": map_arg("Invalid or expired enrollment code.")}
         except Exception:
@@ -343,6 +367,7 @@ class ReservationHandler:
             self.cursor.execute(
                 "DELETE FROM Reservations WHERE username = ?", (username,)
             )
+        self.cursor.execute('DELETE FROM ClientSessions WHERE username = ?', (username,))
         self.cursor.execute('DELETE FROM Accounts WHERE username = ?', (username,))
         perms.delete_user_from_reservation_handler(username)
         return {"UC": map_arg(f'Removed {username}')}
@@ -367,11 +392,13 @@ class ReservationHandler:
             if input("Last chance. Are you sure? (y/n): ") == 'y':
                 self.cursor.execute('DROP TABLE IF EXISTS Accounts')
                 self.cursor.execute('DROP TABLE IF EXISTS Reservations')
+                self.cursor.execute('DROP TABLE IF EXISTS ClientSessions')
                 perms.rm_db()
                 sys.exit()
     
     @db_connection 
     def remove_all_users(self):
+        self.cursor.execute('DELETE FROM ClientSessions')
         self.cursor.execute('DELETE FROM Accounts')
         print("All accounts removed.")
         
@@ -396,9 +423,61 @@ class ReservationHandler:
         if account[4] != "local_password" or state != "native":
             return {"UE": map_arg("Invalid login details.")}
 
-        if validate_token(account[2], account[3], password):
-            return {"UC": map_arg(f"{username}")}
-        return {"UE": map_arg("Invalid login details.")}
+        if not validate_token(account[2], account[3], password) and not self._session_matches(
+            username, password
+        ):
+            return {"UE": map_arg("Invalid login details.")}
+        if RELAYED.get() and user_group_handler.user_is_lan_only(uid=int(account[0])):
+            return {"UE": map_arg(lan_only_hint("This account"))}
+        return {"UC": map_arg(f"{username}")}
+
+    # ---- client sessions (deployment protocol "stay logged in") ----
+
+    @staticmethod
+    def _session_hash(secret: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(str(secret).encode("utf-8")).hexdigest()
+
+    def _session_matches(self, username: str, secret: str) -> bool:
+        if not secret or len(str(secret)) < 32:
+            return False  # a real password never reaches this; a token is 43 chars
+        try:
+            self.cursor.execute(
+                "SELECT username FROM ClientSessions WHERE token_hash = ?",
+                (self._session_hash(secret),),
+            )
+        except sqlite3.OperationalError:
+            return False  # a database that predates sessions has none
+        row = self.cursor.fetchone()
+        if row is None or row[0] != username:
+            return False
+        self.cursor.execute(
+            "UPDATE ClientSessions SET last_used_at = ? WHERE token_hash = ?",
+            (datetime.now(), self._session_hash(secret)),
+        )
+        return True
+
+    @db_connection
+    def issue_session(self, username: str) -> str:
+        """A fresh token for a login that just succeeded with the password."""
+        import secrets
+
+        token = secrets.token_urlsafe(32)
+        now = datetime.now()
+        # ponytail: no expiry -- revoked by logout, user removal or purge.
+        self.cursor.execute(
+            "INSERT INTO ClientSessions (token_hash, username, created_at, last_used_at) "
+            "VALUES (?, ?, ?, ?)",
+            (self._session_hash(token), username, now, now),
+        )
+        return token
+
+    @db_connection
+    def revoke_session(self, secret: str) -> None:
+        self.cursor.execute(
+            "DELETE FROM ClientSessions WHERE token_hash = ?", (self._session_hash(secret),)
+        )
 
     def resolve_federated_account(
         self, *, issuer_deployment_id: str, remote_subject_id: str
@@ -787,16 +866,14 @@ class ReservationHandler:
     
     @db_connection 
     def print_all_reservations(self):
-        print("Printing all reservations...")
+        from ..common.utils.panel import print_table
+
         cursor = self.db.cursor()
-        cursor.execute("""SELECT * FROM Reservations""")
-        reservations = cursor.fetchall()
+        cursor.execute("SELECT res_id, username, device_id, start_time, end_time FROM Reservations")
+        columns = ["res_id", "username", "device_id", "start_time", "end_time"]
+        rows = [dict(zip(columns, r)) for r in cursor.fetchall() or []]
         cursor.close()
-        if reservations is not None:
-            for reservation in reservations:
-                print("Id:", reservation[0],"Username:", reservation[1], " Device ID:", reservation[2], " Start Time:", reservation[3], " End Time:", reservation[4])
-        else:
-            print("No reservations found.")
+        print_table("Reservations", rows, columns, empty="No reservations found.")
             
     @db_connection
     def get_all_accounts(self):
@@ -808,16 +885,22 @@ class ReservationHandler:
             
     @db_connection    
     def print_all_accounts(self):
-        print("Printing all accounts...")
+        from ..common.utils.panel import print_table
+
         cursor = self.db.cursor()
-        cursor.execute("SELECT * FROM Accounts")
-        accounts = cursor.fetchall()
+        cursor.execute("SELECT username, email, created_at, auth_type FROM Accounts")
+        rows = []
+        for username, email, created_at, auth_type in cursor.fetchall() or []:
+            role = perms.get_perms(username)
+            rows.append({
+                "username": username,
+                "role": role[0][0] if role else "",
+                "email": email,
+                "auth": auth_type,
+                "created_at": created_at,
+            })
         cursor.close()
-        if accounts is not None:
-            for account in accounts:
-                print("Username:", account[1], f'<{perms.get_perms(account[1])[0][0]}>', " Email:", account[2], " Created At:", account[5])
-        else:
-            print("No accounts found.")
+        print_table("Accounts", rows, ["username", "role", "email", "auth", "created_at"], empty="No accounts found.")
             
     @db_connection
     def get_obfuscated_device_reservations_grouped_past_days(self, days: int) -> dict[str, dict[str, int]]:

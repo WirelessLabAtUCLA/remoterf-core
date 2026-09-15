@@ -25,9 +25,15 @@ from typing import Optional, Tuple, List
 
 from ..common.utils import *
 from .federation.migrations import migrate_gate_f_usergroups_schema
+from .global_onboarding import RELAYED
 
 import os
 import sys
+
+def whitelist_allows(whitelist, device_id) -> bool:
+    """An empty whitelist is unrestricted: the group may use every device."""
+    return not whitelist or device_id in whitelist
+
 
 class UserGroupHandler:
     '''
@@ -88,7 +94,7 @@ class UserGroupHandler:
         );
         ''')
 
-        migrate_gate_f_usergroups_schema(self.db)
+        migrate_gate_f_usergroups_schema(self.db)  # also adds UserGroups.lan_only
         
         self.cursor.close()
         self.db.commit()
@@ -104,6 +110,7 @@ class UserGroupHandler:
         max_reservation_time_sec: int,
         max_reservations: int,
         lifetime_sec: int,
+        lan_only: bool = False,
     ) -> Optional[int]:
         try:
             if not isinstance(group_name, str) or not group_name.strip():
@@ -139,8 +146,8 @@ class UserGroupHandler:
             self.cursor.execute(
                 """
                 INSERT INTO UserGroups
-                (group_name, devices_whitelist, max_reservation_time_sec, max_reservations, lifetime_sec, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (group_name, devices_whitelist, max_reservation_time_sec, max_reservations, lifetime_sec, created_at, lan_only)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     group_name.strip(),
@@ -149,6 +156,7 @@ class UserGroupHandler:
                     max_reservations,
                     lifetime_sec,
                     datetime.now(),
+                    int(bool(lan_only)),
                 ),
             )
             group_id = self.cursor.lastrowid
@@ -156,6 +164,40 @@ class UserGroupHandler:
 
         except Exception:
             return None
+
+    def _user_group_ids(self, uid: int) -> list[int]:
+        """Groups that apply to the current call.
+
+        Not a @db_connection method: it runs on the caller's open cursor.
+        """
+        self.cursor.execute(
+            "SELECT ul.group_id FROM UsersLookup ul "
+            "JOIN UserGroups g ON g.group_id = ul.group_id "
+            "WHERE ul.user_id = ? AND (g.lan_only = 0 OR ? = 0)",
+            (uid, int(RELAYED.get())),
+        )
+        return [int(r[0]) for r in self.cursor.fetchall() or [] if r and r[0] is not None]
+
+    @db_connection
+    def user_is_lan_only(self, *, uid: int) -> bool:
+        """Every group this user belongs to is LAN-only (and there is at least one)."""
+        self.cursor.execute(
+            "SELECT COUNT(*), SUM(g.lan_only = 0) FROM UsersLookup ul "
+            "JOIN UserGroups g ON g.group_id = ul.group_id WHERE ul.user_id = ?",
+            (int(uid),),
+        )
+        total, open_groups = self.cursor.fetchone() or (0, 0)
+        return int(total or 0) > 0 and int(open_groups or 0) == 0
+
+    @db_connection
+    def code_is_lan_only(self, *, code_name: str) -> bool:
+        self.cursor.execute(
+            "SELECT g.lan_only FROM EnrollmentCodes c "
+            "JOIN UserGroups g ON g.group_id = c.group_id WHERE c.code_name = ? LIMIT 1",
+            (str(code_name).strip(),),
+        )
+        row = self.cursor.fetchone()
+        return bool(row and row[0])
 
     @db_connection
     def get_groups_user_in(self, *, uid: int) -> list[str]:
@@ -165,11 +207,7 @@ class UserGroupHandler:
                 return []
 
             # 1) Fetch group_ids the user is in
-            self.cursor.execute(
-                "SELECT group_id FROM UsersLookup WHERE user_id = ?",
-                (uid,),
-            )
-            gid_rows = self.cursor.fetchall() or []
+            gid_rows = [(g,) for g in self._user_group_ids(uid)]
             group_ids = []
             for r in gid_rows:
                 if not r or r[0] is None:
@@ -260,7 +298,8 @@ class UserGroupHandler:
         devices_whitelist: list[int] = None,
         max_reservation_time_sec: int = None,
         max_reservations: int = None,
-        lifetime_sec: int = None
+        lifetime_sec: int = None,
+        lan_only: bool = None,
     ) -> bool:
         try:
             try:
@@ -324,6 +363,10 @@ class UserGroupHandler:
                 sets.append("lifetime_sec = ?")
                 params.append(v)
 
+            if lan_only is not None:
+                sets.append("lan_only = ?")
+                params.append(int(bool(lan_only)))
+
             if not sets:
                 return False
 
@@ -347,7 +390,8 @@ class UserGroupHandler:
                     max_reservation_time_sec,
                     max_reservations,
                     lifetime_sec,
-                    created_at
+                    created_at,
+                    lan_only
                 FROM UserGroups
                 ORDER BY group_id ASC
             """)
@@ -399,6 +443,7 @@ class UserGroupHandler:
                     "max_reservation_time_sec": max_t,
                     "max_reservations": max_r,
                     "lifetime_sec": life,
+                    "lan_only": bool(r[7]),
                     "created_at": str(created_at) if created_at is not None else None,
                 }
                 if include_users:
@@ -619,6 +664,8 @@ class UserGroupHandler:
                 uses_left = int(row[0])
             except Exception:
                 return False
+            if RELAYED.get() and self.code_is_lan_only(code_name=code_name):
+                return False
             return uses_left > 0 and all(value is None for value in row[1:])
         except Exception:
             return False
@@ -652,9 +699,10 @@ class UserGroupHandler:
             ):
                 return False
 
-            # ensure group exists
-            self.cursor.execute("SELECT 1 FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
-            if self.cursor.fetchone() is None:
+            # ensure group exists, and is reachable from where this call came from
+            self.cursor.execute("SELECT lan_only FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
+            group = self.cursor.fetchone()
+            if group is None or (RELAYED.get() and group[0]):
                 return False
 
             # insert enrollment
@@ -703,11 +751,7 @@ class UserGroupHandler:
                 return []
 
             # get all group_ids the user is enrolled in
-            self.cursor.execute(
-                "SELECT group_id FROM UsersLookup WHERE user_id = ?",
-                (uid,),
-            )
-            group_rows = self.cursor.fetchall()
+            group_rows = [(g,) for g in self._user_group_ids(uid)]
             if not group_rows:
                 return []
 
@@ -732,6 +776,12 @@ class UserGroupHandler:
                 try:
                     parsed = json.loads(wl_str) if isinstance(wl_str, str) else []
                     if isinstance(parsed, list):
+                        if not parsed:
+                            # Resolved now, not at group creation, so devices
+                            # added later are covered too.
+                            from .device_manager import get_all_devices_str
+
+                            return sorted(int(k) for k in get_all_devices_str())
                         for x in parsed:
                             try:
                                 out_set.add(int(x))
@@ -763,8 +813,7 @@ class UserGroupHandler:
                 return (False, 0)
 
             # find all groups the user is in
-            self.cursor.execute("SELECT group_id FROM UsersLookup WHERE user_id = ?", (uid,))
-            group_rows = self.cursor.fetchall()
+            group_rows = [(g,) for g in self._user_group_ids(uid)]
             if not group_rows:
                 return (False, 0)
 
@@ -798,7 +847,7 @@ class UserGroupHandler:
                         except Exception:
                             whitelist = []
 
-                if device_id in whitelist:
+                if whitelist_allows(whitelist, device_id):
                     allowed = True
                     try:
                         t = int(max_time)
@@ -823,8 +872,7 @@ class UserGroupHandler:
                 return (False, 0)
 
             # find all groups the user is in
-            self.cursor.execute("SELECT group_id FROM UsersLookup WHERE user_id = ?", (uid,))
-            group_rows = self.cursor.fetchall()
+            group_rows = [(g,) for g in self._user_group_ids(uid)]
             if not group_rows:
                 return (False, 0)
 
@@ -858,7 +906,7 @@ class UserGroupHandler:
                         except Exception:
                             whitelist = []
 
-                if device_id in whitelist:
+                if whitelist_allows(whitelist, device_id):
                     allowed = True
                     try:
                         n = int(max_res)
@@ -910,8 +958,7 @@ class UserGroupHandler:
                 rdevs = []
 
             # groups for user
-            self.cursor.execute("SELECT group_id FROM UsersLookup WHERE user_id = ?", (uid,))
-            group_rows = self.cursor.fetchall() or []
+            group_rows = [(g,) for g in self._user_group_ids(uid)] or []
             group_ids = [int(r[0]) for r in group_rows if r and r[0] is not None]
             if not group_ids:
                 return []
@@ -938,7 +985,7 @@ class UserGroupHandler:
                 wl = self._parse_whitelist(wl_str)
                 used = 0
                 for d in rdevs:
-                    if d in wl:
+                    if whitelist_allows(wl, d):
                         used += 1
 
                 out.append([gid, used, max_res])
@@ -968,8 +1015,7 @@ class UserGroupHandler:
             except Exception:
                 rdevs = []
 
-            self.cursor.execute("SELECT group_id FROM UsersLookup WHERE user_id = ?", (uid,))
-            group_rows = self.cursor.fetchall() or []
+            group_rows = [(g,) for g in self._user_group_ids(uid)] or []
             group_ids = [int(r[0]) for r in group_rows if r and r[0] is not None]
             if not group_ids:
                 return (False, 0, 0, -1)
@@ -996,12 +1042,12 @@ class UserGroupHandler:
                     continue
 
                 wl = self._parse_whitelist(wl_str)
-                if device_id not in wl:
+                if not whitelist_allows(wl, device_id):
                     continue
 
                 used = 0
                 for d in rdevs:
-                    if d in wl:
+                    if whitelist_allows(wl, d):
                         used += 1
 
                 remaining = max_res - used  # can be <= 0 (meaning full/exceeded)

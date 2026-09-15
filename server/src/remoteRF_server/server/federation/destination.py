@@ -826,13 +826,20 @@ def register_grpc_federation(server, executor: ServerFederationExecutor | None =
 
     class Servicer(rpc.FederationV2Servicer):
         def Execute(self, request, context):
-            response = (
-                executor.execute(
-                    request.protocol_version, request.grant, request.request_json
+            from ..global_onboarding import RELAYED
+
+            # A federation peer is never on the LAN, whatever route it used.
+            token = RELAYED.set(True)
+            try:
+                response = (
+                    executor.execute(
+                        request.protocol_version, request.grant, request.request_json
+                    )
+                    if executor is not None
+                    else error_response("federation_disabled")
                 )
-                if executor is not None
-                else error_response("federation_disabled")
-            )
+            finally:
+                RELAYED.reset(token)
             if response["signed_result"] is not None:
                 return pb.FederationResponse(
                     protocol_version="2", signed_result=response["signed_result"]
