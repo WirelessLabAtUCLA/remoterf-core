@@ -38,6 +38,7 @@ from typing import Optional
 from aioice import Candidate, Connection
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.buffer import Buffer
+from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet import QuicPacketType, pull_quic_header
@@ -186,6 +187,17 @@ def _server_configuration() -> QuicConfiguration:
     return configuration
 
 
+class _Protocol(QuicConnectionProtocol):
+    """aioquic's protocol, remembering why the connection ended."""
+
+    terminated = ""
+
+    def quic_event_received(self, event) -> None:
+        if isinstance(event, events.ConnectionTerminated):
+            self.terminated = event.reason_phrase or f"QUIC error {event.error_code:#x}"
+        super().quic_event_received(event)
+
+
 class _Path:
     """One client session's punched pair and the QUIC connection over it."""
 
@@ -207,7 +219,10 @@ class _Path:
             pump = asyncio.ensure_future(self._pump(protocol))
             closed = asyncio.ensure_future(protocol.wait_closed())
             try:
-                await asyncio.wait_for(protocol.wait_connected(), CONNECT_SECONDS)
+                try:
+                    await asyncio.wait_for(protocol.wait_connected(), CONNECT_SECONDS)
+                except ConnectionError:
+                    raise ConnectionError(f"QUIC handshake failed: {protocol.terminated}") from None
                 where = "offsite" if is_offsite(self.peer[0]) else "local"
                 printf(f"Direct path open: {self.user} from {self.peer[0]}:{self.peer[1]} ({where})", Sty.GRAY)
                 await asyncio.wait({pump, closed}, return_when=asyncio.FIRST_COMPLETED)
@@ -224,7 +239,8 @@ class _Path:
                 self.transport.close()
             await self.close()
             if self.peer is not None:
-                printf(f"Direct path closed: {self.user} from {self.peer[0]}:{self.peer[1]} after {self.calls} calls", Sty.GRAY)
+                why = f" ({protocol.terminated})" if protocol is not None and protocol.terminated else ""
+                printf(f"Direct path closed: {self.user} from {self.peer[0]}:{self.peer[1]} after {self.calls} calls{why}", Sty.GRAY)
 
     async def _accept(self) -> QuicConnectionProtocol:
         """The client's Initial packet decides the connection, as aioquic's server does."""
@@ -241,7 +257,7 @@ class _Path:
                 configuration=_server_configuration(),
                 original_destination_connection_id=header.destination_cid,
             )
-            protocol = QuicConnectionProtocol(quic, stream_handler=self._stream)
+            protocol = _Protocol(quic, stream_handler=self._stream)
             protocol.connection_made(transport)
             protocol.datagram_received(data, self.peer)
             return protocol
