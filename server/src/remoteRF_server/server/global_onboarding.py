@@ -559,8 +559,9 @@ def is_relayed(peer: str) -> bool:
 def is_offsite(host: str) -> bool:
     """Whether a direct-path (Gate I) peer address lies outside this network.
 
-    Such a peer is treated exactly like a relayed one. Loopback, RFC 1918 and
-    the /24 of this machine's LAN address count as local.
+    Such a peer is treated exactly like a relayed one. Loopback, link-local,
+    RFC 1918 and the /24 of this machine's LAN address count as local; an
+    IPv6 ULA does not, because VPN overlays hand those out too (fail closed).
     ponytail: /24 heuristic, refine with a real mask when a deployment needs it.
     """
     import ipaddress
@@ -569,7 +570,11 @@ def is_offsite(host: str) -> bool:
         addr = ipaddress.ip_address(host.removeprefix("::ffff:"))
     except ValueError:
         return True
-    if addr.is_loopback or addr.is_private:
+    if addr.is_loopback or addr.is_link_local:
+        return False
+    if addr.version == 6:
+        return True
+    if addr.is_private:
         return False
     try:
         return addr not in ipaddress.ip_network(

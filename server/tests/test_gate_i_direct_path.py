@@ -110,10 +110,11 @@ class PeerClassificationTests(unittest.TestCase):
             "remoteRF_server.server.global_onboarding.detected_lan_ip",
             return_value="164.67.195.210",
         ):
-            for host in ("127.0.0.1", "::1", "10.4.5.6", "192.168.1.20", "::ffff:192.168.1.20",
-                         "164.67.195.7"):
+            for host in ("127.0.0.1", "::1", "fe80::1", "10.4.5.6", "192.168.1.20",
+                         "::ffff:192.168.1.20", "164.67.195.7"):
                 self.assertFalse(is_offsite(host), host)
-            for host in ("8.8.4.4", "164.67.196.1", "100.64.0.1", "2607:f8b0::1", "bogus"):
+            for host in ("8.8.4.4", "164.67.196.1", "100.64.0.1", "2607:f8b0::1",
+                         "fd7a:115c:a1e0::8601:f120", "bogus"):
                 self.assertTrue(is_offsite(host), host)
 
 

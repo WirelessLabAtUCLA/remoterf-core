@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from aioice import Candidate, Connection
+from aioice.ice import get_host_addresses
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.buffer import Buffer
 from aioquic.quic.configuration import QuicConfiguration
@@ -72,8 +74,16 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes:
 
 
 def stun_server() -> Optional[tuple[str, int]]:
+    """The STUN server to learn this Server's public address from, or None.
+
+    A Server that already has a public address learns nothing from STUN, and
+    an interface that cannot reach it (a VPN, say) would stall gathering for
+    the whole STUN timeout on every offer.
+    """
     value = os.getenv("REMOTERF_STUN_SERVER", DEFAULT_STUN).strip()
     if value.lower() in {"", "off", "none", "0"}:
+        return None
+    if any(ipaddress.ip_address(a).is_global for a in get_host_addresses(True, False)):
         return None
     host, _, port = value.rpartition(":")
     return host, int(port)
