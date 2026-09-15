@@ -30,12 +30,12 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import threading
 from pathlib import Path
 from typing import Optional
 
 from aioice import Candidate, Connection
-from aioice.ice import get_host_addresses
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.buffer import Buffer
 from aioquic.quic.configuration import QuicConfiguration
@@ -53,7 +53,9 @@ ALPN = "remoterf-direct/1"
 MAX_FRAME = 100 * 1024 * 1024  # the gRPC message ceiling
 IDLE_SECONDS = 600
 CONNECT_SECONDS = 30  # ICE checks, then the QUIC handshake; a silent client is dropped
+MAX_PATHS_PER_SESSION = 8  # processes of one login; the oldest path makes room
 DEFAULT_STUN = "stun.l.google.com:19302"
+STUN_SECONDS = 1.5  # a STUN server answers in milliseconds or not at all
 
 CERT_DIR: Optional[Path] = None  # set by start_server_runtime
 
@@ -73,20 +75,48 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes:
     return await reader.readexactly(size)
 
 
-def stun_server() -> Optional[tuple[str, int]]:
+def default_route_address() -> Optional[str]:
+    """The IPv4 address the default route leaves from, or None without one."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            return probe.getsockname()[0]
+    except OSError:
+        return None
+
+
+def stun_server(address: Optional[str] = None) -> Optional[tuple[str, int]]:
     """The STUN server to learn this Server's public address from, or None.
 
-    A Server that already has a public address learns nothing from STUN, and
-    an interface that cannot reach it (a VPN, say) would stall gathering for
-    the whole STUN timeout on every offer.
+    A Server whose own address is already public learns nothing from STUN.
     """
     value = os.getenv("REMOTERF_STUN_SERVER", DEFAULT_STUN).strip()
     if value.lower() in {"", "off", "none", "0"}:
         return None
-    if any(ipaddress.ip_address(a).is_global for a in get_host_addresses(True, False)):
+    if address is not None and ipaddress.ip_address(address).is_global:
         return None
     host, _, port = value.rpartition(":")
     return host, int(port)
+
+
+class Ice(Connection):
+    """aioice's Connection, gathering on the default-route interface only.
+
+    Every other interface (a VPN, an overlay, a bridge) cannot reach the STUN
+    server, and aioice would hold gathering for its whole 5 s timeout on each
+    one, on every offer. One interface and a short STUN wait instead; a
+    machine without a default route gathers the way aioice does.
+    """
+
+    async def gather_candidates(self) -> None:
+        address = default_route_address()
+        if address is None or self._local_candidates_start:
+            return await super().gather_candidates()
+        self._local_candidates_start = True
+        self._local_candidates += await self.get_component_candidates(
+            component=1, addresses=[address], timeout=STUN_SECONDS
+        )
+        self._local_candidates_end = True
 
 
 def peer_address(ice: Connection) -> tuple[str, int]:
@@ -226,17 +256,30 @@ class _Path:
         asyncio.ensure_future(self._serve(reader, writer))
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        bad_frame = None
         try:
-            request = grpc_pb2.GenericRPCRequest()
-            request.ParseFromString(await read_frame(reader))
-            results = await asyncio.get_running_loop().run_in_executor(
-                None, _dispatch, request, self.peer[0]
-            )
+            try:
+                request = grpc_pb2.GenericRPCRequest()
+                request.ParseFromString(await read_frame(reader))
+            except asyncio.IncompleteReadError:
+                return  # the client went away mid-frame
+            except Exception as exc:  # noqa: BLE001 - not our framing: say so, then drop the path
+                bad_frame = f"bad frame: {type(exc).__name__}: {exc}"
+                results = {"a": map_arg(bad_frame)}
+            else:
+                results = await asyncio.get_running_loop().run_in_executor(
+                    None, _dispatch, request, self.peer[0]
+                )
             writer.write(frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
             writer.write_eof()
             self.calls += 1
-        except Exception as exc:  # noqa: BLE001 - one bad stream must not take the path down
+        except Exception as exc:  # noqa: BLE001 - one lost stream must not take the path down
             logger.debug("direct path stream: %s", exc)
+        if bad_frame is not None:
+            # A client that cannot frame a request is not ours; its bytes are
+            # still arriving and would only pile up in this stream's buffer.
+            printf(f"Direct path dropped: {self.user} sent a {bad_frame}", Sty.GRAY)
+            await self.close()
 
     async def close(self) -> None:
         if _paths.get(self.key) is self:
@@ -253,7 +296,11 @@ async def _offer(key: str, user: str, remote: dict) -> dict:
     old = _paths.get(key)
     if old is not None:
         await old.close()
-    ice = Connection(ice_controlling=False, stun_server=stun_server())
+    session = key.split("/", 1)[0]
+    siblings = [path for k, path in _paths.items() if k.split("/", 1)[0] == session]
+    for path in siblings[: max(0, len(siblings) - MAX_PATHS_PER_SESSION + 1)]:
+        await path.close()
+    ice = Ice(ice_controlling=False, stun_server=stun_server(default_route_address()))
     try:
         await ice.gather_candidates()
         ice.remote_username = str(remote["ufrag"])

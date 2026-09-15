@@ -69,5 +69,32 @@ class ClientSessionTests(unittest.TestCase):
         self.assertIn("UE", self.h.login_user("alice", token))
 
 
+    def test_direct_offer_needs_the_session_secret(self):
+        """ACC:direct_offer is authenticated like every other account call."""
+        from remoteRF_server.common.utils import unmap_arg
+
+        token = self.login("password1", remember=True)["token"]
+        with mock.patch("remoteRF_server.server.direct_path.offer", return_value={"ice": self.map("{}")}) as offer:
+            for secret in ("wrong", "x" * 43, ""):
+                result = self.h.handle_call(
+                    function_name="direct_offer",
+                    args={"un": self.map("alice"), "pw": self.map(secret), "ice": self.map("{}")},
+                )
+                self.assertEqual(unmap_arg(result["ace"]), "Invalid login credentials.", secret)
+            offer.assert_not_called()
+            result = self.h.handle_call(
+                function_name="direct_offer",
+                args={"un": self.map("alice"), "pw": self.map(token), "ice": self.map('{"id": "p1"}')},
+            )
+            self.assertIn("ice", result)
+            offer.assert_called_once_with(self.h._session_hash(token), "alice", '{"id": "p1"}')
+        # A revoked session cannot offer either.
+        self.h.handle_call(function_name="logout", args={"un": self.map("alice"), "pw": self.map(token)})
+        result = self.h.handle_call(
+            function_name="direct_offer",
+            args={"un": self.map("alice"), "pw": self.map(token), "ice": self.map("{}")},
+        )
+        self.assertEqual(unmap_arg(result["ace"]), "Invalid login credentials.")
+
 if __name__ == "__main__":
     unittest.main()

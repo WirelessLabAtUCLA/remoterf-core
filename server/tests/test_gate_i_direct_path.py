@@ -118,6 +118,30 @@ class PeerClassificationTests(unittest.TestCase):
                 self.assertTrue(is_offsite(host), host)
 
 
+class GatheringTests(unittest.TestCase):
+    def test_stun_only_for_a_private_address(self):
+        with mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "stun.example:3478"}):
+            self.assertEqual(direct_path.stun_server("192.168.1.9"), ("stun.example", 3478))
+            self.assertIsNone(direct_path.stun_server("164.67.195.210"))
+            self.assertEqual(direct_path.stun_server(None), ("stun.example", 3478))
+        with mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}):
+            self.assertIsNone(direct_path.stun_server("192.168.1.9"))
+
+    def test_gathering_uses_the_default_route_interface_only(self):
+        async def run():
+            ice = direct_path.Ice(ice_controlling=False, stun_server=None)
+            await ice.gather_candidates()
+            try:
+                return [(c.type, c.host) for c in ice.local_candidates]
+            finally:
+                await ice.close()
+
+        address = direct_path.default_route_address()
+        if address is None:
+            self.skipTest("no default route")
+        self.assertEqual(asyncio.run(run()), [("host", address)])
+
+
 class DispatchTests(unittest.TestCase):
     def _run(self, name, peer, args=None):
         request = grpc_pb2.GenericRPCRequest(function_name=name, args=args or {})
@@ -160,7 +184,7 @@ class LoopbackPathTests(unittest.TestCase):
         self.addCleanup(direct_path.shutdown)
         self.addCleanup(setattr, direct_path, "CERT_DIR", None)
 
-    async def _client(self, offer_id="abcd"):
+    async def _client(self, offer_id="abcd", session="session-key", idle_timeout=60.0):
         loop = asyncio.get_running_loop()
         ice = Connection(ice_controlling=True, use_ipv6=False)
         await ice.gather_candidates()
@@ -171,7 +195,7 @@ class LoopbackPathTests(unittest.TestCase):
             "candidates": [c.to_sdp() for c in ice.local_candidates],
         })
         # The offer RPC is synchronous on the Server: a gRPC worker thread calls it.
-        reply = await loop.run_in_executor(None, direct_path.offer, "session-key", "tester", offer)
+        reply = await loop.run_in_executor(None, direct_path.offer, session, "tester", offer)
         self.assertNotIn("ace", reply, reply)
         answer = json.loads(unmap_arg(reply["ice"]))
         ice.remote_username = answer["ufrag"]
@@ -183,7 +207,8 @@ class LoopbackPathTests(unittest.TestCase):
         peer = direct_path.peer_address(ice)
 
         configuration = QuicConfiguration(
-            is_client=True, alpn_protocols=[direct_path.ALPN], server_name=SERVER_NAME
+            is_client=True, alpn_protocols=[direct_path.ALPN], server_name=SERVER_NAME,
+            idle_timeout=idle_timeout,
         )
         configuration.load_verify_locations(cadata=self.ca_pem)
         protocol = QuicConnectionProtocol(QuicConnection(configuration=configuration))
@@ -259,6 +284,102 @@ class LoopbackPathTests(unittest.TestCase):
                     await i.close()
 
         with mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}):
+            asyncio.run(run())
+
+    async def _close(self, *clients):
+        for ice, protocol, pump in clients:
+            pump.cancel()
+            protocol.close()
+            await ice.close()
+
+    async def _raw(self, protocol, payload, timeout=5):
+        """Send raw bytes on one stream; the reply frame, or None when the stream just ends."""
+        reader, writer = await protocol.create_stream()
+        writer.write(payload)
+        writer.write_eof()
+        try:
+            response = grpc_pb2.GenericRPCResponse()
+            response.ParseFromString(await asyncio.wait_for(direct_path.read_frame(reader), timeout))
+            return {k: unmap_arg(v) for k, v in response.results.items()}
+        except asyncio.IncompleteReadError:
+            return None
+
+    def test_bad_frames_get_an_error_reply_and_lose_the_path(self):
+        garbage = direct_path.frame(b"\xff\xfe not a protobuf \x00\x01" * 3)
+        oversize = (direct_path.MAX_FRAME + 1).to_bytes(4, "big") + b"x" * 64
+
+        async def run():
+            for payload, expect in ((garbage, "DecodeError"), (oversize, "ValueError")):
+                client = await self._client()
+                reply = await self._raw(client[1], payload)
+                self.assertIn("bad frame", reply["a"])
+                self.assertIn(expect, reply["a"])
+                for _ in range(50):
+                    if not direct_path._paths:
+                        break
+                    await asyncio.sleep(0.1)
+                self.assertEqual(direct_path._paths, {}, "the path is dropped")
+                await self._close(client)
+            # An empty frame is an empty request: refused like any control name,
+            # and a truncated frame is a client that went away. Both keep the path.
+            client = await self._client()
+            self.assertIn("not available", (await self._raw(client[1], direct_path.frame(b"")))["a"])
+            self.assertIsNone(await self._raw(client[1], (100).to_bytes(4, "big") + b"x" * 50))
+            response = await self._call(client[1], "adalm_pluto:rx_lo:GET", {"a": map_arg("tok")})
+            self.assertIn("echo", response.results)
+            self.assertEqual(len(direct_path._paths), 1)
+            await self._close(client)
+
+        def fake_run_rpc(*, function_name, args):
+            return {"echo": map_arg(function_name)}
+
+        with mock.patch("remoteRF_server.server.rpc_manager.rpc_manager.run_rpc", fake_run_rpc), \
+             mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}):
+            asyncio.run(run())
+
+    def test_oversize_ndarray_argument_is_an_error_reply(self):
+        bogus = grpc_pb2.Argument(ndarray_value=grpc_pb2.NDArrayValue(
+            dtype="complex128", shape=[2 ** 33], data=b"xx"))
+
+        async def run():
+            client = await self._client()
+            response = await self._call(client[1], "adalm_pluto:rx:GET", {"a": bogus})
+            self.assertIn("ndarray", unmap_arg(response.results["a"]))
+            self.assertEqual(len(direct_path._paths), 1)
+            await self._close(client)
+
+        with mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}):
+            asyncio.run(run())
+
+    def test_paths_per_session_are_capped_and_sessions_are_separate(self):
+        async def run():
+            clients = [await self._client(offer_id=f"p{i}") for i in range(direct_path.MAX_PATHS_PER_SESSION + 1)]
+            other = await self._client(offer_id="p0", session="other-session")
+            try:
+                keys = sorted(direct_path._paths)
+                self.assertNotIn("session-key/p0", keys, "the oldest path made room")
+                self.assertEqual(len([k for k in keys if k.startswith("session-key/")]),
+                                 direct_path.MAX_PATHS_PER_SESSION)
+                self.assertIn("other-session/p0", keys)
+            finally:
+                await self._close(*clients, other)
+
+        with mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}):
+            asyncio.run(run())
+
+    def test_idle_path_closes(self):
+        async def run():
+            client = await self._client(idle_timeout=2.0)
+            self.assertEqual(len(direct_path._paths), 1)
+            for _ in range(80):
+                if not direct_path._paths:
+                    break
+                await asyncio.sleep(0.1)
+            self.assertEqual(direct_path._paths, {})
+            await self._close(client)
+
+        with mock.patch.object(direct_path, "IDLE_SECONDS", 2), \
+             mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}):
             asyncio.run(run())
 
     def test_bad_offer_is_an_answer_not_an_exception(self):
