@@ -533,7 +533,11 @@ def _seed_default_driver(
             _driver_sha256(source) + "\n",
             encoding="utf-8",
         )
-        print(f"Created default driver config at {target}")
+        # Routine first-run bookkeeping: present, but it should not compete
+        # with the operator's own prompts on a first start.
+        from ..common.utils.ansi_codes import Sty, printf
+
+        printf(f"Created default driver config at {target}", Sty.GRAY)
     except OSError as e:
         print(f"Warning: could not create default driver config {target}: {e}")
 

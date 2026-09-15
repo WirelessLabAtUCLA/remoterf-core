@@ -111,6 +111,14 @@ _BROKER_PATHS = frozenset(
         "/v2/broker/contracts",
         "/v2/broker/contracts/events",
         "/v2/broker/federation/forward",
+        # Self-registration plane.  These carry no authorization and no
+        # account state: a deployment asks to be listed, reads its own
+        # request status, or withdraws.
+        "/v2/broker/deployments/request",
+        "/v2/broker/deployments/verify",
+        "/v2/broker/deployments/me",
+        "/v2/broker/deployments/leave",
+        "/v2/broker/deployments/report",
     }
 )
 

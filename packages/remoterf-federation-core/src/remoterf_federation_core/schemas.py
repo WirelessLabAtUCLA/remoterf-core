@@ -25,7 +25,14 @@ POLICY_FIELDS = frozenset({"enabled", "username_required", "email_required",
                           "email_verification_required", "enrollment_code_required"})
 CAPABILITY_FIELDS = frozenset({"protocol_version", "deployment_id", "display_name",
     "account_transport", "account_api_base", "federation_enabled",
-    "federation_protocol_version", "registration_policy", "supported_operations"})
+    "federation_protocol_version", "registration_policy", "supported_operations",
+    # How to reach this deployment, and the certificate a client should pin
+    # when it does. A LAN route is advertised only when the deployment shares
+    # it; a relay route only once RemoteRF Global has approved the deployment.
+    "routes", "cert_sha256"})
+ROUTE_KINDS = ("lan", "relay", "direct")
+ROUTE_FIELDS = frozenset({"kind", "host", "port", "cert_port"})
+MAX_ROUTES = 4
 
 
 class ValidationError(ValueError):
@@ -169,6 +176,32 @@ def validate_capabilities(value):
         raise ValidationError("Invalid registration policy")
     if policy["email_verification_required"] and not policy["email_required"]:
         raise ValidationError("Verification requires email")
+    routes = value["routes"]
+    if type(routes) is not list or len(routes) > MAX_ROUTES:
+        raise ValidationError("Invalid routes")
+    kinds = []
+    for route in routes:
+        if type(route) is not dict or set(route) != ROUTE_FIELDS:
+            raise ValidationError("Invalid route fields")
+        if route["kind"] not in ROUTE_KINDS:
+            raise ValidationError("Unsupported route kind")
+        host = route["host"]
+        if not isinstance(host, str) or not 1 <= len(host) <= 253 or any(
+            ord(c) < 33 or ord(c) == 127 for c in host
+        ):
+            raise ValidationError("Invalid route host")
+        for field in ("port", "cert_port"):
+            port = route[field]
+            if type(port) is not int or not 1 <= port <= 65535:
+                raise ValidationError("Invalid route port")
+        kinds.append(route["kind"])
+    if len(set(kinds)) != len(kinds):
+        raise ValidationError("Duplicate route kind")
+    digest = value["cert_sha256"]
+    if digest is not None and (
+        not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+    ):
+        raise ValidationError("Invalid certificate digest")
     ops = value["supported_operations"]
     if type(ops) is not list or not 1 <= len(ops) <= len(OPERATIONS) or any(type(o) is not str or o not in OPERATIONS for o in ops) or len(set(ops)) != len(ops):
         raise ValidationError("Unsupported or duplicate account operation")
@@ -177,8 +210,10 @@ def validate_capabilities(value):
     return strict_json(canonical_json(value))
 
 
-def local_capabilities(*, display_name="RemoteRF", deployment_id=None):
+def local_capabilities(*, display_name="RemoteRF", deployment_id=None,
+                       routes=None, cert_sha256=None):
     return validate_capabilities({
+        "routes": list(routes or []), "cert_sha256": cert_sha256,
         "protocol_version": PROTOCOL_VERSION, "deployment_id": deployment_id,
         "display_name": display_name, "account_transport": "grpc", "account_api_base": None,
         "federation_enabled": False, "federation_protocol_version": None,

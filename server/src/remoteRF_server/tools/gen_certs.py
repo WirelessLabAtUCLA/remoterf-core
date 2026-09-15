@@ -77,6 +77,18 @@ def _default_config_dir() -> Path:
     return Path.home() / ".config" / "remoterf"
 
 
+def _global_hostname() -> str | None:
+    """The deployment's public relay hostname, once Global has approved it."""
+    try:
+        from remoteRF_server.server.global_onboarding import hostname, participating
+
+        # As soon as a name has been chosen, not only once approved: adding it
+        # later would mean reissuing the CA and re-enrolling every client.
+        return hostname() if participating() else None
+    except Exception:
+        return None
+
+
 def _detect_local_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -111,6 +123,12 @@ def generate_certs(
         ips.append(_detect_local_ip())
 
     dns = [d.strip() for d in (dns or []) if d and d.strip()]
+    # An approved RemoteRF Global deployment is also reached at its public
+    # relay hostname, and TLS stays end-to-end through that relay — so the
+    # name has to be in this certificate or clients cannot verify it.
+    global_name = _global_hostname()
+    if global_name and global_name not in dns:
+        dns.append(global_name)
     sans: list[str] = [f"IP:{ip}" for ip in ips] + [f"DNS:{d}" for d in dns]
     san_line = ",".join(sans)
     cn = cn or (dns[0] if dns else ips[0])

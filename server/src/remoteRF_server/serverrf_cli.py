@@ -184,6 +184,7 @@ def _tos_ack_path() -> Path:
     return _cfg_dir() / "tos.env"
 
 
+DEFAULT_GRPC_PORT = 61005
 _TOS_VERSION = "2026"
 _TOS_URL = "https://remoterf.net/tos"
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
@@ -197,38 +198,41 @@ def _tos_acknowledged() -> bool:
 
 
 def _print_tos_acknowledgement() -> None:
-    print(
-        "\n"
-        "RemoteRF 2026\n"
-        "Terms of Service Acknowledgement\n"
-        "\n"
-        "By continuing, you confirm that you have reviewed and agree to the\n"
-        "RemoteRF Terms of Service and understand that use of the client and\n"
-        "service is at your own risk. RemoteRF is not liable for losses or\n"
-        "damages arising from use of the platform.\n"
-        "\n"
-        f"Terms of Service: {_TOS_URL}\n"
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    print()
+    print_panel(
+        "Terms of Service",
+        [
+            f"{marker()} RemoteRF 2026",
+            "",
+            "By continuing, you confirm that you have reviewed and agree",
+            "to the RemoteRF Terms of Service and understand that use of",
+            "the client and service is at your own risk. RemoteRF is not",
+            "liable for losses or damages arising from use of the",
+            "platform.",
+            "",
+            f"Terms of Service: {_TOS_URL}",
+        ],
     )
+    print()
 
 
 def _ensure_tos_acknowledged() -> bool:
     if _tos_acknowledged():
         return True
 
-    _print_tos_acknowledgement()
-    while True:
-        try:
-            answer = input("Do you agree to the RemoteRF Terms of Service? (yes/no): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nTerms of Service acknowledgement is required before starting the server.")
-            return False
+    from remoteRF_server.common.utils.panel import confirm
 
-        if answer in {"y", "yes"}:
-            break
-        if answer in {"n", "no"}:
-            print("Terms of Service not accepted. Server startup cancelled.")
-            return False
-        print("Please answer yes or no.")
+    _print_tos_acknowledgement()
+    # No default: accepting terms is never something a bare Enter should do.
+    accepted = confirm("Do you agree to the RemoteRF Terms of Service?")
+    if accepted is None:
+        print("\n  Terms of Service acknowledgement is required before starting the server.")
+        return False
+    if not accepted:
+        print("  Terms of Service not accepted. Server startup cancelled.")
+        return False
 
     _write_env_kv(
         _tos_ack_path(),
@@ -240,8 +244,128 @@ def _ensure_tos_acknowledged() -> bool:
             "REMOTERF_TOS_ACKNOWLEDGED_BY": getpass.getuser(),
         },
     )
-    print(f"Terms of Service acknowledgement saved to: {_tos_ack_path()}")
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+    printf(f"  Saved to {_tos_ack_path()}", Sty.GRAY)
     return True
+
+# -----------------------------
+# First-run setup
+# -----------------------------
+
+def _detect_lan_address() -> str:
+    import socket
+
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("192.0.2.1", 1))
+            return probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        return "127.0.0.1"
+
+
+def _ensure_network_configured() -> bool:
+    """Ask for the address and ports on first run, instead of failing later.
+
+    Runs before the RemoteRF Global question so the address this deployment
+    reports to Global is the one the operator actually chose.
+    """
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    kv = _read_env_kv(_server_env_path())
+    if kv.get("GRPC_PORT") and kv.get("CERT_PORT"):
+        return True
+
+    detected = _detect_lan_address()
+    print()
+    print_panel(
+        "Network setup",
+        [f"{marker()} Where clients reach this server. Enter keeps the default."],
+    )
+    print()
+    try:
+        address = input(f"  Address on your network [{detected}]: ").strip() or detected
+        grpc_raw = input(f"  gRPC port [{DEFAULT_GRPC_PORT}]: ").strip() or str(
+            DEFAULT_GRPC_PORT
+        )
+        cert_raw = input(f"  Certificate port [{int(grpc_raw) + 1}]: ").strip() or str(
+            int(grpc_raw) + 1
+        )
+    except (EOFError, KeyboardInterrupt, ValueError):
+        print("\n  Setup cancelled.")
+        return False
+
+    try:
+        grpc_port, cert_port = int(grpc_raw), int(cert_raw)
+    except ValueError:
+        print("  Ports must be whole numbers.")
+        return False
+    for port, name in ((grpc_port, "gRPC port"), (cert_port, "certificate port")):
+        if _validate_port(port, name=name):
+            print(f"  {name} is out of range.")
+            return False
+    if grpc_port == cert_port:
+        print("  The two ports must differ.")
+        return False
+
+    kv.update(GRPC_PORT=str(grpc_port), CERT_PORT=str(cert_port), STATIC_IP=address)
+    _write_env_kv(_server_env_path(), kv)
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+    printf(f"  Saved to {_server_env_path()}", Sty.GRAY)
+    return True
+
+
+def _ensure_certificates() -> bool:
+    """Issue the deployment's TLS material on first run.
+
+    Deliberately after the RemoteRF Global question: if this deployment asked
+    for a public name, that name belongs in the certificate from the start.
+    Adding it later means reissuing the CA, which breaks every enrolled client.
+    """
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    certs = _certs_dir()
+    if (certs / "server.crt").exists() and (certs / "server.key").exists():
+        return True
+
+    kv = _read_env_kv(_server_env_path())
+    address = (kv.get("STATIC_IP") or "").strip() or _detect_lan_address()
+    names: List[str] = []
+    try:
+        from remoteRF_server.server.global_onboarding import hostname, participating
+
+        if participating() and hostname():
+            names.append(hostname())
+    except Exception:  # noqa: BLE001 - certificates must not depend on Global
+        pass
+
+    print()
+    print_panel(
+        "Certificates",
+        [f"{marker()} Issuing TLS for " + ", ".join([address, *names]) + "."],
+    )
+    print()
+    result = _gen_certs(
+        static_ip=address,
+        days=365,
+        ca_days=3650,
+        bits=2048,
+        dns=names,
+        cn=None,
+        force=False,
+        no_detect_ip=True,
+        quiet=True,
+    )
+    if result not in (None, 0):
+        return False
+    printf(f"  Saved to {certs}", Sty.GRAY)
+    return True
+
 
 # -----------------------------
 # Help (exact commands only)
@@ -256,8 +380,11 @@ def print_help() -> None:
         "  serverrf -h | --help\n"
         "\n"
         "Serve:\n"
-        "  serverrf -s | --serve              Run server (NOTE: only when -s/--serve is the FIRST arg)\n"
-        "  serverrf --serve --headless         Run without the interactive administration shell\n"
+        "  serverrf -s | --serve              The server console: attaches to the running server or starts it\n"
+        "                                      (Ctrl-C leaves it running; 'quit' stops it)\n"
+        "  serverrf --serve --daemon           Start the server in the background (for boot / scripts)\n"
+        "  serverrf --serve --headless         Run in the foreground without the administration shell\n"
+        "  serverrf --serve --foreground       Run in the foreground with the shell (no console)\n"
         "\n"
         "Certs:\n"
         "  serverrf --gen-certs <static_ip> [options]\n"
@@ -318,6 +445,12 @@ def print_help() -> None:
         "  -y, --yes           Skip wipe confirmation prompts\n"
         "  -v, --verbose       With --show-certs, also print x509 details (requires openssl)\n"
         "\n"
+        "RemoteRF Global:\n"
+        "  serverrf global status              Show participation state\n"
+        "  serverrf global join                Request (or re-request) a Global deployment\n"
+        "  serverrf global verify <code>       Confirm the contact email Global wrote to\n"
+        "  serverrf global leave               Stop participating\n"
+        "\n"
         "Gist Status:\n"
         "  serverrf --gist --set --id <gist_id> --file <filename> [--token <tok> | --token-stdin]\n"
         "  serverrf --gist --show [--secrets]\n"
@@ -374,6 +507,19 @@ def _serve(*, headless: bool = False) -> int:
     """
     if not _ensure_tos_acknowledged():
         return 1
+
+    # Network first: the address reported to RemoteRF Global has to be the one
+    # the operator chose, not a guess made before they were asked.
+    if not _ensure_network_configured():
+        return 1
+
+    from remoteRF_server.server.global_onboarding import ensure_consent, start_agent
+    if not ensure_consent():
+        return 1
+
+    if not _ensure_certificates():
+        return 1
+    start_agent()
 
     # UHD writes native log messages to stderr/std::clog. Set this before the
     # server imports device drivers so those messages cannot corrupt the
@@ -663,6 +809,7 @@ def _gen_certs(
     cn: Optional[str],
     force: bool,
     no_detect_ip: bool,
+    quiet: bool = False,
 ) -> int:
     gen_path = _gen_certs_path()
     if not gen_path.exists():
@@ -690,6 +837,14 @@ def _gen_certs(
         cmd += ["--dns", d]
     if cn:
         cmd += ["--cn", cn]
+
+    if quiet:
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        rc, output = _run_capture(cmd)
+        for line in output.splitlines():
+            printf("  " + line.rstrip() if line.strip() else "", Sty.GRAY)
+        return rc
 
     rc = _run(cmd)
     if rc == 0:
@@ -1388,16 +1543,30 @@ def main() -> int:
 
     # IMPORTANT: ONLY "serverrf -s/--serve" (first arg) starts the server.
     if argv[0] in ("--serve", "-s"):
-        if len(argv) == 1:
-            return _serve()
-        if len(argv) == 2 and argv[1] == "--headless":
-            return _serve(headless=True)
-        else:
+        from remoteRF_server.server import console
+
+        flags = set(argv[1:])
+        if not flags <= {"--headless", "--foreground", "--daemon"} or len(flags) > 1:
             print(
-                "ERROR: -s/--serve accepts only the optional --headless flag.",
+                "ERROR: -s/--serve accepts one of --headless, --foreground or --daemon.",
                 file=sys.stderr,
             )
             return 2
+        if "--headless" in flags:
+            return _serve(headless=True)
+        # The console: attach to the running server, or start one. Inside the
+        # console this same command runs the server for real.
+        if console.attached() or "--foreground" in flags or not console.available():
+            if not console.available() and not console.attached():
+                printf("tmux is not installed; running in the foreground (Ctrl-C stops the server).", Sty.GRAY)
+            return _serve()
+        if "--daemon" in flags:
+            return 0 if console.start_detached(_cfg_dir(), ["--serve"]) else 1
+        return console.attach_or_start(_cfg_dir(), ["--serve"])
+
+    if argv[0] == "global":
+        from remoteRF_server.server.global_onboarding import main as global_main
+        return global_main(argv[1:])
 
     yes = False
     verbose = False

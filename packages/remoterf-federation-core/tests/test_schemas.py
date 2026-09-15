@@ -1,4 +1,5 @@
 import copy
+import remoterf_federation_core
 import json
 import subprocess
 import sys
@@ -83,8 +84,14 @@ from pathlib import Path
 socket.socket=lambda *a,**k: (_ for _ in ()).throw(AssertionError("network"))
 sqlite3.connect=lambda *a,**k: (_ for _ in ()).throw(AssertionError("DB"))
 import remoterf_federation_core as c
-assert c.__version__ == "0.9.0"
+assert c.__version__ == EXPECTED_VERSION
 assert not any(n.startswith(("remoteRF_server", "numpy", "adi", "rtlsdr", "sqlalchemy", "httpx")) for n in sys.modules)
 assert not list(Path.cwd().iterdir())
 '''
-            subprocess.run([sys.executable,"-c",script],cwd=d,check=True)
+            # Bind the expected version through argv, so the assertion tracks
+            # the installed package instead of rotting at an old literal.
+            subprocess.run(
+                [sys.executable, "-c",
+                 "EXPECTED_VERSION=__import__('sys').argv[1]\n" + script,
+                 remoterf_federation_core.__version__],
+                cwd=d, check=True)
