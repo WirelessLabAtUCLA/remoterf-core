@@ -20,8 +20,6 @@
 from remoteRF_server.common.idl import DeviceSchema, idl_register, idl_expose
 
 import subprocess
-
-import numpy as np
 import re
 import adi
 
@@ -190,12 +188,7 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="call")
     def call_rx(self):
-        samples = self.device.rx()
-        # pyadi hands 12-bit IQ back as complex128; complex64 carries it exactly
-        # in half the bytes, on the relay, the direct path and the LAN alike.
-        if getattr(samples, "dtype", None) == np.complex128:
-            samples = samples.astype(np.complex64)
-        return samples
+        return self.device.rx()
 
     @idl_expose(kind="get")
     def get_rx_buffer_size(self):

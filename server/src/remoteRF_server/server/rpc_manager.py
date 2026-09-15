@@ -15,7 +15,9 @@
 
 # from ..drivers.adalm_pluto.pluto_remote_server import PlutoServer
 # from .reservation import reservation_handler
-# from ..common.utils import *
+# import numpy as np
+
+from ..common.utils import *
 # from .device_manager import acquire_device, VirtualDevice
 # from ..host import host_tunnel_server as hts  
 
@@ -67,6 +69,8 @@
 
 import json
 
+import numpy as np
+
 from .reservation import reservation_handler
 from ..common.utils import *
 from ..common.grpc import grpc_pb2 as generic_pb2
@@ -76,6 +80,23 @@ from ..host import host_tunnel_server as hts
 
 def _normalize_device_rpc_type(value: str) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _wire(result, args: dict):
+    """map_arg, in the sample encoding the caller asked for (Gate I slice 3).
+
+    ``wire`` is opt-in per call: ``c64`` halves complex128 samples, ``i16``
+    quarters them when they are integer-valued IQ (a 12-bit ADC's are) and
+    otherwise falls back to c64. Anything else, or no flag, is as before.
+    """
+    from ..common.utils.process_arg import fits_iq16, map_iq16
+
+    wire = unmap_arg(args["wire"]) if "wire" in args else None
+    if wire in ("c64", "i16") and isinstance(result, np.ndarray) and np.iscomplexobj(result):
+        if wire == "i16" and fits_iq16(result):
+            return map_iq16(result)
+        return map_arg(result.astype(np.complex64))
+    return map_arg(result)
 
 
 class RpcManager:
@@ -212,7 +233,7 @@ class RpcManager:
 
         if verb == "CALL0":
             result = dev.dispatch(f"call_{prop}", {})
-            return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
+            return {prop: _wire(result, args)} if result is not None else {prop: map_arg('None')}
 
         if verb == "CALL1":
             if 'arg1' not in args:
@@ -222,7 +243,7 @@ class RpcManager:
             return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
 
         if verb == "CALLN":
-            reserved = {"a", "g", "token", "device_id", "device_name"}
+            reserved = {"a", "g", "token", "device_id", "device_name", "wire"}
             call_args = {
                 str(key): unmap_arg(value)
                 for key, value in dict(args).items()

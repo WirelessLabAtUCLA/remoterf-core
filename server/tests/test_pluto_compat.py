@@ -123,13 +123,6 @@ class PlutoCompatTests(unittest.TestCase):
         self.assertEqual(self.device.sample_rate, 2_000_000)
 
         np.testing.assert_allclose(schema.dispatch("call_rx", {}), self.device.rx_samples)
-        # Gate I slice 3: complex128 from pyadi goes out as complex64, exactly.
-        self.device.rx_samples = np.array([2047 - 2048j, -1 + 1j], dtype=np.complex128)
-        received = schema.dispatch("call_rx", {})
-        self.assertEqual(received.dtype, np.complex64)
-        np.testing.assert_array_equal(received, self.device.rx_samples)
-        self.device.rx_samples = np.array([1, 2], dtype=np.int16)  # rx_output_type="raw" untouched
-        self.assertEqual(schema.dispatch("call_rx", {}).dtype, np.int16)
         samples = np.array([9 + 1j, 10 + 2j], dtype=np.complex64)
         self.assertIsNone(schema.dispatch("call_tx", {"value": samples}))
         np.testing.assert_allclose(self.device.tx_samples, samples)
