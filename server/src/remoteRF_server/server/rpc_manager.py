@@ -131,7 +131,7 @@ class RpcManager:
                         timeout_sec=10.0,
                     )
 
-                return self._dispatch_local_schema(function_name=function_name, args=args, dev=dev)
+                return self._dispatch_local_schema(function_name=function_name, args=args, gid=gid, dev=dev)
 
         except Exception as e:
             return {'a': map_arg(str(e))}
@@ -174,8 +174,15 @@ class RpcManager:
             return ""
         return str(getattr(schema, "device_type", "") or "")
 
-    def _dispatch_local_schema(self, *, function_name: str, args: dict, dev: object) -> dict:
+    def _dispatch_local_schema(self, *, function_name: str, args: dict, dev: object, gid: int | None = None) -> dict:
         _, prop, verb = function_name.split(':', 2)
+
+        if gid is not None and getattr(dev, "session_scoped", False) and getattr(dev, "device", None) is None:
+            # The legacy path is about to open the hardware lazily; a Dynamic
+            # v2 session left behind by an earlier run must not block it.
+            from .dynamic_v2 import session_manager
+
+            session_manager.close_gid(gid)
 
         if verb == "GET":
             result = dev.dispatch(f"get_{prop}", {})

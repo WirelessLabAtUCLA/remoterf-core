@@ -30,6 +30,7 @@ from remoteRF_server import serverrf_cli
 from remoteRF_server.common.grpc import grpc_pb2
 from remoteRF_server.common.grpc.v2_codec import decode_value, encode_value
 from remoteRF_server.common.idl.v2 import validate_schema
+from remoteRF_server.common.utils import map_arg
 from remoteRF_server.drivers.usrp.policy import USRPPolicy
 from remoteRF_server.drivers.usrp.usrp_schema import _configure_uhd_console_logging
 from remoteRF_server.drivers.usrp.uhd_manifest import (
@@ -758,6 +759,141 @@ class DynamicV2ServerTests(unittest.TestCase):
             with self.assertRaises(RemoteRFSessionExpiredError):
                 manager.get(session.session_id)
         self.assertTrue(inventory.live.closed)
+
+    def test_reopen_releases_the_previous_session_and_legacy_device(self):
+        inventory = FakeInventorySchema()
+        inventory.device = object()
+        inventory.close_native_device = lambda: setattr(inventory, "device", None)
+        context = {
+            "schema": inventory,
+            "dtype": "usrp",
+            "ident": "SERIAL",
+            "name": "test",
+        }
+        manager = SessionManager()
+        with (
+            patch(
+                "remoteRF_server.server.dynamic_v2.resolve_gid_for_token",
+                return_value=7,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.get_local_device_context",
+                return_value=context,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.USRPPolicy.load",
+                return_value=USRPPolicy({}),
+            ),
+        ):
+            first = manager.open("token")
+            self.assertIsNone(inventory.device)
+            first_live = inventory.live
+            # A client that crashed or never closed must not lock out its own
+            # next run: the stale session is released instead, even when the
+            # native handle refuses to close cleanly.
+            first_live.close_native_device = lambda: (
+                setattr(first_live, "closed", True),
+                (_ for _ in ()).throw(RuntimeError("native close failed")),
+            )
+            second = manager.open("token")
+        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertTrue(first_live.closed)
+        self.assertFalse(inventory.live.closed)
+        with self.assertRaises(RemoteRFSessionExpiredError):
+            manager.get(first.session_id, validate_reservation=False)
+        self.assertIs(manager.get(second.session_id, validate_reservation=False), second)
+        self.assertEqual(manager.metrics()["sessions"], 1)
+
+    def test_legacy_v1_call_releases_a_leftover_v2_session_before_opening_hardware(self):
+        from remoteRF_server.server.rpc_manager import RpcManager
+
+        inventory = FakeInventorySchema()
+        inventory.session_scoped = True
+        inventory.dispatch = lambda name, args: setattr(inventory, "device", object()) or 1e6
+        context = {
+            "schema": inventory,
+            "dtype": "usrp",
+            "ident": "SERIAL",
+            "name": "test",
+        }
+        manager = SessionManager()
+        with (
+            patch(
+                "remoteRF_server.server.dynamic_v2.resolve_gid_for_token",
+                return_value=7,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.get_local_device_context",
+                return_value=context,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.USRPPolicy.load",
+                return_value=USRPPolicy({}),
+            ),
+            patch("remoteRF_server.server.dynamic_v2.session_manager", manager),
+        ):
+            zombie = manager.open("token")
+            RpcManager()._dispatch_local_schema(
+                function_name="Usrp:get_rx_rate:CALL0",
+                args={"a": map_arg("token")},
+                gid=7,
+                dev=inventory,
+            )
+            self.assertTrue(zombie.closed)
+            self.assertTrue(inventory.live.closed)
+            self.assertEqual(manager.metrics()["sessions"], 0)
+
+    def test_open_does_not_gate_on_uhd_version(self):
+        class OlderUhdLiveSchema(FakeLiveSchema):
+            def build_session_metadata_v2(self, policy_restrictions=None):
+                return {**super().build_session_metadata_v2(policy_restrictions), "uhd_version": "3.15.0.0"}
+
+        inventory = FakeInventorySchema()
+        inventory.create_session_schema = lambda: OlderUhdLiveSchema()
+        context = {
+            "schema": inventory,
+            "dtype": "usrp",
+            "ident": "SERIAL",
+            "name": "test",
+        }
+        manager = SessionManager()
+        with (
+            patch(
+                "remoteRF_server.server.dynamic_v2.resolve_gid_for_token",
+                return_value=7,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.get_local_device_context",
+                return_value=context,
+            ),
+            patch(
+                "remoteRF_server.server.dynamic_v2.USRPPolicy.load",
+                return_value=USRPPolicy({}),
+            ),
+        ):
+            session = manager.open("token")
+        self.assertEqual(session.capabilities["uhd_version"], "3.15.0.0")
+        self.assertTrue(manager.close(session.session_id))
+
+    def test_overload_validation_is_no_stricter_than_native_uhd(self):
+        from remoteRF_server.server.dynamic_v2 import _validate_overload
+
+        methods = {item["name"]: item for item in build_usrp_schema_v2()["methods"]}
+        dc_offset = methods["set_rx_dc_offset"]
+        # UHD's binding takes a real number for the complex offset.
+        self.assertEqual(_validate_overload(dc_offset, "offset", {"offset": 0, "chan": 0}, []), "offset")
+        with self.assertRaises(RemoteRFOverloadError):
+            _validate_overload(dc_offset, "offset", {"offset": "0", "chan": 0}, [])
+        # None for an optional argument is left to the native call.
+        self.assertEqual(_validate_overload(methods["get_rx_freq"], "default", {"chan": None}, []), "default")
+        # numpy arrays are sequences to pybind, so they are to us.
+        from remoteRF_server.server.dynamic_v2 import _matches_wire_type
+        self.assertTrue(_matches_wire_type(np.linspace(0, 1, 4), "list[float]"))
+        self.assertFalse(_matches_wire_type(np.array(["a"]), "list[float]"))
+        # np.mean(samples) is np.complex64; it must survive the JSON codec.
+        self.assertEqual(decode_value(encode_value(np.complex64(1 + 2j))), 1 + 2j)
+        with self.assertRaises(RemoteRFOverloadError):
+            _validate_overload(methods["set_rx_freq"], "default", {"tune_request": None, "chan": 0}, [])
 
     def test_resource_limits_metrics_and_close_all_are_bounded(self):
         inventory = FakeInventorySchema()

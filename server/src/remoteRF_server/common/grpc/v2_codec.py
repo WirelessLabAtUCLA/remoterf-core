@@ -49,7 +49,7 @@ def _json_safe(value: Any):
     if hasattr(value, "as_payload"):
         return _json_safe(value.as_payload())
     if isinstance(value, np.generic):
-        return value.item()
+        return _json_safe(value.item())
     if isinstance(value, complex):
         return {
             _JSON_TYPE_KEY: "complex",
