@@ -90,3 +90,80 @@ class GenCertsSanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl not available")
+class EnsureCertificateNamesTests(unittest.TestCase):
+    """A Global hostname chosen after the certs exist is added to server.crt
+    under the existing CA, so already-enrolled clients keep their trust."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_dir = Path(self._tmp.name)
+        self.certs = self.config_dir / "certs"
+        generate_certs(static_ip="192.168.1.50", dns=[], config_dir=self.config_dir, force=True, days=3650)
+
+    def _verify(self):
+        return subprocess.run(
+            ["openssl", "verify", "-CAfile", str(self.certs / "ca.crt"), str(self.certs / "server.crt")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+
+    def test_missing_hostname_is_added_without_touching_ca_or_key(self):
+        from remoteRF_server.tools.gen_certs import _x509_dates, ensure_certificate_names
+
+        ca = (self.certs / "ca.crt").read_bytes()
+        key = (self.certs / "server.key").read_bytes()
+        _, old_na = _x509_dates(self.certs / "server.crt")
+
+        self.assertTrue(ensure_certificate_names(self.certs, ["lab.global.remoterf.net"]))
+
+        san = _san_text(self.certs / "server.crt")
+        self.assertIn("IP Address:192.168.1.50", san)
+        self.assertIn("DNS:lab.global.remoterf.net", san)
+        self.assertEqual((self.certs / "ca.crt").read_bytes(), ca)
+        self.assertEqual((self.certs / "server.key").read_bytes(), key)
+        verified = self._verify()
+        self.assertEqual(verified.returncode, 0, verified.stdout)
+        _, new_na = _x509_dates(self.certs / "server.crt")
+        self.assertLess(abs((new_na - old_na).total_seconds()), 2 * 86400)
+
+    def test_present_hostname_is_a_noop(self):
+        from remoteRF_server.tools.gen_certs import ensure_certificate_names
+
+        ensure_certificate_names(self.certs, ["lab.global.remoterf.net"])
+        crt = (self.certs / "server.crt").read_bytes()
+        self.assertFalse(ensure_certificate_names(self.certs, ["lab.global.remoterf.net"]))
+        self.assertEqual((self.certs / "server.crt").read_bytes(), crt)
+
+    def test_without_certs_nothing_is_issued(self):
+        from remoteRF_server.tools.gen_certs import ensure_certificate_names
+
+        empty = self.config_dir / "none"
+        empty.mkdir()
+        self.assertFalse(ensure_certificate_names(empty, ["lab.global.remoterf.net"]))
+        self.assertEqual(sorted(p.name for p in empty.iterdir()), [])
+
+    def test_serverrf_adds_the_global_hostname_from_global_env(self):
+        from unittest import mock
+
+        from remoteRF_server import serverrf_cli
+        from remoteRF_server.server import global_onboarding as g
+
+        env = {
+            "REMOTERF_CONFIG_DIR": str(self.config_dir),
+            "REMOTERF_GLOBAL_DOMAIN": "global.remoterf.net",
+        }
+        with mock.patch.dict("os.environ", env):
+            g.update(GLOBAL_CONSENT="yes", GLOBAL_NAME="lab", GLOBAL_STATE="requested")
+            serverrf_cli._ensure_certificate_names()
+            san = _san_text(self.certs / "server.crt")
+            self.assertIn("DNS:lab.global.remoterf.net", san)
+            # Global may bind a different final name: that one is added too.
+            g.update(GLOBAL_FINAL_NAME="lab-2", GLOBAL_STATE="active")
+            serverrf_cli._ensure_certificate_names()
+        san = _san_text(self.certs / "server.crt")
+        self.assertIn("DNS:lab.global.remoterf.net", san)
+        self.assertIn("DNS:lab-2.global.remoterf.net", san)
+        self.assertEqual(self._verify().returncode, 0)

@@ -108,6 +108,19 @@ def start_detached(config_dir: Path, serve_argv: list[str]) -> bool:
     return result.returncode == 0
 
 
+def run_in_console(argv: list[str]) -> int:
+    """Type a command at the running console and attach, for commands whose
+    prompts need the server's own terminal."""
+    import shlex
+
+    if not running():
+        print("The server is not running. Start it with: serverrf -s", file=sys.stderr)
+        return 1
+    _tmux("send-keys", "-t", SESSION, shlex.join(argv), "Enter", capture=True)
+    os.execvp("tmux", ["tmux", "-L", SOCKET, "attach-session", "-t", SESSION])
+    return 0  # unreachable
+
+
 def detach() -> None:
     """Leave the console; the server keeps running."""
     _tmux("detach-client", "-s", SESSION, capture=True)

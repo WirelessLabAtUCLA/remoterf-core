@@ -634,6 +634,14 @@ def _load_all_drivers() -> None:
             print(f"Driver load {fname}: {status}")
 
 
+def reload_devices() -> None:
+    """Re-read devices.yml and reconnect: `devices add/remove` on a running server."""
+    # ponytail: reconnects every local device, not just the changed one;
+    # diff against the current table if a reload mid-session ever hurts.
+    close_local_devices()
+    _init_from_env()
+
+
 _load_all_drivers()
 _init_from_env()
 _super_token_path()

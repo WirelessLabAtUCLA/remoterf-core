@@ -207,6 +207,48 @@ class RequestTests(ConsentTests):
         self.assertEqual(g.load()["GLOBAL_RELAY_GRPC_PORT"], "62005")
         self.assertEqual(g.load()["GLOBAL_RELAY_HOST_KEY"], "ssh-ed25519 AAAAhost")
 
+    def test_join_writes_deployment_state(self):
+        from remoteRF_server.server.federation.identity import load_state
+
+        self.join()
+        _, patched = self.capture(
+            {"status": "requested", "deployment_id": "8a2e3f10-0000-4000-8000-000000000001",
+             "name": None, "relay": None}
+        )
+        with patched:
+            g.submit_request()
+        state = load_state(g.identity_dir())
+        self.assertTrue(state.enrolled)
+        self.assertEqual(state.deployment_id, "8a2e3f10-0000-4000-8000-000000000001")
+        self.assertEqual(state.display_name, "UCLA Wireless Lab")
+        self.assertEqual(state.protocol_version, "2")
+        enrolled_at = state.enrolled_at
+        self.assertRegex(enrolled_at, r"^\d{4}-\d{2}-\d{2}T")
+        # Later /me polls keep the first enrollment time.
+        _, patched = self.capture(
+            {"status": "active", "deployment_id": "8a2e3f10-0000-4000-8000-000000000001",
+             "name": "ucla", "relay": None}
+        )
+        with patched:
+            g.fetch_me()
+        self.assertEqual(load_state(g.identity_dir()).enrolled_at, enrolled_at)
+        self.assertEqual(g.state(), "active")
+
+    def test_apply_me_refuses_a_changed_deployment_id(self):
+        from remoteRF_server.server.federation.identity import load_state
+
+        self.join()
+        first = "8a2e3f10-0000-4000-8000-000000000001"
+        g._apply_me({"status": "requested", "deployment_id": first, "name": None, "relay": None})
+        before = (load_state(g.identity_dir()).to_dict(), dict(g.load()))
+        with self.assertRaises(g.GlobalError) as caught:
+            g._apply_me(
+                {"status": "active", "deployment_id": "8a2e3f10-0000-4000-8000-000000000002",
+                 "name": "ucla", "relay": None}
+            )
+        self.assertEqual(caught.exception.code, "deployment_id_changed")
+        self.assertEqual((load_state(g.identity_dir()).to_dict(), dict(g.load())), before)
+
     def test_a_refusal_surfaces_its_code(self):
         self.join()
 
@@ -595,3 +637,209 @@ class InviteTests(unittest.TestCase):
         self.assertEqual(g.tunnel_state(), "not assigned")
         g.update(GLOBAL_CONSENT="no")
         self.assertEqual(g.tunnel_state(), "off")
+
+
+class FederationRuntimeTests(unittest.TestCase):
+    """Slice 0: `--serve` derives the federation runtime from global.env + deployment.json."""
+
+    DEPLOYMENT = "8a2e3f10-0000-4000-8000-000000000001"
+
+    def setUp(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("REMOTERF_", "XDG_"))
+        }
+        env.update(
+            XDG_CONFIG_HOME=str(root / "config"),
+            XDG_DATA_HOME=str(root / "data"),
+            REMOTERF_GLOBAL_ORIGIN="https://127.0.0.1:9",
+            REMOTERF_BIND_HOST="0.0.0.0",
+        )
+        patch = mock.patch.dict("os.environ", env, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.db_dir = root / "config" / "remoterf" / "db"
+        self.handlers(self.db_dir)
+
+    def handlers(self, db_dir):
+        """Build the three real handlers rooted at db_dir and install them as the
+        module singletons the runtime binds to."""
+        from remoteRF_server.server.acc_perms import perms_db
+        from remoteRF_server.server.reservation import ReservationHandler
+        from remoteRF_server.server.user_group_handler import UserGroupHandler
+
+        db_dir.mkdir(parents=True, exist_ok=True)
+        patches = [
+            mock.patch(target, return_value=db_dir)
+            for target in (
+                "remoteRF_server.server.reservation.get_db_dir",
+                "remoteRF_server.server.acc_perms.get_db_dir",
+                "remoteRF_server.server.user_group_handler.get_db_dir",
+            )
+        ]
+        for item in patches:
+            item.start()
+        try:
+            self.perms = perms_db()
+            self.groups = UserGroupHandler()
+            self.reservations = ReservationHandler()
+        finally:
+            for item in patches:
+                item.stop()
+        for target, value in (
+            ("remoteRF_server.server.acc_perms.perms", self.perms),
+            ("remoteRF_server.server.user_group_handler.user_group_handler", self.groups),
+            ("remoteRF_server.server.reservation.perms", self.perms),
+            ("remoteRF_server.server.reservation.user_group_handler", self.groups),
+        ):
+            item = mock.patch(target, value)
+            item.start()
+            self.addCleanup(item.stop)
+
+    def enroll(self, status="active"):
+        g.update(
+            GLOBAL_CONSENT="yes",
+            GLOBAL_NAME="ucla",
+            GLOBAL_DISPLAY_NAME="UCLA Wireless Lab",
+            GLOBAL_EMAIL="lab@ucla.edu",
+            GLOBAL_SHARE_LAN="no",
+            GLOBAL_STATE="unregistered",
+        )
+        g.ensure_identity()
+        g._apply_me(
+            {"status": status, "deployment_id": self.DEPLOYMENT, "name": "ucla", "relay": None}
+        )
+
+    def snapshot(self):
+        """Everything Slice 0 may touch: deployment.json, global.env, and the
+        migration ledger + JTI/audit tables of every DB under both roots."""
+        import sqlite3
+        from pathlib import Path
+
+        from remoteRF_server.server.federation.identity import load_state
+
+        rows = {}
+        for db in sorted(Path(self.tmp.name).rglob("*.db")):
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+                for table in ("SchemaMigrations", "FederationGrantJTIs", "FederationAuditEvents",
+                              "LocalAccountSubjects"):
+                    try:
+                        rows[(db.name, table)] = conn.execute(
+                            f"SELECT COUNT(*) FROM {table}"
+                        ).fetchone()[0]
+                    except sqlite3.OperationalError:
+                        rows[(db.name, table)] = None
+        return (
+            load_state(g.identity_dir()).to_dict(),
+            dict(g.load()),
+            sorted(str(p) for p in Path(self.tmp.name).rglob("*.db")),
+            rows,
+        )
+
+    def test_runtime_refuses_when_paths_mismatch(self):
+        from pathlib import Path
+
+        from remoteRF_server.server.federation.runtime import (
+            build_configured_server_federation,
+            federation_enabled,
+        )
+
+        self.enroll("active")
+        # The running Server's handlers live somewhere other than the
+        # deployment's own db dir: the runtime must not bind to either.
+        self.handlers(Path(self.tmp.name) / "elsewhere")
+        self.assertTrue(federation_enabled())
+        before = self.snapshot()
+        with self.assertRaisesRegex(
+            RuntimeError, "reservations path does not match the running Server"
+        ):
+            build_configured_server_federation(self.reservations)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_runtime_refuses_when_global_is_not_active(self):
+        from remoteRF_server.server.federation.runtime import (
+            build_configured_server_federation,
+            federation_enabled,
+        )
+
+        self.enroll("requested")
+        self.assertFalse(federation_enabled())
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "GLOBAL_STATE=active"):
+            build_configured_server_federation(self.reservations)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_runtime_refuses_when_deployment_json_is_not_enrolled(self):
+        from remoteRF_server.server.federation.runtime import (
+            build_configured_server_federation,
+            federation_enabled,
+        )
+
+        g.update(GLOBAL_CONSENT="yes", GLOBAL_NAME="ucla", GLOBAL_STATE="active")
+        g.ensure_identity()  # keypair + empty deployment.json, as before Slice 0
+        self.assertFalse(federation_enabled())
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "deployment.json to be enrolled"):
+            build_configured_server_federation(self.reservations)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_env_zero_keeps_federation_off(self):
+        from remoteRF_server.server.federation.runtime import federation_enabled
+
+        self.enroll("active")
+        with mock.patch.dict("os.environ", {"REMOTERF_FEDERATION_ENABLED": "0"}):
+            self.assertFalse(federation_enabled())
+        self.assertTrue(federation_enabled())
+
+    def test_runtime_starts_from_global_env_alone(self):
+        import os
+
+        from remoteRF_server.server.federation.runtime import (
+            build_configured_server_federation,
+            federation_enabled,
+        )
+
+        self.enroll("active")
+        self.assertNotIn("REMOTERF_FEDERATION_CONFIG_PATH", os.environ)
+        self.assertNotIn("REMOTERF_FEDERATION_ENABLED", os.environ)
+        self.assertTrue(federation_enabled())
+        runtime = build_configured_server_federation(self.reservations)
+        try:
+            self.assertIsNotNone(runtime.executor)
+            self.assertIs(runtime.enroller.outbound, runtime.permissions.outbound)
+            self.assertEqual(runtime.permissions.local_deployment_id, self.DEPLOYMENT)
+            self.assertEqual(runtime.permissions.display_name, "UCLA Wireless Lab")
+            self.assertEqual(
+                runtime.permissions.path, (self.db_dir / "usergroups.db").resolve()
+            )
+        finally:
+            runtime.permissions.close()
+
+    def test_federation_groups_is_empty_on_a_fresh_deployment(self):
+        import contextlib
+        import io
+
+        from remoteRF_server.server.federation.cli import main as federation_main
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(federation_main(["groups"]), 1)
+        self.assertIn("not enabled", out.getvalue())
+
+        self.enroll("active")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(federation_main(["groups"]), 0)
+        text = out.getvalue()
+        self.assertIn(self.DEPLOYMENT, text)
+        self.assertIn("Owned groups: none", text)
+        self.assertIn("Joined groups: none", text)
+        self.assertEqual(federation_main([]), 2)

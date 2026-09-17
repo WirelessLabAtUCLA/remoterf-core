@@ -98,6 +98,67 @@ def _detect_local_ip() -> str:
         s.close()
 
 
+def _issue_server_cert(out_dir: Path, *, san_line: str, cn: str, days: int, bits: int) -> None:
+    """Sign a new server.crt for the existing server.key under the existing CA."""
+    ca_key, ca_crt = out_dir / "ca.key", out_dir / "ca.crt"
+    srv_key, srv_csr, srv_crt = out_dir / "server.key", out_dir / "server.csr", out_dir / "server.crt"
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+
+        csr_cnf = td_path / "csr.cnf"
+        csr_cnf.write_text(
+            f"""\
+[ req ]
+default_bits       = {bits}
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = req_ext
+
+[ dn ]
+CN = {cn}
+
+[ req_ext ]
+subjectAltName = {san_line}
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+""",
+            encoding="utf-8",
+        )
+
+        _run([
+            "openssl", "req", "-new",
+            "-key", str(srv_key),
+            "-out", str(srv_csr),
+            "-config", str(csr_cnf),
+        ])
+
+        sign_cnf = td_path / "sign.cnf"
+        sign_cnf.write_text(
+            f"""\
+[ v3_req ]
+basicConstraints = CA:FALSE
+subjectAltName = {san_line}
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+""",
+            encoding="utf-8",
+        )
+
+        _run([
+            "openssl", "x509", "-req",
+            "-in", str(srv_csr),
+            "-CA", str(ca_crt),
+            "-CAkey", str(ca_key),
+            "-CAcreateserial",
+            "-out", str(srv_crt),
+            "-days", str(days),
+            "-sha256",
+            "-extfile", str(sign_cnf),
+            "-extensions", "v3_req",
+        ])
+
+
 def generate_certs(
     *,
     static_ip: str | None,
@@ -168,62 +229,7 @@ def generate_certs(
     ])
 
     _run(["openssl", "genrsa", "-out", str(srv_key), str(bits)])
-
-    with tempfile.TemporaryDirectory() as td:
-        td_path = Path(td)
-
-        csr_cnf = td_path / "csr.cnf"
-        csr_cnf.write_text(
-            f"""\
-[ req ]
-default_bits       = {bits}
-prompt             = no
-default_md         = sha256
-distinguished_name = dn
-req_extensions     = req_ext
-
-[ dn ]
-CN = {cn}
-
-[ req_ext ]
-subjectAltName = {san_line}
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-""",
-            encoding="utf-8",
-        )
-
-        _run([
-            "openssl", "req", "-new",
-            "-key", str(srv_key),
-            "-out", str(srv_csr),
-            "-config", str(csr_cnf),
-        ])
-
-        sign_cnf = td_path / "sign.cnf"
-        sign_cnf.write_text(
-            f"""\
-[ v3_req ]
-basicConstraints = CA:FALSE
-subjectAltName = {san_line}
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-""",
-            encoding="utf-8",
-        )
-
-        _run([
-            "openssl", "x509", "-req",
-            "-in", str(srv_csr),
-            "-CA", str(ca_crt),
-            "-CAkey", str(ca_key),
-            "-CAcreateserial",
-            "-out", str(srv_crt),
-            "-days", str(days),
-            "-sha256",
-            "-extfile", str(sign_cnf),
-            "-extensions", "v3_req",
-        ])
+    _issue_server_cert(out_dir, san_line=san_line, cn=cn, days=days, bits=bits)
 
     print("\nGenerated certs/keys:")
     print(f"  Output dir: {out_dir}")
@@ -260,6 +266,45 @@ extendedKeyUsage = serverAuth
     else:
         print("  Server: (failed to parse dates)")
 
+
+
+def certificate_names(cert_path: Path) -> tuple[list[str], list[str]]:
+    """(IP SANs, DNS SANs) of a PEM certificate."""
+    from cryptography import x509
+    from cryptography.x509.oid import ExtensionOID
+
+    cert = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
+    try:
+        san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+    except x509.ExtensionNotFound:
+        return [], []
+    return (
+        [str(ip) for ip in san.get_values_for_type(x509.IPAddress)],
+        list(san.get_values_for_type(x509.DNSName)),
+    )
+
+
+def ensure_certificate_names(cert_dir: Path, names: list[str]) -> bool:
+    """Add missing DNS names to server.crt by reissuing it under the existing
+    CA and key, keeping its expiry. Returns True when a new cert was written;
+    False when nothing was missing or there are no certs to amend yet."""
+    cert_dir = Path(cert_dir)
+    files = [cert_dir / n for n in ("ca.key", "ca.crt", "server.key", "server.crt")]
+    if not all(f.exists() for f in files):
+        return False
+    ips, dns = certificate_names(cert_dir / "server.crt")
+    missing = [n for n in names if n and n not in dns]
+    if not missing:
+        return False
+    _ensure_openssl()
+    dns = dns + missing
+    _, srv_na = _x509_dates(cert_dir / "server.crt")
+    _, ca_na = _x509_dates(cert_dir / "ca.crt")
+    ends = [d for d in (srv_na, ca_na) if d]
+    days = max(1, (min(ends) - datetime.now(timezone.utc)).days) if ends else 365
+    san_line = ",".join([f"IP:{ip}" for ip in ips] + [f"DNS:{d}" for d in dns])
+    _issue_server_cert(cert_dir, san_line=san_line, cn=dns[0], days=days, bits=2048)
+    return True
 
 
 import argparse

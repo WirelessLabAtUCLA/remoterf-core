@@ -627,10 +627,33 @@ def _public_key_b64() -> str:
     return public_key_b64(ensure_identity())
 
 
+def _record_enrollment(deployment_id: str) -> None:
+    """deployment.json is what the federation runtime binds to; it is written
+    once, and a different id from Global is refused rather than adopted."""
+    from datetime import datetime, timezone
+
+    from .federation.identity import load_state, save_state
+
+    directory = ensure_identity()
+    state = load_state(directory)
+    if state.deployment_id and state.deployment_id != deployment_id:
+        raise GlobalError(
+            "deployment_id_changed",
+            f"Global answered with deployment {deployment_id}, but this "
+            f"deployment is enrolled as {state.deployment_id}",
+        )
+    kv = load()
+    state.deployment_id = deployment_id
+    state.display_name = kv.get("GLOBAL_DISPLAY_NAME") or kv.get("GLOBAL_NAME")
+    state.enrolled_at = state.enrolled_at or datetime.now(timezone.utc).isoformat()
+    save_state(directory, state)
+
+
 def _apply_me(result: dict) -> None:
     """Record what Global decided. The final name may differ from the request."""
     fields = {"GLOBAL_STATE": result["status"]}
     if result.get("deployment_id"):
+        _record_enrollment(result["deployment_id"])
         fields["GLOBAL_DEPLOYMENT_ID"] = result["deployment_id"]
     if result.get("name"):
         fields["GLOBAL_FINAL_NAME"] = result["name"]

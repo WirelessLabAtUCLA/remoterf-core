@@ -197,6 +197,7 @@ class ServerRuntime:
     cert_port: int
     writer_lock: Any = None
     federation_permissions: Any = None
+    control_server: Any = None
     _stop_lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
 
@@ -227,6 +228,9 @@ class ServerRuntime:
                 and self.update_thread is not threading.current_thread()
             ):
                 self.update_thread.join(timeout=2.0)
+            if self.control_server is not None:
+                self.control_server.stop()
+                self.control_server = None
             if self.writer_lock is not None:
                 self.writer_lock.close()
                 self.writer_lock = None
@@ -406,7 +410,16 @@ def start_server_runtime(
         writer_lock.close()
         raise
 
-    return ServerRuntime(
+    from .control import ControlServer
+
+    control_server = ControlServer(control_handler)
+    try:
+        control_server.start()
+    except OSError as exc:
+        logger.warning("control socket unavailable: %s", exc)
+        control_server = None
+    global _runtime
+    _runtime = ServerRuntime(
         grpc_server=server,
         cert_server=cert_server,
         stop_event=stop_event,
@@ -416,7 +429,9 @@ def start_server_runtime(
         cert_port=int(cert_server.server_address[1]),
         writer_lock=writer_lock,
         federation_permissions=home_federation_permissions,
+        control_server=control_server,
     )
+    return _runtime
 
 
 def update_devices(stop_event: threading.Event) -> None:
@@ -1063,190 +1078,130 @@ def _cmd_status() -> None:
         printf(f"Status unavailable: {exc}", Sty.RED)
 
 # Canonical spellings only; the aliases in DISPATCH are deliberately unlisted.
-_HELP_SECTIONS = (
-    ("Server", (
-        ("help, h", "Show this help"),
-        ("clear", "Clear the screen"),
-        ("status", "Server uptime, bind, devices, RemoteRF Global"),
-        ("quit / kill", "Stop the server"),
-        ("detach", "Leave the console; the server keeps running (also Ctrl-C)"),
-    )),
-    ("Users", (
-        ("users list", "List accounts"),
-        ("users manage", "Manage a user (perms / delete / reservations)"),
-        ("users purge", "Remove ALL users"),
-    )),
-    ("Devices", (
-        ("devices list", "List devices"),
-        ("devices status", "Live device online/last_seen/route"),
-    )),
-    ("Reservations", (
-        ("reservations list", "List reservations"),
-        ("reservations purge", "Remove ALL reservations"),
-    )),
-    ("Groups", (
-        ("groups list", "List user groups"),
-        ("groups create", "Create a user group (interactive)"),
-        ("groups edit", "Edit a user group (interactive)"),
-        ("groups delete", "Delete a user group (interactive)"),
-        ("groups csv", "Export ALL user groups as CSV to Downloads"),
-    )),
-    ("Enrollment codes", (
-        ("codes list", "List enrollment codes"),
-        ("codes create", "Create enrollment codes (interactive)"),
-        ("codes delete", "Delete an enrollment code (interactive)"),
-        ("codes csv", "Export ALL enrollment codes as CSV to Downloads"),
-    )),
-    ("Host tunnel (live)", (
-        ("hosts status", "Live host online/last_seen/devices"),
-        ("hosts wipe [-y]", "Wipe persisted host directory state"),
-    )),
-    ("Database", (
-        ("db purge", "Remove all database entries"),
-    )),
-)
-
-
 def help() -> None:
-    from ..common.utils.panel import panel_lines
+    from .commands import cmd_help
 
-    width = max(len(command) for _, rows in _HELP_SECTIONS for command, _ in rows)
-    body: list[str] = []
-    for title, rows in _HELP_SECTIONS:
-        if body:
-            body.append("")
-        body.append(title)
-        body += [f"  {command:<{width}}  {text}" for command, text in rows]
-    lines = panel_lines("RemoteRF Server Shell", body, literal=True)
-    # Frame + one space of padding, then the two-space command indent.
-    command_at = 2 + 2
-    printf("", Sty.DEFAULT)
-    for index, line in enumerate(lines):
-        inner = line[1:-1]
-        if index in (0, len(lines) - 1) or not inner.strip():
-            printf(line, Sty.DEFAULT)
-        elif inner.startswith("   "):
-            printf(line[:command_at], Sty.DEFAULT,
-                   line[command_at:command_at + width], Sty.MAGENTA,
-                   line[command_at + width:-1], Sty.DEFAULT,
-                   line[-1], Sty.DEFAULT)
-        else:
-            printf(line[0], Sty.DEFAULT, inner, Sty.BOLD, line[-1], Sty.DEFAULT)
-    printf("", Sty.DEFAULT)
+    cmd_help([])
+
+
+_runtime: ServerRuntime | None = None
+_exit_action: str | None = None   # "quit" | "restart", set when asked from another thread
+
+# Spellings the console accepted before the shared command table.
+_OLD_ALIASES = {
+    "server status": "status", "u list": "users list", "accounts list": "users list",
+    "setacc": "users manage", "rm aa": "users purge", "show p": "users perms",
+    "show d": "devices list", "show r": "reservations list", "rm ar": "reservations purge",
+    "rm db": "db purge", "mk group": "groups create", "mk g": "groups create",
+    "rm group": "groups remove", "rm g": "groups remove", "edit group": "groups edit",
+    "edit g": "groups edit", "show g": "groups list", "show groups": "groups list",
+    "mk codes": "codes create", "mk code": "codes create", "mk c": "codes create",
+    "show c": "codes list", "rm codes": "codes remove", "rm code": "codes remove",
+    "rm c": "codes remove", "host status": "hosts status", "tunnel devices": "devices status",
+}
+
+
+def _console_argv(inpu: str) -> list[str]:
+    import shlex
+
+    cmd = _norm_cmd(inpu)
+    for old, new in _OLD_ALIASES.items():
+        if cmd == old or cmd.startswith(old + " "):
+            cmd = new + cmd[len(old):]
+            break
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
+
 
 def server_input(inpu: str) -> bool:
-    cmd = _norm_cmd(inpu)
-    if not cmd:
+    """One console line. False when the server should stop."""
+    from .commands import RestartRequested, StopRequested, dispatch
+
+    argv = _console_argv(inpu)
+    if not argv:
         return True
+    global _exit_action
+    try:
+        dispatch(argv, in_daemon=True)
+    except StopRequested:
+        _exit_action = "quit"
+        return False
+    except RestartRequested:
+        _exit_action = "restart"
+        return False
+    return True
 
-    def _stay(fn: Callable[[], None]) -> bool:
-        fn()
-        return True
 
-    DISPATCH: dict[str, Callable[[], bool]] = {
-        # ---- server ----
-        "help": lambda: _stay(help),
-        "h": lambda: _stay(help),
-        "?": lambda: _stay(help),
+def control_handler(argv: list[str]) -> int:
+    """A command sent by `serverrf …` from a shell; runs here, in the server."""
+    from .commands import RestartRequested, StopRequested, dispatch
 
-        "clear": lambda: _stay(clear),
-        "cls": lambda: _stay(clear),
+    try:
+        return dispatch(argv, in_daemon=True)
+    except StopRequested:
+        _request_exit("quit")
+    except RestartRequested:
+        _request_exit("restart")
+    return 0
 
-        "status": lambda: _stay(_cmd_status),
-        "server status": lambda: _stay(_cmd_status),
 
-        "quit": lambda: False,
-        "exit": lambda: False,
-        "q": lambda: False,
-        "kill": lambda: False,
-        "detach": lambda: _stay(_cmd_detach),
+def _request_exit(action: str) -> None:
+    """Make the main loop finish as if `quit`/`restart` had been typed."""
+    global _exit_action
+    _exit_action = action
+    app = getattr(session, "app", None)
+    loop = getattr(app, "loop", None)
+    if app is not None and app.is_running and loop is not None:
+        loop.call_soon_threadsafe(lambda: app.exit(result=action))
+    elif _runtime is not None:
+        # Headless: wake the main thread's wait(); it runs the full stop there
+        # (a thread spawned here would be a daemon and die with the process).
+        _runtime.stop_event.set()
 
-        # ---- users ----
-        "users list": lambda: _stay(reservation_handler.print_all_accounts),
-        "u list": lambda: _stay(reservation_handler.print_all_accounts),
-        "accounts list": lambda: _stay(reservation_handler.print_all_accounts),
 
-        "users manage": lambda: _stay(set_acc),
-        "users manage": lambda: _stay(set_acc),
-        "setacc": lambda: _stay(set_acc),  # old
+def _reexec() -> None:
+    """Restart in place: same pid's tmux window, same argv, fresh process."""
+    if sys.stdin.isatty():
+        os.system("stty sane")
+    os.execv(sys.executable, [sys.executable, "-m", "remoteRF_server.serverrf_cli", *sys.argv[1:]])
 
-        "users purge": lambda: _stay(reservation_handler.remove_all_users),
-        "rm aa": lambda: _stay(reservation_handler.remove_all_users),  # old
 
-        # perms (kept; optional to advertise)
-        "users perms": lambda: _stay(perms.print_perms),
-        "show p": lambda: _stay(perms.print_perms),  # old
+# The shared command table calls these by name (commands.py).
+def cmd_status(argv): _cmd_status()
+def cmd_detach(argv): _cmd_detach()
+def cmd_clear(argv): clear()
+def cmd_devices_status(argv): _cmd_devices_status()
+def cmd_hosts_status(argv): _cmd_hosts_status()
+def cmd_hosts_wipe(argv): _cmd_hosts_wipe(yes=("-y" in argv or "--yes" in argv))
+def cmd_users_list(argv): reservation_handler.print_all_accounts()
+def cmd_users_manage(argv): set_acc()
+def cmd_users_perms(argv): perms.print_perms()
+def cmd_users_purge(argv): reservation_handler.remove_all_users()
+def cmd_reservations_list(argv): reservation_handler.print_all_reservations()
+def cmd_reservations_purge(argv): reservation_handler.remove_all_reservations()
+def cmd_db_purge(argv): reservation_handler.rm_db()
+def cmd_devices_list(argv): get_devices()
 
-        # ---- devices ----
-        "devices list": lambda: _stay(get_devices),
-        "show d": lambda: _stay(get_devices),  # old
 
-        # ---- reservations ----
-        "reservations list": lambda: _stay(reservation_handler.print_all_reservations),
-        "show r": lambda: _stay(reservation_handler.print_all_reservations),  # old
+def cmd_reload_devices(argv):
+    from . import device_manager
 
-        "reservations purge": lambda: _stay(reservation_handler.remove_all_reservations),
-        "rm ar": lambda: _stay(reservation_handler.remove_all_reservations),  # old
+    device_manager.reload_devices()
 
-        # ---- db ----
-        "db purge": lambda: _stay(reservation_handler.rm_db),
-        "rm db": lambda: _stay(reservation_handler.rm_db),  # old
 
-        # ---- groups ----
-        "groups create": lambda: _stay(lambda: make_user_group_local(session)),
-        "mk group": lambda: _stay(lambda: make_user_group_local(session)),  # old
-        "mk g": lambda: _stay(lambda: make_user_group_local(session)),      # old
+def cmd_stop(argv):
+    from .commands import StopRequested
 
-        "groups delete": lambda: _stay(lambda: remove_user_group_local(session)),
-        "rm group": lambda: _stay(lambda: remove_user_group_local(session)),  # old
-        "rm g": lambda: _stay(lambda: remove_user_group_local(session)),      # old
+    raise StopRequested()
 
-        "groups edit": lambda: _stay(lambda: edit_user_group_local(session)),
-        "edit group": lambda: _stay(lambda: edit_user_group_local(session)),  # old
-        "edit g": lambda: _stay(lambda: edit_user_group_local(session)),      # old
 
-        "groups list": lambda: _stay(lambda: list_user_groups_local(session)),
-        "show g": lambda: _stay(lambda: list_user_groups_local(session)),      # old
-        "show groups": lambda: _stay(lambda: list_user_groups_local(session)), # old
-        "groups csv": lambda: _stay(export_user_groups_csv_local),
+def cmd_restart(argv):
+    from .commands import RestartRequested
 
-        # ---- enrollment codes ----
-        "codes create": lambda: _stay(lambda: make_enrollment_codes_local(session)),
-        "mk codes": lambda: _stay(lambda: make_enrollment_codes_local(session)),  # old
-        "mk code": lambda: _stay(lambda: make_enrollment_codes_local(session)),   # old
-        "mk c": lambda: _stay(lambda: make_enrollment_codes_local(session)),      # old
+    raise RestartRequested()
 
-        "codes list": lambda: _stay(lambda: list_enrollment_codes_local(session)),
-        "show c": lambda: _stay(lambda: list_enrollment_codes_local(session)),    # old
-
-        "codes delete": lambda: _stay(lambda: remove_enrollment_code_local(session)),
-        "rm codes": lambda: _stay(lambda: remove_enrollment_code_local(session)), # old
-        "rm code": lambda: _stay(lambda: remove_enrollment_code_local(session)),  # old
-        "rm c": lambda: _stay(lambda: remove_enrollment_code_local(session)),     # old
-        
-        # ---- host tunnel ----
-        "hosts status": lambda: _stay(_cmd_hosts_status),
-        "host status": lambda: _stay(_cmd_hosts_status),
-
-        "devices status": lambda: _stay(_cmd_devices_status),
-        "tunnel devices": lambda: _stay(_cmd_devices_status),
-        
-        "codes csv": lambda: _stay(export_enrollment_codes_csv_local),
-    }
-
-    fn = DISPATCH.get(cmd)
-    if fn is None:
-        # allow: "hosts wipe" and "hosts wipe -y"
-        if cmd.startswith("hosts wipe"):
-            yes = ("-y" in cmd.split()) or ("--yes" in cmd.split())
-            _cmd_hosts_wipe(yes=yes)
-            return True
-
-        printf("Unknown command: ", Sty.RED, f"{inpu}", Sty.DEFAULT)
-        printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands.", Sty.DEFAULT)
-        return True
-
-    return fn()
 
 def main() -> int:
     from . import console
@@ -1267,6 +1222,8 @@ def main() -> int:
                 console.detach()
     finally:
         runtime.stop()
+    if _exit_action == "restart":
+        _reexec()
     return 0
 
 
@@ -1279,6 +1236,8 @@ def headless_main() -> int:
         pass
     finally:
         runtime.stop()
+    if _exit_action == "restart":
+        _reexec()
     return 0
 
 
