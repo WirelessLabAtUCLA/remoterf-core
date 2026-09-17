@@ -160,6 +160,19 @@ class DynamicV2BridgeTests(unittest.TestCase):
         self.assertTrue(response.device_handle)
         return response
 
+    def test_reopen_releases_a_leftover_session_even_if_its_close_fails(self):
+        first = session_manager.open("token")
+        first_live = self.inventory.live
+        first_live.close_native_device = lambda: (
+            setattr(first_live, "closed", True),
+            (_ for _ in ()).throw(RuntimeError("native close failed")),
+        )
+        second = session_manager.open("token")
+        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertTrue(first_live.closed)
+        self.assertEqual(session_manager._opening_gids, set())
+        self.assertEqual(session_manager.metrics()["sessions"], 1)
+
     def test_control_requests_round_trip_as_serialized_v2_messages(self):
         schema = self.call(
             "GetSchema",

@@ -320,9 +320,19 @@ def _seed_default_ti_mmwave_driver() -> None:
     )
 
 
+def _seed_default_usrp_phaser_driver() -> None:
+    _seed_default_driver(
+        "usrp_phaser_schema.py",
+        "usrp_phaser",
+        _packaged_schema_path("usrp_phaser", "usrp_phaser_schema.py"),
+    )
+
+
 def _load_all_drivers(required_types: set[str]) -> None:
     if "usrp" in required_types:
         _seed_default_usrp_driver()
+    if "usrp_phaser" in required_types:
+        _seed_default_usrp_phaser_driver()
     if "rtl_sdr" in required_types:
         _seed_default_rtl_sdr_driver()
     if "hackrf" in required_types:
@@ -365,6 +375,12 @@ def _load_all_drivers(required_types: set[str]) -> None:
             from ..drivers.ti_mmwave import ti_mmwave_schema as _  # noqa: F401
         except Exception as e:
             warn(f"Could not load built-in TI mmWave driver: {e}", component="hostrf.device_manager")
+
+    if "usrp_phaser" in required_types:
+        try:
+            from ..drivers.usrp_phaser import usrp_phaser_schema as _  # noqa: F401
+        except Exception as e:
+            warn(f"Could not load built-in USRP Phaser driver: {e}", component="hostrf.device_manager")
 
     results = load_drivers()
     for fname, status in results.items():

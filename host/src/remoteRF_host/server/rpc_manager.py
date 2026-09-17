@@ -95,6 +95,13 @@ class RpcManager:
         if self._should_use_builtin_ip_fallback(gid=gid, prop=prop, verb=verb):
             return {"ip": self._safe_map(f"{actual_type or 'device'}:{gid}")}
 
+        if getattr(schema, "session_scoped", False) and getattr(schema, "device", None) is None:
+            # The legacy path is about to open the hardware lazily; a Dynamic
+            # v2 session left behind by an earlier run must not block it.
+            from .dynamic_v2 import session_manager
+
+            session_manager.close_gid(gid)
+
         try:
             if verb == "GET":
                 result = schema.dispatch(f"get_{prop}", {})

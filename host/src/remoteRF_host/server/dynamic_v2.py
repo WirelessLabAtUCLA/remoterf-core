@@ -44,8 +44,6 @@ from ..drivers.usrp.policy import USRPPolicy
 from ..drivers.usrp.uhd_manifest import (
     HANDLE_METHOD_RETURN_TYPES,
     HANDLE_RETURN_METHODS,
-    TARGET_UHD_VERSION,
-    is_supported_uhd_version,
 )
 from .device_manager import (
     get_local_device_context,
@@ -141,9 +139,13 @@ def _matches_wire_type(value: Any, wire_type: str) -> bool:
             return True
         if choice == "bytes" and isinstance(value, bytes):
             return True
-        if choice == "complex" and isinstance(value, (complex, np.complexfloating)):
+        if (
+            choice == "complex"
+            and isinstance(value, (numbers.Complex, np.number))
+            and not isinstance(value, bool)
+        ):
             return True
-        if choice.startswith("list") and isinstance(value, (list, tuple)):
+        if choice.startswith("list") and isinstance(value, (list, tuple, np.ndarray)):
             if "[" not in choice:
                 return True
             item_type = choice.partition("[")[2].rpartition("]")[0]
@@ -155,6 +157,12 @@ def _matches_wire_type(value: Any, wire_type: str) -> bool:
         if choice.startswith("uhd.") and isinstance(value, dict):
             return True
     return False
+
+
+def _accepts(parameter: dict, value: Any) -> bool:
+    if value is None and not parameter.get("required", True):
+        return True
+    return _matches_wire_type(value, str(parameter.get("type") or "any"))
 
 
 def _validate_overload(
@@ -192,9 +200,7 @@ def _validate_overload(
             if positional_index < len(positional_args):
                 value = positional_args[positional_index]
                 positional_index += 1
-                if not _matches_wire_type(
-                    value, str(parameter.get("type") or "any")
-                ):
+                if not _accepts(parameter, value):
                     raise RemoteRFOverloadError(
                         f"argument {name!r} does not match "
                         f"{parameter.get('type', 'any')}"
@@ -217,9 +223,7 @@ def _validate_overload(
             raise RemoteRFOverloadError(
                 f"missing required argument {name!r} for {descriptor['name']}"
             )
-        if name in args and not _matches_wire_type(
-            args[name], str(parameter.get("type") or "any")
-        ):
+        if name in args and not _accepts(parameter, args[name]):
             raise RemoteRFOverloadError(
                 f"argument {name!r} does not match {parameter.get('type', 'any')}"
             )
@@ -576,15 +580,18 @@ class SessionManager:
             )
 
         with self._lock:
-            if len(self._sessions) + len(self._opening_gids) >= _MAX_SESSIONS:
+            if gid in self._opening_gids:
+                raise RemoteRFReservationError(
+                    "the reserved USRP is already being opened by another Dynamic v2 session"
+                )
+            existing = self._session_by_gid.get(gid)
+            if existing not in self._sessions:
+                existing = None
+            live = len(self._sessions) - (1 if existing else 0)
+            if live + len(self._opening_gids) >= _MAX_SESSIONS:
                 raise RemoteRFServerOverloadedError(
                     "the Dynamic v2 session limit has been reached",
                     details={"maximum_sessions": _MAX_SESSIONS},
-                )
-            existing = self._session_by_gid.get(gid)
-            if (existing and existing in self._sessions) or gid in self._opening_gids:
-                raise RemoteRFReservationError(
-                    "the reserved USRP already has an active Dynamic v2 session"
                 )
             self._opening_gids.add(gid)
 
@@ -594,10 +601,21 @@ class SessionManager:
                 self._opening_gids.discard(gid)
             raise RemoteRFProtocolError("device driver is not session-scoped")
         try:
+            # Only the reservation holder can resolve this token, so a leftover
+            # v2 session or lazily opened v1 device is theirs: a crashed or
+            # unclosed previous run. Release it instead of locking them out;
+            # a handle that fails to close is already unusable, and the fresh
+            # open below decides whether the hardware is actually free.
+            if existing:
+                try:
+                    self.close(existing)
+                except Exception:
+                    pass
             if getattr(inventory_schema, "device", None) is not None:
-                raise RemoteRFReservationError(
-                    "the USRP is already open through a legacy v1 session"
-                )
+                try:
+                    inventory_schema.close_native_device()
+                except Exception:
+                    pass
             live_schema = create()
             capabilities = live_schema.build_session_metadata_v2()
             capabilities["remote_resource_limits"] = {
@@ -607,12 +625,6 @@ class SessionManager:
                 "maximum_sample_payload_bytes": _MAX_SAMPLE_PAYLOAD_BYTES,
                 "maximum_stream_credits": _MAX_CREDITS,
             }
-            version = str(capabilities.get("uhd_version") or "")
-            if not is_supported_uhd_version(version):
-                raise RemoteRFProtocolError(
-                    f"UHD {TARGET_UHD_VERSION} is required; server reports {version or 'unknown'}",
-                    details={"required": TARGET_UHD_VERSION, "actual": version},
-                )
         except Exception:
             if "live_schema" in locals():
                 live_schema.close_native_device()
