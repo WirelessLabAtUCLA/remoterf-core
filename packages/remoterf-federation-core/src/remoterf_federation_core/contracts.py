@@ -119,6 +119,9 @@ _BROKER_PATHS = frozenset(
         "/v2/broker/deployments/me",
         "/v2/broker/deployments/leave",
         "/v2/broker/deployments/report",
+        # Cluster invites: identity relay for `global cluster invite|join`.
+        "/v2/broker/invites",
+        "/v2/broker/invites/join",
     }
 )
 
