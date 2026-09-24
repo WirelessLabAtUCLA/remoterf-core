@@ -107,24 +107,51 @@ def test_a_closed_port_fails_fast_even_with_the_read_retry(world, listener):
 
 # -- a lab's own route ----------------------------------------------------
 
-def test_own_route_needs_a_relay_port_and_a_readable_ca(tmp_path, monkeypatch):
+def test_own_route_is_the_public_relay_route_and_needs_a_readable_ca(tmp_path, monkeypatch):
     from remoteRF_server.server import global_onboarding as g
+    from remoteRF_server.server.federation import peers
 
     root = tmp_path / "cfg"
-    monkeypatch.setenv("REMOTERF_CONFIG_DIR", str(root))
     monkeypatch.delenv("REMOTERF_CERT_DIR", raising=False)
     (root / "certs").mkdir(parents=True)
     monkeypatch.setattr(g, "cfg_dir", lambda: root)
-    monkeypatch.setattr(g, "load", lambda: {"GLOBAL_FINAL_NAME": "lab", "GLOBAL_RELAY_GRPC_PORT": "62005"})
+    monkeypatch.setattr(g, "load", lambda: {"GLOBAL_FINAL_NAME": "lab"})
+    seen = []
+    monkeypatch.setattr(peers, "_relay_route", lambda host: seen.append(host) or ("lab.global.remoterf.net", 12321))
     assert own_route() is None  # no ca.crt yet
     (root / "certs" / "ca.crt").write_text("not a certificate")
     assert own_route() is None
     ca_pem = write_certs(root / "certs")
     route = own_route()
-    assert route["grpc_endpoint"] == f"lab.{g.domain()}:62005" and route["tls_server_name"] == f"lab.{g.domain()}"
-    assert route["ca_pem"] == ca_pem.decode()
-    monkeypatch.setattr(g, "load", lambda: {"GLOBAL_FINAL_NAME": "lab"})
-    assert own_route() is None  # no relay port assigned yet
+    assert seen[-1] == f"lab.{g.domain()}"
+    assert route == {"grpc_endpoint": "lab.global.remoterf.net:12321", "tls_server_name": "lab.global.remoterf.net",
+                     "ca_pem": ca_pem.decode()}
+    monkeypatch.setattr(peers, "_relay_route", lambda host: None)
+    assert own_route() is None  # no discovery document: nothing to advertise this tick
+
+
+def test_the_relay_route_comes_from_the_discovery_document(monkeypatch):
+    from remoteRF_server.server.federation import peers
+
+    class Reply:
+        def __init__(self, doc):
+            self._doc = doc
+
+        def json(self):
+            return self._doc
+
+    def fake_get(url, timeout, allow_redirects):
+        assert url == "https://lab.global.remoterf.net/.well-known/remoterf-deployment"
+        return Reply({"routes": [{"kind": "lan", "host": "10.0.0.5", "port": 61005, "cert_port": 61006},
+                                 {"kind": "relay", "host": "lab.global.remoterf.net", "port": 12321, "cert_port": 12322}]})
+
+    monkeypatch.setattr(peers, "requests", type("R", (), {"get": staticmethod(fake_get)}), raising=False)
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    assert peers._relay_route("lab.global.remoterf.net") == ("lab.global.remoterf.net", 12321)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+    assert peers._relay_route("lab.global.remoterf.net") is None
 
 
 def test_a_cluster_note_pins_a_route_only_when_the_lab_signed_it(world, monkeypatch):

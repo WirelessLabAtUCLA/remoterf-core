@@ -130,21 +130,41 @@ class PeerStore:
             ).rowcount > 0
 
 
+def _relay_route(host: str) -> tuple[str, int] | None:
+    """The relay route this deployment's own discovery document advertises:
+    the public, SNI-routed port every client dials -- not the tunnel's
+    backend port that global.env keeps, which only the VPS itself can reach."""
+    import requests
+
+    try:
+        document = requests.get(
+            f"https://{host}/.well-known/remoterf-deployment", timeout=5, allow_redirects=False
+        ).json()
+        for route in document.get("routes", []):
+            if route.get("kind") == "relay" and route.get("host") and route.get("port"):
+                return str(route["host"]), int(route["port"])
+    except Exception:  # noqa: BLE001 - no document, no route this tick
+        return None
+    return None
+
+
 def own_route() -> dict | None:
-    """This lab's relay route, for its status note: the name clients dial,
-    the relay's gRPC port, and the CA every client already pins."""
+    """This lab's relay route, for its status note: the name and port clients
+    dial, and the CA every client already pins."""
     from .. import global_onboarding
 
     host = global_onboarding.hostname()
-    port = global_onboarding.load().get("GLOBAL_RELAY_GRPC_PORT")
     ca_path = Path(os.getenv("REMOTERF_CERT_DIR", global_onboarding.cfg_dir() / "certs")) / "ca.crt"
     try:
         ca_pem = ca_path.read_text("utf-8")
     except OSError:
         return None
-    if not host or not port:
+    if not host:
+        return None
+    relay = _relay_route(host)
+    if relay is None:
         return None
     try:
-        return validate_route({"grpc_endpoint": f"{host}:{port}", "tls_server_name": host, "ca_pem": ca_pem})
+        return validate_route({"grpc_endpoint": f"{relay[0]}:{relay[1]}", "tls_server_name": relay[0], "ca_pem": ca_pem})
     except ValueError:
         return None

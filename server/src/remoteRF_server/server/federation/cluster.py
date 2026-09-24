@@ -784,7 +784,8 @@ def _take_statuses(name: str, cluster: dict, statuses: list[dict]) -> None:
             parties[peer]["sharing"] = {"groups": status["groups"], "devices": status["devices"],
                                         "detail": status.get("detail", [])}
             if status.get("route"):
-                _pin_route(peer, parties[peer].get("display_name"), status["route"])
+                # A member's row for its owner carries the name as peer_name.
+                _pin_route(peer, parties[peer].get("display_name") or parties[peer].get("peer_name"), status["route"])
 
 
 def _pin_route(peer: str, display_name: str | None, route: dict) -> None:
