@@ -197,6 +197,7 @@ class ServerRuntime:
     cert_port: int
     writer_lock: Any = None
     federation_permissions: Any = None
+    federation_devices: Any = None
     control_server: Any = None
     _stop_lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
@@ -237,6 +238,8 @@ class ServerRuntime:
             close_permissions = getattr(self.federation_permissions, "close", None)
             if close_permissions is not None:
                 close_permissions()
+            if self.federation_devices is not None:
+                self.federation_devices.close()
 
 
 def _load_server_credentials(cert_dir: Path):
@@ -294,6 +297,8 @@ def start_server_runtime(
     writer_lock = acquire_runtime_writer_lock(get_db_dir())
     from .federation.runtime import federation_enabled
 
+    home_federation_devices = None
+
     try:
         if federation_enabled():
             supplied = (
@@ -311,6 +316,7 @@ def start_server_runtime(
                 federation_executor = configured.executor
                 home_federation_enroller = configured.enroller
                 home_federation_permissions = configured.permissions
+                home_federation_devices = configured.devices
     except Exception:
         logger.error("federation_readiness_failure component=server_composition")
         writer_lock.close()
@@ -336,6 +342,7 @@ def start_server_runtime(
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
     reservation_handler.federation_enroller = home_federation_enroller
     reservation_handler.federation_permissions = home_federation_permissions
+    reservation_handler.federation_devices = home_federation_devices
     from .deployment.capabilities import register_capabilities
     from .federation.destination import register_grpc_federation
     register_capabilities(server)
@@ -407,6 +414,8 @@ def start_server_runtime(
         close_permissions = getattr(home_federation_permissions, "close", None)
         if close_permissions is not None:
             close_permissions()
+        if home_federation_devices is not None:
+            home_federation_devices.close()
         writer_lock.close()
         raise
 
@@ -429,6 +438,7 @@ def start_server_runtime(
         cert_port=int(cert_server.server_address[1]),
         writer_lock=writer_lock,
         federation_permissions=home_federation_permissions,
+        federation_devices=home_federation_devices,
         control_server=control_server,
     )
     return _runtime
@@ -457,16 +467,29 @@ def serve() -> None:
 start_time = datetime.now()
 
 def welcome():
+    from ..common.utils.panel import marker, print_panel
+    from . import console
+
+    rows = [
+        f"{marker()} Server running nominally.",
+        BANNER_CREDIT,
+        "",
+        f"bind    {local_ip}:{local_port}",
+    ]
+    try:
+        from . import global_onboarding as g
+
+        if g.participating() and g.state() == "active" and g.hostname():
+            rows.append(f"global  {g.hostname()}")
+    except Exception:  # noqa: BLE001 - the banner never fails on Global state
+        pass
+    rows += ["", "Input 'help' for help menu."]
+    if console.attached():
+        rows.append("Ctrl-C leaves this console (server keeps running); quit stops it.")
     # Breathing room after first-run setup and driver bookkeeping.
     print()
-    printf(f"Server running nominally.", Sty.BOLD)
-    printf(BANNER_CREDIT, Sty.GRAY)
-    printf(f"Local IP: ", Sty.DEFAULT, f"{local_ip}", Sty.ITALIC, f" | Port: ", Sty.DEFAULT, f"{local_port}", Sty.ITALIC)
-    # printf(f"   -> Started at ", Sty.DEFAULT, f"{start_time}", Sty.DEFAULT)
-    printf("Input ", Sty.DEFAULT, "'help'", Sty.BOLD," for help menu.", Sty.DEFAULT)
-    from . import console
-    if console.attached():
-        printf("Ctrl-C leaves this console (server keeps running); ", Sty.GRAY, "quit", Sty.MAGENTA, " stops it.", Sty.GRAY)
+    print_panel("RemoteRF Server", rows, literal=True)
+    print()
 
 def clear():
     os.system('clear')
@@ -1030,7 +1053,12 @@ def _cmd_hosts_wipe(*, yes: bool = False) -> None:
 from typing import Callable
 
 def _norm_cmd(s: str) -> str:
-    return " ".join((s or "").strip().split()).lower()
+    # Only the command words are case-insensitive (commands.normalize); the
+    # arguments -- verification codes, tokens, passwords -- must survive intact.
+    words = (s or "").strip().split()
+    if words and words[0].lower() == "serverrf":
+        words = words[1:]
+    return " ".join(words)
 
 def _cmd_detach() -> None:
     from . import console
@@ -1106,7 +1134,7 @@ def _console_argv(inpu: str) -> list[str]:
 
     cmd = _norm_cmd(inpu)
     for old, new in _OLD_ALIASES.items():
-        if cmd == old or cmd.startswith(old + " "):
+        if cmd.lower() == old or cmd.lower().startswith(old + " "):
             cmd = new + cmd[len(old):]
             break
     try:
@@ -1131,6 +1159,12 @@ def server_input(inpu: str) -> bool:
     except RestartRequested:
         _exit_action = "restart"
         return False
+    except Exception:
+        # A broken command must never take the server down with it.
+        import traceback
+
+        traceback.print_exc()
+        printf("That command failed; the server is still running.", Sty.WARNING)
     return True
 
 
@@ -1144,6 +1178,9 @@ def control_handler(argv: list[str]) -> int:
         _request_exit("quit")
     except RestartRequested:
         _request_exit("restart")
+    except Exception as exc:
+        print(f"That command failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1163,6 +1200,9 @@ def _request_exit(action: str) -> None:
 
 def _reexec() -> None:
     """Restart in place: same pid's tmux window, same argv, fresh process."""
+    from . import global_onboarding as g
+
+    g.stop_agent()
     if sys.stdin.isatty():
         os.system("stty sane")
     os.execv(sys.executable, [sys.executable, "-m", "remoteRF_server.serverrf_cli", *sys.argv[1:]])
@@ -1182,6 +1222,25 @@ def cmd_users_purge(argv): reservation_handler.remove_all_users()
 def cmd_reservations_list(argv): reservation_handler.print_all_reservations()
 def cmd_reservations_purge(argv): reservation_handler.remove_all_reservations()
 def cmd_db_purge(argv): reservation_handler.rm_db()
+def cmd_stats_purge(argv):
+    from . import reservation
+
+    if not ("-y" in argv or "--yes" in argv):
+        try:
+            resp = session.prompt(stylize("Type 'purge-stats' to confirm deleting the activity log: ", Sty.RED))
+        except KeyboardInterrupt:
+            printf("Cancelled.", Sty.GRAY)
+            return
+        if (resp or "").strip().lower() != "purge-stats":
+            printf("Purge aborted.", Sty.GRAY)
+            return
+    with reservation.log_lock:
+        try:
+            reservation.LOG_PATH.unlink()
+        except FileNotFoundError:
+            printf("No activity log to purge.", Sty.GRAY)
+            return
+    printf(f"Purged activity log: {reservation.LOG_PATH}", Sty.GRAY)
 def cmd_devices_list(argv): get_devices()
 
 
@@ -1211,7 +1270,7 @@ def main() -> int:
     try:
         while True:
             try:
-                if not server_input(session.prompt(stylize("server@remoterf: ", Sty.BOLD))):
+                if not server_input(session.prompt(stylize("serverrf> ", Sty.BOLD))):
                     break
             except (EOFError, KeyboardInterrupt):
                 if not console.attached():
@@ -1224,6 +1283,7 @@ def main() -> int:
         runtime.stop()
     if _exit_action == "restart":
         _reexec()
+    printf("Stopped the RemoteRF server background process.", Sty.GRAY)
     return 0
 
 
@@ -1238,6 +1298,7 @@ def headless_main() -> int:
         runtime.stop()
     if _exit_action == "restart":
         _reexec()
+    printf("Stopped the RemoteRF server background process.", Sty.GRAY)
     return 0
 
 

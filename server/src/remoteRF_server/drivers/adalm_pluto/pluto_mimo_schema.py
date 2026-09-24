@@ -103,11 +103,15 @@ def connect_pluto_mimo(
         dev.rx_enabled_channels = _normalize_channels(rx_enabled_channels, [0, 1])
         dev.tx_enabled_channels = _normalize_channels(tx_enabled_channels, [0, 1])
         _apply_initial_settings(dev, initial_settings or {})
-        print(f"Connected to adalm_pluto_mimo serial={serial} via usb:{usb}")
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        printf(f"Connected to adalm_pluto_mimo serial={serial} via usb:{usb}", Sty.GRAY)
         return dev
 
     except Exception as e:
-        print(f"Failed to connect to adalm_pluto_mimo serial={serial}: {e}")
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        printf(f"Failed to connect to adalm_pluto_mimo serial={serial}: {e}", Sty.GRAY)
         return None
 
 

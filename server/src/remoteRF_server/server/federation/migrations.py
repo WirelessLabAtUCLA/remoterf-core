@@ -447,6 +447,32 @@ _GATE_H_RESERVATIONS_CHECKSUM = hashlib.sha256(
     _GATE_H_RESERVATIONS_DDL.encode("utf-8")
 ).hexdigest()
 
+# HOME side of the device plane: which partners a native account is enrolled
+# at, a HOME-local integer id for each partner device the Client has seen, and
+# the HOME-minted reservation rows that route a device token to the owner.
+_HOME_DEVICES_RESERVATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS FederatedEnrollments (
+    local_account_id INTEGER NOT NULL,
+    destination_deployment_id TEXT NOT NULL CHECK(length(destination_deployment_id)=36),
+    enrolled_at INTEGER NOT NULL,
+    PRIMARY KEY(local_account_id,destination_deployment_id)
+);
+CREATE TABLE IF NOT EXISTS FederatedDeviceAliases (
+    alias_id INTEGER PRIMARY KEY,
+    owner_deployment_id TEXT NOT NULL CHECK(length(owner_deployment_id)=36),
+    remote_device_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    UNIQUE(owner_deployment_id,remote_device_id)
+);
+CREATE TABLE IF NOT EXISTS HomeFederatedReservations (
+    res_id INTEGER PRIMARY KEY,
+    owner_deployment_id TEXT NOT NULL CHECK(length(owner_deployment_id)=36),
+    remote_reservation_id TEXT NOT NULL,
+    local_account_id INTEGER NOT NULL,
+    UNIQUE(owner_deployment_id,remote_reservation_id)
+);
+"""
+
 
 class SchemaNotReady(RuntimeError):
     pass
@@ -743,6 +769,21 @@ def migrate_gate_f_usergroups_schema(conn: sqlite3.Connection) -> None:
     group_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(UserGroups)")}
     if "lan_only" not in group_columns:
         conn.execute("ALTER TABLE UserGroups ADD COLUMN lan_only INTEGER NOT NULL DEFAULT 0")
+    # Cluster codes enrol into a cluster, not a group (group_id is -1 then);
+    # ClusterAccounts remembers who joined so attached groups can follow.
+    if "cluster_name" not in columns:
+        conn.execute("ALTER TABLE EnrollmentCodes ADD COLUMN cluster_name TEXT")
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS ClusterAccounts ("
+        "cluster_name TEXT NOT NULL, local_account_id INTEGER NOT NULL, "
+        "kind TEXT NOT NULL CHECK(kind IN ('local','proxy')), joined_at INTEGER NOT NULL, "
+        "PRIMARY KEY(cluster_name,local_account_id));"
+        # Memberships the cluster itself created, so un-sharing takes back
+        # only those and never a membership a group code granted.
+        "CREATE TABLE IF NOT EXISTS ClusterMemberships ("
+        "cluster_name TEXT NOT NULL, local_account_id INTEGER NOT NULL, group_id INTEGER NOT NULL, "
+        "PRIMARY KEY(cluster_name,local_account_id,group_id));"
+    )
     conn.executescript(_GATE_F_DDL)
     conn.execute(
         "INSERT OR IGNORE INTO SchemaMigrations "
@@ -797,6 +838,10 @@ def migrate_gate_h_usergroups_schema(conn: sqlite3.Connection) -> None:
 
 def migrate_gate_h_reservations_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_GATE_H_RESERVATIONS_DDL)
+
+
+def migrate_home_devices_reservations_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(_HOME_DEVICES_RESERVATIONS_DDL)
 
 
 def migrate_gate_h(db_dir: str | Path) -> None:

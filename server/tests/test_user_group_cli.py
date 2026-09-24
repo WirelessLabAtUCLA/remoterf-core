@@ -23,11 +23,12 @@ class _Session:
 
 
 class EditUserGroupCliTests(unittest.TestCase):
-    def test_all_clears_the_whitelist_to_every_device(self) -> None:
+    def test_all_is_refused_and_an_explicit_list_is_required(self) -> None:
         session = _Session([
             "1",       # group ID
             "",        # group name unchanged
-            "all",     # unrestricted
+            "all",     # no longer an option
+            "0,1",     # an explicit list
             "",        # max reservation time unchanged
             "",        # max reservations unchanged
             "",        # lifetime unchanged
@@ -37,7 +38,8 @@ class EditUserGroupCliTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             edit_user_group_local(session)
-        self.assertIn("devices_whitelist       : all", output.getvalue())
+        self.assertIn("List the device ids this group may use", output.getvalue())
+        self.assertIn("devices_whitelist       : 0,1", output.getvalue())
 
     def test_enter_leaves_the_whitelist_unchanged(self) -> None:
         session = _Session(["1", "renamed", "", "", "", "", "", "n"])

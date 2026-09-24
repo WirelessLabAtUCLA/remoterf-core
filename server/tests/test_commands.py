@@ -148,6 +148,6 @@ class TwoDoorsTests(unittest.TestCase):
         with create_app_session(output=PlainTextOutput(out)), contextlib.redirect_stdout(out):
             rc = dispatch(["global", "status"], in_daemon=True)
             self.assertEqual(rc, 0)
-            self.assertEqual(dispatch(["federation", "groups"], in_daemon=True), 1)
+            self.assertEqual(dispatch(["global", "clusters"], in_daemon=True), 1)
         self.assertIn("Not configured", out.getvalue())
         self.assertIn("not enabled", out.getvalue())

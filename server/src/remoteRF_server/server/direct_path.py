@@ -50,6 +50,58 @@ from .global_onboarding import RELAYED, hostname, is_offsite
 
 logger = logging.getLogger("remoteRF_server.direct")
 
+
+async def close_ice(ice) -> None:
+    """Close an aioice Connection without the library's after-close noise.
+
+    A cancelled ``connect()`` (a punch that timed out) never reaches aioice's
+    own "cancel remaining checks" loop, so its check tasks keep running and
+    its STUN timers stay armed against sockets close() is about to take. Stop
+    both before closing."""
+    # Cancel the connectivity checks first. Failing their STUN transactions
+    # instead only makes aioice start replacement checks, which then hang on
+    # a closed socket and die "pending" when they are collected.
+    checks = [pair.task for pair in list(getattr(ice, "_check_list", [])) if pair.task is not None]
+    for task in checks:
+        task.cancel()
+    if checks:
+        await asyncio.gather(*checks, return_exceptions=True)
+    for protocol in list(getattr(ice, "_protocols", [])):
+        for transaction in list(getattr(protocol, "transactions", {}).values()):
+            handle = getattr(transaction, "_Transaction__timeout_handle", None)
+            if handle is not None:
+                handle.cancel()  # a retry would fire on the socket close() is about to take
+    await ice.close()
+
+
+async def cancel_tasks(tasks) -> None:
+    """Cancel these tasks and wait for them to finish.
+
+    A task that is cancelled but never awaited can be collected while still
+    pending, and Python prints a traceback for it that nobody can act on.
+    The caller's own task is never cancelled, so this is safe to call from
+    inside one of the tasks being torn down."""
+    current = asyncio.current_task()
+    tasks = [task for task in tasks if task is not None and task is not current and not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def quiet_aioice_errors(loop) -> None:
+    """A STUN retry on an already-closed socket is not an error worth a
+    traceback in someone's shell; everything else keeps the default handler."""
+    default = loop.default_exception_handler
+
+    def handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, (AttributeError, OSError)) and "Transaction" in repr(context.get("handle", "")):
+            return
+        default(context)
+
+    loop.set_exception_handler(handler)
+
 ALPN = "remoterf-direct/1"
 MAX_FRAME = 100 * 1024 * 1024  # the gRPC message ceiling
 IDLE_SECONDS = 600
@@ -211,6 +263,7 @@ class _Path:
         self.calls = 0
         self.task: Optional[asyncio.Task] = None
         self.transport: Optional[_IceTransport] = None
+        self.streams: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         protocol = None
@@ -229,8 +282,7 @@ class _Path:
                 printf(f"Direct path open: {self.user} from {self.peer[0]}:{self.peer[1]} ({where})", Sty.GRAY)
                 await asyncio.wait({pump, closed}, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                pump.cancel()
-                closed.cancel()
+                await cancel_tasks((pump, closed))
         except Exception as exc:  # noqa: BLE001 - a failed punch is expected on some networks
             printf(f"Direct path failed: {self.user}: {type(exc).__name__}: {exc}", Sty.GRAY)
         finally:
@@ -271,7 +323,11 @@ class _Path:
                 protocol.datagram_received(data, self.peer)
 
     def _stream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        asyncio.ensure_future(self._serve(reader, writer))
+        # Tracked, not fire-and-forget: a stream holds a device call, and the
+        # path may close under it.
+        task = asyncio.ensure_future(self._serve(reader, writer))
+        self.streams.add(task)
+        task.add_done_callback(self.streams.discard)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         bad_frame = None
@@ -307,7 +363,8 @@ class _Path:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        await self.ice.close()
+        await cancel_tasks(list(self.streams))
+        await close_ice(self.ice)
 
 
 async def _offer(key: str, user: str, remote: dict) -> dict:
@@ -327,7 +384,7 @@ async def _offer(key: str, user: str, remote: dict) -> dict:
             await ice.add_remote_candidate(Candidate.from_sdp(str(sdp)))
         await ice.add_remote_candidate(None)
     except Exception:
-        await ice.close()
+        await close_ice(ice)
         raise
     path = _paths[key] = _Path(key, user, ice)
     path.task = asyncio.ensure_future(path.run())
@@ -343,6 +400,7 @@ def _get_loop() -> asyncio.AbstractEventLoop:
     with _lock:
         if _loop is None:
             _loop = asyncio.new_event_loop()
+            quiet_aioice_errors(_loop)
             threading.Thread(
                 target=_loop.run_forever, name="remoterf-direct", daemon=True
             ).start()

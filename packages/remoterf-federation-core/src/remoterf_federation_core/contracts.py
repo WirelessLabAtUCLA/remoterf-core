@@ -122,6 +122,8 @@ _BROKER_PATHS = frozenset(
         # Cluster invites: identity relay for `global cluster invite|join`.
         "/v2/broker/invites",
         "/v2/broker/invites/join",
+        # Cluster rosters: the owner's signed member list, so members mesh.
+        "/v2/broker/clusters/roster",
     }
 )
 

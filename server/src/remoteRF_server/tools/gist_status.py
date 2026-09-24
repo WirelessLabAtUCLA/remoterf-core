@@ -28,6 +28,16 @@ from typing import Dict, Optional, Tuple
 import requests
 
 
+def _note(message: str) -> None:
+    """Gray status line; plain stderr if the console styling is unavailable."""
+    try:
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        printf(message, Sty.GRAY)
+    except Exception:  # noqa: BLE001
+        print(message, file=sys.stderr)
+
+
 def _xdg_config_home() -> Path:
     return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
 
@@ -103,15 +113,15 @@ def _publisher_loop(period_sec: int) -> None:
 
     try:
         push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
-        print("[gist_status] initial publish ok", file=sys.stderr)
+        _note("[gist_status] initial publish ok")
     except Exception as e:
-        print(f"[gist_status] initial publish failed: {e}", file=sys.stderr)
+        _note(f"[gist_status] initial publish failed: {e}")
 
     while True:
         try:
             push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
         except Exception as e:
-            print(f"[gist_status] publish failed: {e}", file=sys.stderr)
+            _note(f"[gist_status] publish failed: {e}")
         time.sleep(period_sec)
 
 
@@ -126,7 +136,7 @@ def start_status_publisher() -> None:
             return
 
         if _load_gist_env() is None:
-            # print("[gist_status] off (not configured; see README gist docs)", file=sys.stderr)
+            # _note("[gist_status] off (not configured; see README gist docs)")
             return
 
         t = threading.Thread(
@@ -137,7 +147,7 @@ def start_status_publisher() -> None:
         )
         t.start()
         _publisher_thread = t
-        print(f"[gist_status] started (period={120}s)", file=sys.stderr)
+        _note(f"[gist_status] started (period={120}s)")
 
 
 # if __name__ == "__main__":

@@ -18,7 +18,7 @@ from remoterf_federation_core import (
 
 from .migrations import configure_connection, migrate_gate_d_usergroups_schema
 
-APPROVAL_SOURCES = frozenset({"manual_offline", "identity_file", "broker_candidate"})
+APPROVAL_SOURCES = frozenset({"manual_offline", "identity_file", "broker_candidate", "cluster_invite"})
 
 
 def _label(value: object, *, code: str, maximum: int = 256) -> str:

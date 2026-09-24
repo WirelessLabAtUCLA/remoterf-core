@@ -202,7 +202,7 @@ class ServerHomePermissions:
             if _server_group_current(row, now, invalid_is_error=False)
         ]
 
-    def _candidates(self, now: int):
+    def _candidates(self, now: int, capability: str = "PERMISSIONS_READ"):
         candidates = []
         with self._connect() as conn:
             rows = conn.execute(
@@ -218,7 +218,7 @@ class ServerHomePermissions:
             if not contract_allows(
                 terms,
                 row["state"],
-                "PERMISSIONS_READ",
+                capability,
                 now=now,
                 superseded=False,
             ):

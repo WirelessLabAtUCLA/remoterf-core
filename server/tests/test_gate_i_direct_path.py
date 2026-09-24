@@ -19,6 +19,7 @@ device-plane routing and RELAYED classification of direct-path peers."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import json
 import unittest
@@ -140,6 +141,41 @@ class GatheringTests(unittest.TestCase):
         if address is None:
             self.skipTest("no default route")
         self.assertEqual(asyncio.run(run()), [("host", address)])
+
+
+class TeardownTests(unittest.TestCase):
+    """A punch that times out is the common case on a hostile network; it must
+    leave nothing behind to spam the operator's console later."""
+
+    def test_closing_after_a_cancelled_connect_leaves_no_live_checks(self):
+        async def run():
+            ice = direct_path.Ice(ice_controlling=True, stun_server=None)
+            await ice.gather_candidates()
+            ice.remote_username, ice.remote_password = "abcd", "0123456789012345678901"
+            # TEST-NET-1 discard: the checks can never be answered.
+            await ice.add_remote_candidate(
+                direct_path.Candidate.from_sdp("1 1 udp 2130706431 192.0.2.1 9 typ host")
+            )
+            await ice.add_remote_candidate(None)
+            # Exactly what CONNECT_SECONDS expiring does to the connect().
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(ice.connect(), 0.3)
+            await direct_path.close_ice(ice)
+            others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            await asyncio.sleep(0)
+            return [t for t in others if not t.done()]
+
+        self.assertEqual(asyncio.run(run()), [])
+
+    def test_cancel_tasks_waits_and_never_cancels_its_caller(self):
+        async def run():
+            forever = asyncio.ensure_future(asyncio.sleep(3600))
+            await asyncio.sleep(0)
+            # all_tasks() includes this one; cancelling it would kill the caller.
+            await direct_path.cancel_tasks(asyncio.all_tasks())
+            return forever.cancelled(), asyncio.current_task().cancelled()
+
+        self.assertEqual(asyncio.run(run()), (True, False))
 
 
 class DispatchTests(unittest.TestCase):

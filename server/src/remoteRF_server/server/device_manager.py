@@ -704,6 +704,20 @@ def get_registered_devices() -> Dict[int, Tuple[object, str, str]]:
             gid: (st.dev, st.salt, st.hsh) for gid, st in _devices.items()
         }
 
+def describe_devices(ids) -> list[dict]:
+    """Name, type and live state for the given ids (unknown ids are skipped)."""
+    _sync_host_devices()
+    out = []
+    with _state_lock:
+        for gid in ids:
+            st = _devices.get(int(gid))
+            if st is None:
+                continue
+            out.append({"id": int(gid), "name": (st.name or f"device-{gid}").strip(),
+                        "type": st.dtype or "", "online": _is_connected(st)})
+    return out
+
+
 def get_all_devices_str() -> Dict[int, str]:
     _sync_host_devices()
 

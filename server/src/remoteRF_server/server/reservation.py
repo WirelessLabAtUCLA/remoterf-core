@@ -70,6 +70,7 @@ class ReservationHandler:
     def __init__(self):
         self.federation_enroller = None
         self.federation_permissions = None
+        self.federation_devices = None
         self.filepath = get_db_dir() / "reservations.db"
         # self.filepath = Path(__file__).resolve().parent.parent/'db'/'reservations.db'
         
@@ -125,6 +126,8 @@ class ReservationHandler:
                     starttime = datetime.fromtimestamp(unmap_arg(args['st']))
                     endtime = datetime.fromtimestamp(unmap_arg(args['et']))
                     device_id = unmap_arg(args['dd'])
+                    if self._federated_alias(device_id) is not None:
+                        return self._federated_reserve(username, device_id, starttime, endtime)
                     response = self.reserve_device(username, device_id, starttime, endtime)
                     self.update_devices()
                     return response
@@ -134,14 +137,22 @@ class ReservationHandler:
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
-                    return self.grab_all_reservations(username)
+                    result = self.grab_all_reservations(username)
+                    if self.federation_devices is not None:
+                        result.update({k: map_arg(v) for k, v in self.federation_devices.list_reservations(
+                            local_account_id=self.get_uid(username), username=username).items()})
+                    return result
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
             elif function_name == 'get_dev':
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
-                    return self.grab_all_devices(username)
+                    result = self.grab_all_devices(username)
+                    if self.federation_devices is not None:
+                        result.update({k: map_arg(v) for k, v in self.federation_devices.list_devices(
+                            local_account_id=self.get_uid(username)).items()})
+                    return result
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
             elif function_name == 'login':
@@ -165,6 +176,9 @@ class ReservationHandler:
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+                    if (self.federation_devices is not None
+                            and self.federation_devices.federated_reservation(unmap_arg(args['res_id'])) is not None):
+                        return self._federated_cancel(username, unmap_arg(args['res_id']))
                     if self.validate_cancel_reservation(unmap_arg(args['res_id']), username):
                         response = self.remove_reservation(res_id=unmap_arg(args['res_id']))
                         self.update_devices()
@@ -205,6 +219,10 @@ class ReservationHandler:
                             # retain its protected pre-Global behavior even when
                             # optional aggregation is misconfigured.
                             home_permissions = None
+                        try:
+                            self._record_enrollments(uid, home_permissions)
+                        except Exception:
+                            pass
 
                     if data and data[0] and data[0][0] == "Normal User":
                         # Force pure ints (defensive)
@@ -294,10 +312,26 @@ class ReservationHandler:
                             }
                         except FederationError:
                             return {"UE": map_arg("Invalid federation invitation.")}
+                        if self.federation_devices is not None:
+                            self.federation_devices.record_enrollment(
+                                local_account_id=acc_id,
+                                destination_deployment_id=result["deployment_id"],
+                            )
                         return {
                             "UC": map_arg("Federated enrollment confirmed."),
                             "federation": map_arg(canonical_json(result)),
                         }
+                    if code_name.startswith("cluster."):
+                        from .federation import cluster as cluster_module
+
+                        joined = cluster_module.redeem_code(acc_id, code_name)
+                        if joined is None:
+                            return {"UE": map_arg(f"Failed to enroll {username}. Invalid or expired code.")}
+                        try:
+                            cluster_module.enroll_students(self, only_account=acc_id)
+                        except Exception:  # noqa: BLE001 - the tick retries
+                            pass
+                        return {"UC": map_arg(f"Enrolled {username} in cluster {joined}.")}
                     if RELAYED.get() and user_group_handler.code_is_lan_only(code_name=code_name):
                         return {"UE": map_arg(lan_only_hint("This enrollment code"))}
                     if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
@@ -310,6 +344,46 @@ class ReservationHandler:
         except Exception as e:
             return {"RPC Acc Error", map_arg(f'{e}')}
         
+    # ── HOME device plane (Server-to-Server federation) ────────────────
+    # A partner's device is an alias id >= ALIAS_BASE; the owner decides.
+
+    def _federated_alias(self, device_id):
+        if self.federation_devices is None:
+            return None
+        return self.federation_devices.alias(device_id)
+
+    def _federated_reserve(self, username, device_id, start_time, end_time):
+        from .federation.home_devices import HomeDeviceError
+
+        try:
+            issued = self.federation_devices.reserve(
+                local_account_id=self.get_uid(username), username=username,
+                device_id=int(device_id), start_time=start_time, end_time=end_time,
+            )
+        except HomeDeviceError as exc:
+            return {"ace": map_arg(str(exc))}
+        return {"Token": map_arg(issued["token"])}
+
+    def _federated_cancel(self, username, res_id):
+        from .federation.home_devices import HomeDeviceError
+
+        try:
+            self.federation_devices.cancel(local_account_id=self.get_uid(username), res_id=res_id)
+        except HomeDeviceError as exc:
+            return {"ace": map_arg(str(exc))}
+        return {"UC": map_arg(f'Removed reservation {res_id}')}
+
+    def _record_enrollments(self, uid, home_permissions):
+        """A partner that already lists this user in a group has enrolled them."""
+        plane = getattr(self, "federation_devices", None)
+        if plane is None or not home_permissions:
+            return
+        for entry in home_permissions.get("federation", []):
+            if entry.get("status") == "ok" and entry.get("groups"):
+                plane.record_enrollment(
+                    local_account_id=uid, destination_deployment_id=entry["deployment_id"]
+                )
+
     @db_connection
     def get_uid(self, username:str) -> int:
         self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
@@ -354,7 +428,16 @@ class ReservationHandler:
                 "VALUES (?, ?, 'active', ?)",
                 (uid, str(uuid4()), int(time.time())),
             )
-            user_group_handler.enroll_user_with_code(uid=uid, code_name=ec)
+            if ec.startswith("cluster."):
+                from .federation import cluster as cluster_module
+
+                if cluster_module.redeem_code(uid, ec) is not None:
+                    try:
+                        cluster_module.enroll_students(self, only_account=uid)
+                    except Exception:  # noqa: BLE001 - the tick retries
+                        pass
+            else:
+                user_group_handler.enroll_user_with_code(uid=uid, code_name=ec)
             perms.set_user(un) # set perms
             return {"UC": map_arg(f'{un}')}
         except Exception as e:

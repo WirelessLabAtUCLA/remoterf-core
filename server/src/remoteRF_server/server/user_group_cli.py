@@ -27,6 +27,19 @@ from .global_onboarding import invite, lan_endpoint
 from .user_group_handler import user_group_handler
 
 
+def _print_device_choices() -> None:
+    """The ids a whitelist can name, so nobody has to guess."""
+    from . import device_manager
+
+    devices = device_manager.get_all_devices_str()
+    if not devices:
+        print("No devices are configured yet (devices.yml).")
+        return
+    print("Devices on this server:")
+    for gid in sorted(devices):
+        print(f"  {gid:>4}  {devices[gid]}")
+
+
 def _invites(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Add the pasteable `invite` form to code rows (bare for LAN-only groups)."""
     lan_only = {
@@ -103,7 +116,8 @@ def make_user_group_local(session) -> None:
                 return None
 
             if not s or s.lower() in {"all", "*"}:
-                return []  # unrestricted: every device, including ones added later
+                print("List the device ids this group may use, e.g. '0,1,2'.")
+                continue
 
             # Allow both commas and whitespace
             parts = [p for p in s.replace(",", " ").split() if p]
@@ -136,7 +150,8 @@ def make_user_group_local(session) -> None:
         return
 
     # ---- Parameters ----
-    devices_whitelist = _prompt_int_list("Devices whitelist (e.g. 0,1,2) [all] (c to cancel): ")
+    _print_device_choices()
+    devices_whitelist = _prompt_int_list("Devices whitelist (e.g. 0,1,2) (c to cancel): ")
     if devices_whitelist is None:
         return
 
@@ -154,10 +169,10 @@ def make_user_group_local(session) -> None:
 
     # Off the LAN means through the Global relay: codes for a LAN-only group
     # cannot be redeemed there and its members cannot log in there.
-    lan_only = _prompt_yes_no("LAN only? (y/N): ", default_no=True)
+    lan_only = not _prompt_yes_no("Reachable from outside your network (via Global)? (Y/n): ", default_no=False)
 
     # ---- Final confirmation ----
-    wl_str = ",".join(map(str, devices_whitelist)) or "all"
+    wl_str = ",".join(map(str, devices_whitelist))
     print("\nAbout to create user group with:")
     print(f"  group_name               : {group_name}")
     print(f"  devices_whitelist        : {wl_str}")
@@ -270,7 +285,8 @@ def edit_user_group_local(session) -> None:
         if s == "":
             return ""    # unchanged
         if s.lower() in {"all", "*"}:
-            return []    # unrestricted: every device
+            print("List the device ids this group may use, e.g. '0,1,2'.")
+            return _prompt_devices_optional(msg)
         parts = [p for p in s.replace(",", " ").split() if p]
         try:
             vals = [int(p) for p in parts]
@@ -313,8 +329,9 @@ def edit_user_group_local(session) -> None:
     if group_name == "":
         group_name = None
 
+    _print_device_choices()
     devices_whitelist = _prompt_devices_optional(
-        "New devices whitelist (e.g. 0,1,2 | all | Enter unchanged, c cancel): "
+        "New devices whitelist (e.g. 0,1,2 | Enter unchanged, c cancel): "
     )
     if devices_whitelist is None:
         return
@@ -428,9 +445,20 @@ def make_enrollment_codes_local(session) -> None:
     if count is None:
         return
 
-    group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
-    if group_id is None:
+    groups = {int(g["group_id"]): g for g in user_group_handler.get_all_user_groups(include_users=False) or []}
+    if not groups:
+        print("No user groups yet. Create one first with `groups create`.")
         return
+    print("Your groups:")
+    for gid, g in sorted(groups.items()):
+        print(f"  {gid:>3}  {g['group_name']}" + ("  (LAN only)" if g.get("lan_only") else ""))
+    while True:
+        group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
+        if group_id is None:
+            return
+        if group_id in groups:
+            break
+        print(f"No group with id {group_id}; pick one from the list.")
 
     char_count = _prompt_int("Characters per code name? [10] (c to cancel): ", default=10, min_v=4)
     if char_count is None:
@@ -483,8 +511,11 @@ def make_enrollment_codes_local(session) -> None:
         uses=uses,
         duration_sec=duration_sec,
     )
-    print(f"\n{result}")
     created = [r for r in user_group_handler.get_all_enrollment_codes() or [] if r.get("code_name") in code_names]
+    if not created:
+        print(f"\nNo codes were created{f': {result}' if result else ''}.")
+        return
+    print(f"\n{result}")
     rows = _invites(created)
     if rows and rows[0]["invite"] == rows[0]["code_name"]:
         print(f"Hand these out as is; users connect first with: remoterf -c -a {lan_endpoint() or '<lan address>'}")
@@ -562,17 +593,18 @@ def list_enrollment_codes_local(session) -> None:
             row.get("federation_contract_id"),
             row.get("federation_contract_version"),
             row.get("allowed_issuer_deployment_id"),
+            row.get("cluster_name"),
         )
         buckets.setdefault(key, []).append(row)
 
     width = content_width()
     lines: List[str] = []
-    for (gid, uses, duration, contract, version, issuer), items in sorted(
+    for (gid, uses, duration, contract, version, issuer, cluster_name), items in sorted(
         buckets.items(), key=lambda kv: (kv[0][0], kv[0][3] or "", -kv[0][1], kv[0][2])
     ):
         group = groups.get(gid, {})
         head = " · ".join([
-            f"group {gid} {group.get('group_name', '?')}".rstrip(),
+            f"cluster {cluster_name}" if cluster_name else f"group {gid} {group.get('group_name', '?')}".rstrip(),
             f"{_plural(uses, 'use')} left",
             _fmt_duration(duration),
             _plural(len(items), "code"),

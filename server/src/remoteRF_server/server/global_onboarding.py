@@ -933,7 +933,7 @@ class Tunnel:
 # Background agent
 # -----------------------------
 
-POLL_PENDING_SECONDS = 600
+POLL_PENDING_SECONDS = 30  # approval shows up within a tick, not ten minutes
 POLL_ACTIVE_SECONDS = 3600
 LIVENESS_SECONDS = 300
 STATUS_SECONDS = 3600
@@ -969,6 +969,31 @@ def _tick(last: dict, tunnel=None) -> None:
         if now - last.get(key, -interval) >= interval:
             send()
             last[key] = now
+    _cluster_tick()
+
+
+def _cluster_tick() -> None:
+    """Drive pending clusters; a failure here never costs the liveness report."""
+    import logging
+
+    from .federation import cluster
+
+    def notify(text: str) -> None:
+        try:
+            from ..common.utils.ansi_codes import Sty, printf
+
+            printf(text, Sty.GRAY)
+        except Exception:  # noqa: BLE001
+            print(text)
+
+    try:
+        from .reservation import reservation_handler
+    except Exception:  # noqa: BLE001
+        reservation_handler = None
+    try:
+        cluster.tick(notify, home=reservation_handler)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("remoteRF_server.global").warning("cluster tick failed: %s", exc)
 
 
 def run_agent(stop=None, tunnel=None) -> None:
@@ -1010,6 +1035,8 @@ def start_agent():
     thread.start()
     # A daemon thread just dies with the process; the ssh child it spawned
     # would not, and an orphaned tunnel keeps the relay ports for itself.
+    global _AGENT_SHUTDOWN
+    _AGENT_SHUTDOWN = (stop, tunnel)
     atexit.register(_shutdown, stop, tunnel)
     return stop
 
@@ -1017,6 +1044,15 @@ def start_agent():
 def _shutdown(stop, tunnel) -> None:
     stop.set()
     tunnel.stop()
+
+
+def stop_agent() -> None:
+    """For `restart`: exec skips atexit, and the orphan would keep the relay ports."""
+    if _AGENT_SHUTDOWN is not None:
+        _shutdown(*_AGENT_SHUTDOWN)
+
+
+_AGENT_SHUTDOWN = None
 
 
 # The running server's tunnel, for `status`. None outside a serving process.
@@ -1116,6 +1152,10 @@ def cmd_status(refresh: bool = True) -> int:
 
 
 def cmd_join() -> int:
+    if participating() and state() == "active":
+        _warn(f"  Already live on RemoteRF Global as {hostname()}.")
+        _hint("  To re-register under different details, run `global leave` first.")
+        return 1
     if not configure():
         return 1
     return 0 if submit_and_report() else 1
@@ -1184,10 +1224,8 @@ _COMMANDS = {"status": cmd_status, "join": cmd_join, "leave": cmd_leave}
 
 def main(argv) -> int:
     if argv and argv[0] == "verify":
-        if len(argv) > 2:
-            print("Usage: serverrf global verify <code>", file=sys.stderr)
-            return 2
-        return cmd_verify(argv[1] if len(argv) == 2 else "")
+        # A code pasted from email may arrive wrapped across lines.
+        return cmd_verify("".join(argv[1:]))
     if len(argv) != 1 or argv[0] not in _COMMANDS:
         print(
             "Usage: serverrf global status | join | verify <code> | leave",

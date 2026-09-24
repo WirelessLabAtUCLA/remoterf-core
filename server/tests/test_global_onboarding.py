@@ -823,7 +823,22 @@ class FederationRuntimeTests(unittest.TestCase):
         finally:
             runtime.permissions.close()
 
-    def test_federation_groups_is_empty_on_a_fresh_deployment(self):
+    def test_join_refuses_while_already_live(self):
+        import contextlib
+        import io
+
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.output.plain_text import PlainTextOutput
+
+        self.enroll("active")
+        out = io.StringIO()
+        with create_app_session(output=PlainTextOutput(out)), contextlib.redirect_stdout(out), \
+                mock.patch.object(g, "configure") as configure:
+            self.assertEqual(g.cmd_join(), 1)
+        configure.assert_not_called()
+        self.assertIn("Already live", out.getvalue())
+
+    def test_global_clusters_is_empty_on_a_fresh_deployment(self):
         import contextlib
         import io
 
@@ -831,15 +846,17 @@ class FederationRuntimeTests(unittest.TestCase):
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(federation_main(["groups"]), 1)
+            self.assertEqual(federation_main(["clusters"]), 1)
         self.assertIn("not enabled", out.getvalue())
 
         self.enroll("active")
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.output.plain_text import PlainTextOutput
+
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(federation_main(["groups"]), 0)
+        with create_app_session(output=PlainTextOutput(out)), contextlib.redirect_stdout(out):
+            self.assertEqual(federation_main(["clusters"]), 0)
         text = out.getvalue()
         self.assertIn(self.DEPLOYMENT, text)
-        self.assertIn("Owned groups: none", text)
-        self.assertIn("Joined groups: none", text)
+        self.assertIn("No clusters", text)
         self.assertEqual(federation_main([]), 2)

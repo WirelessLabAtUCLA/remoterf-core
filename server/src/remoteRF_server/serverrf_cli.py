@@ -477,23 +477,25 @@ def _redact(s: str) -> str:
 
 
 def _gist_show(*, show_secrets: bool = False) -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
     p = _gist_env_path()
     if not p.exists():
         print(f"No gist config found (missing {p}).")
         return 0
 
     kv = _read_env_kv(p)
-    print(f"Gist config: {p}")
-    gid = kv.get("STATUS_GIST_ID", "")
-    fn = kv.get("STATUS_GIST_FILENAME", "")
     tok = kv.get("GITHUB_TOKEN", "")
-
-    print(f"  STATUS_GIST_ID={gid}")
-    print(f"  STATUS_GIST_FILENAME={fn}")
-    if show_secrets:
-        print(f"  GITHUB_TOKEN={tok}")
-    else:
-        print(f"  GITHUB_TOKEN={_redact(tok)}  (use --secrets to show)")
+    rows = [
+        f"{marker()} {p}",
+        "",
+        f"gist id   {kv.get('STATUS_GIST_ID', '')}",
+        f"filename  {kv.get('STATUS_GIST_FILENAME', '')}",
+        f"token     {tok if show_secrets else _redact(tok) + '  (use --secrets to show)'}",
+    ]
+    print()
+    print_panel("Gist status", rows, literal=True)
+    print()
     return 0
 
 
@@ -590,33 +592,34 @@ def _looks_like_pem_cert(p: Path) -> bool:
 
 
 def _show_certs(*, verbose: bool) -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
     d = _certs_dir()
-    print(f"Certs dir: {d}")
     if not d.exists():
-        print("  (missing)")
+        print(f"Certs dir: {d}\n  (missing)")
         return 1
 
     files = sorted([p for p in d.iterdir() if p.is_file()])
     if not files:
-        print("  (empty)")
+        print(f"Certs dir: {d}\n  (empty)")
         return 1
 
+    rows = [f"{marker()} {d}", ""]
     for p in files:
         try:
             size = p.stat().st_size
         except Exception:
             size = -1
-
         tag = ""
         if p.suffix in (".crt", ".pem") and _looks_like_pem_cert(p):
-            tag = " [cert]"
+            tag = "  [cert]"
         elif p.suffix == ".key":
-            tag = " [key]"
-        print(f"  - {p.name} ({size} bytes){tag}")
+            tag = "  [key]"
+        rows.append(f"{p.name} ({size} bytes){tag}")
 
     rc, _ = _run_capture(["openssl", "version"])
     if rc != 0:
-        print("\n(openssl not available; install it to view cert expiry)")
+        rows += ["", "(openssl not available; install it to view cert expiry)"]
     else:
         candidates: List[Path] = []
         ca = d / "ca.crt"
@@ -632,18 +635,20 @@ def _show_certs(*, verbose: bool) -> int:
             if p.suffix in (".crt", ".pem") and _looks_like_pem_cert(p):
                 candidates.append(p)
 
-        if candidates:
-            print("\nExpiry:")
-            for p in candidates:
-                na = _x509_notafter_utc(p)
-                if not na:
-                    print(f"  {p.name}: (could not read notAfter)")
-                    continue
-                remaining = _fmt_remaining(na)
-                local = na.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-                print(f"  {p.name}: expires {local}  ({remaining})")
-        else:
-            print("\nExpiry / Remaining:\n  (no cert files found)")
+        rows += ["", "Expiry:"]
+        if not candidates:
+            rows.append("  (no cert files found)")
+        for p in candidates:
+            na = _x509_notafter_utc(p)
+            if not na:
+                rows.append(f"  {p.name}: (could not read notAfter)")
+                continue
+            remaining = _fmt_remaining(na)
+            local = na.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            rows.append(f"  {p.name}: expires {local}  ({remaining})")
+    print()
+    print_panel("Certificates", rows, literal=True)
+    print()
 
     if not verbose:
         return 0
@@ -754,28 +759,28 @@ def _gen_certs(
 # -----------------------------
 
 def _config_show_ports() -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
     p = _server_env_path()
     kv = _read_env_kv(p)
-
-    print(f"Port config: {p}")
-    if not p.exists():
-        print("  (missing)")
-    elif not kv:
-        print("  (empty)")
-
+    rows = [f"{marker()} {p}" + ("" if p.exists() else "  (missing)"), ""]
+    fields = []
     if "GRPC_PORT" in kv:
-        print(f"  MAIN_PORT={kv['GRPC_PORT']}")
+        fields.append(("main port", kv["GRPC_PORT"]))
     if "CERT_PORT" in kv:
-        print(f"  CERT_PORT={kv['CERT_PORT']}")
-
+        fields.append(("cert port", kv["CERT_PORT"]))
     static_ip, source, err = _resolve_static_ip(kv)
     if static_ip:
-        print(f"  STATIC_IP={static_ip}")
+        fields.append(("static ip", static_ip))
         if source != f"{p} (STATIC_IP)":
-            print(f"  STATIC_IP_SOURCE={source}")
+            fields.append(("ip source", source))
     else:
-        print("  STATIC_IP=(not set)")
-        print(f"  STATIC_IP_ERROR={err or f'could not resolve from {source}'}")
+        fields.append(("static ip", f"(not set) {err or f'could not resolve from {source}'}"))
+    width = max(len(k) for k, _ in fields)
+    rows += [f"{k:<{width}}  {v}" for k, v in fields]
+    print()
+    print_panel("Config", rows, literal=True)
+    print()
     return 0
 
 
@@ -1371,6 +1376,8 @@ def _device_remove(global_id_str: str) -> int:
 
 
 def _device_show() -> int:
+    from remoteRF_server.common.utils.panel import print_table
+
     p = _devices_yaml_path()
     if not p.exists() and not _devices_env_path().exists():
         print(f"No devices configured (missing {p}).")
@@ -1381,18 +1388,13 @@ def _device_show() -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    print(f"Devices: {p}")
-    if not recs:
-        print("  (none)")
-        return 0
-
-    for gid in sorted(recs.keys()):
-        r = recs[gid]
-        dtype = r.get("TYPE", "")
-        name = r.get("NAME", "")
-        ik = r.get("IDENT_KIND", "")
-        ident = r.get("IDENT", "")
-        print(f"  {gid}: type={dtype} name={name} {ik}={ident}")
+    rows = [
+        {"id": gid, "type": r.get("TYPE", ""), "name": r.get("NAME", ""),
+         r.get("IDENT_KIND", "ident") or "ident": r.get("IDENT", "")}
+        for gid, r in sorted(recs.items())
+    ]
+    columns = list(dict.fromkeys(k for row in rows for k in row))
+    print_table("Devices", rows, columns, empty=f"(none) -- {p}")
     return 0
 
 
@@ -1690,6 +1692,36 @@ def cmd_config_show(argv: List[str]) -> int:
 
 def cmd_config_wipe(argv: List[str]) -> int:
     return _config_wipe_ports(yes=_yes(argv))
+
+
+def cmd_db_export(argv: List[str]) -> int:
+    """Archive the whole config root (databases, devices, keys, certs) into ~/Downloads."""
+    import sqlite3
+    import tarfile
+    import tempfile
+
+    root = _cfg_dir()
+    pos = _positional(argv)
+    out_dir = Path(pos[0]).expanduser() if pos else Path.home() / "Downloads"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    archive = out_dir / f"remoterf-export-{stamp}.tgz"
+    with tempfile.TemporaryDirectory() as tmp, tarfile.open(archive, "w:gz") as tar:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix == ".sock" or path.name.endswith("-journal"):
+                continue
+            arcname = str(Path("remoterf") / path.relative_to(root))
+            if path.suffix == ".db":
+                # A consistent snapshot even while the server is writing.
+                snapshot = Path(tmp) / path.name
+                with sqlite3.connect(path) as src, sqlite3.connect(snapshot) as dst:
+                    src.backup(dst)
+                tar.add(snapshot, arcname=arcname)
+            else:
+                tar.add(path, arcname=arcname)
+    os.chmod(archive, 0o600)
+    print(f"Exported {root} -> {archive}")
+    return 0
 
 
 def cmd_certs_wipe(argv: List[str]) -> int:

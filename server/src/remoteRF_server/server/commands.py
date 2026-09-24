@@ -61,6 +61,7 @@ _SYNONYMS = {
     "code": "codes", "c": "codes",
     "reservation": "reservations", "res": "reservations", "r": "reservations",
     "host": "hosts",
+    "clusters": "cluster",
     "cert": "certs", "certificate": "certs", "certificates": "certs",
     "ls": "list", "show": "list", "rm": "remove", "del": "remove", "delete": "remove",
     "mk": "create", "add": "add", "new": "create",
@@ -88,7 +89,7 @@ def _global(verb: str):
 
 
 def _federation(verb: str):
-    return lambda argv: _shell("cmd_federation")([verb, *argv])
+    return lambda argv: _shell("cmd_federation")([*verb.split(), *argv])
 
 
 def _table() -> list[Command]:
@@ -142,16 +143,29 @@ def _table() -> list[Command]:
         Command(("config ports",), "Set ports: config ports <grpc> [cert]", _shell("cmd_config_ports"), "Config", after="restart"),
         Command(("config wipe",), "Forget ports/address [-y]; asked at next start", _shell("cmd_config_wipe"), "Config", after="restart"),
         # ---- global / federation ----
-        Command(("global status",), "Participation state; polls Global for changes", _global("status"), "Global"),
-        Command(("global join",), "Request a public address (asks name, email)", _global("join"), "Global"),
-        Command(("global verify",), "Redeem the emailed code: global verify [code]", _global("verify"), "Global"),
-        Command(("global leave",), "Stop participating; the relay stops at once", _global("leave"), "Global"),
-        Command(("federation groups",), "Deployment groups this server owns and has joined", _federation("groups"), "Federation"),
+        Command(("global status",), "Participation state", _global("status"), "Global"),
+        Command(("global join",), "Request a public address", _global("join"), "Global"),
+        Command(("global verify",), "Redeem the emailed code [code]", _global("verify"), "Global"),
+        Command(("global leave",), "Stop participating", _global("leave"), "Global"),
+        # ---- clusters (sharing devices with other labs) ----
+        Command(("cluster list",), "Clusters shared with other labs", _federation("list"), "Clusters"),
+        Command(("cluster info",), "Every lab, shared group and device in a cluster", _federation("info"), "Clusters"),
+        Command(("cluster create",), "Start a cluster: cluster create <name>", _federation("create"), "Clusters"),
+        Command(("cluster invite",), "Invite code for a lab: cluster invite <name>", _federation("invite"), "Clusters"),
+        Command(("cluster join",), "Join with a code: cluster join <code>", _federation("join"), "Clusters"),
+        Command(("cluster remove",), "Leave or disband: cluster remove <name>", _federation("remove"), "Clusters"),
+        Command(("cluster groups",), "Choose which of your groups a cluster shares (interactive)", _federation("groups"), "Clusters"),
+        Command(("cluster codes create",), "Codes for your users to join a cluster (interactive)", _federation("codes create"), "Clusters"),
+        Command(("cluster codes list",), "List cluster codes", _federation("codes list"), "Clusters"),
+        Command(("cluster accept",), "", _federation("accept"), "Clusters", hidden=True),
+        Command(("global cluster",), "", _federation("cluster"), "Global", hidden=True),
         # ---- gist ----
         Command(("gist list",), "Show gist status settings [--secrets]", _shell("cmd_gist_show"), "Gist status"),
         Command(("gist set",), "gist set <gist_id> <file> [--token-stdin]", _shell("cmd_gist_set"), "Gist status"),
         Command(("gist wipe",), "Forget the gist settings [-y]", _shell("cmd_gist_wipe"), "Gist status"),
         # ---- database ----
+        Command(("db export",), "Archive DBs, devices, keys, certs to ~/Downloads [dir]", _shell("cmd_db_export"), "Database"),
+        Command(("stats purge",), "Delete the activity log (reservation stats) [-y]", _daemon("cmd_stats_purge"), "Database", where=D),
         Command(("db purge",), "Remove all database entries", _daemon("cmd_db_purge"), "Database", where=D),
     ]
 
@@ -178,7 +192,7 @@ def normalize(argv: Iterable[str]) -> list[str]:
 def resolve(argv: list[str]) -> tuple[Optional[Command], list[str]]:
     """Longest phrase match wins: `devices add pluto` → ("devices add", ["pluto"])."""
     words = normalize(argv)
-    for length in (2, 1):
+    for length in (3, 2, 1):
         phrase = " ".join(words[:length]).lower()
         for command in commands():
             if phrase in command.names:
@@ -196,10 +210,10 @@ _SECTION_BLURB = {
     "Hosts": "remote host machines and their tokens",
     "Certificates": "TLS certs clients trust",
     "Config": "ports and address",
-    "Global": "RemoteRF Global: public address and relay",
-    "Federation": "sharing devices with other labs",
+    "Global": "public address and relay",
+    "Clusters": "sharing devices with other labs",
     "Gist status": "publishing status to a GitHub gist",
-    "Database": "wipe everything",
+    "Database": "export, or wipe everything",
 }
 
 
@@ -261,9 +275,8 @@ def cmd_help(argv: list[str]) -> int:
         lines.append("")
     sections = list(dict.fromkeys(c.section for c in _visible(_IN_DAEMON)))
     lines += _columns([(f"{prefix}help {k.lower().split()[0]}", _SECTION_BLURB.get(k, "")) for k in sections], indent="")
-    lines += ["", "Leave arguments out to be asked for them."]
     if not _IN_DAEMON:
-        lines.append("Every command also works at the console prompt.")
+        lines += ["", "Every command also works at the console prompt."]
     print_panel("RemoteRF Server", lines, literal=True)
     return 0
 

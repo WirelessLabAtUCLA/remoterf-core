@@ -303,34 +303,12 @@ class perms_db:
         rows = [dict(zip(columns, r)) for r in self.cursor.fetchall() or []]
         print_table("Permissions", rows, columns, empty="No users found.")
             
-        print("\nPowerUsers:")
-        # SQL query to select all users from the PowerUsers table
-        query = 'SELECT * FROM PowerUsers'
-        
-        # Execute the query
-        self.cursor.execute(query)
-        
-        # Fetch all results
-        results = self.cursor.fetchall()
-        
-        # Print the results
-        for result in results:
-            print(result)
-            
-        print("\nAdmins:")
-        # SQL query to select all users from the Admins table
-        query = 'SELECT * FROM Admins'
-        
-        # Execute the query
-        self.cursor.execute(query)
-        
-        # Fetch all results
-        results = self.cursor.fetchall()
-        
-        # Print the results
-        for result in results:
-            print(result)
-    
+        for label, table in (("PowerUsers", "PowerUsers"), ("Admins", "Admins")):
+            self.cursor.execute(f"SELECT * FROM {table}")
+            names = [item[0] for item in self.cursor.description or []]
+            rows = [dict(zip(names, r)) for r in self.cursor.fetchall() or []]
+            print_table(label, rows, names, empty="(none)")
+
     @db_connection
     def rm_db(self):
         # SQL command to delete all entries from all tables

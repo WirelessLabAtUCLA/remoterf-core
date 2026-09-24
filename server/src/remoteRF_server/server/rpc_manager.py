@@ -132,6 +132,10 @@ class RpcManager:
 
         api_token = unmap_arg(args['a'])
 
+        federated = self._federated_route(token=api_token)
+        if federated is not None:
+            return self._federated_rpc(federated, function_name=function_name, args=args)
+
         try:
             with acquire_device(api_token) as (gid, dev):
                 return self._dispatch_acquired(
@@ -140,6 +144,39 @@ class RpcManager:
 
         except Exception as e:
             return {'a': map_arg(str(e))}
+
+    # ── HOME device plane: a partner's device behind a HOME-minted token ──
+
+    def _federated_route(self, *, token=None, device_id=None):
+        """(local_account_id, alias row) when the call targets a partner device."""
+        plane = getattr(reservation_handler, "federation_devices", None)
+        if plane is None:
+            return None
+        if token is not None:
+            route = plane.resolve_token(token)
+            if route is not None:
+                return int(route["local_account_id"]), route
+        if device_id is not None:
+            alias = plane.alias(device_id)
+            if alias is not None:
+                # No account on a by-id schema lookup: borrow the HOME account
+                # that last reserved this alias; the owner still gates it on
+                # that proxy's visibility.
+                account = plane.account_for_alias(alias["alias_id"])
+                if account is not None:
+                    return account, alias
+        return None
+
+    def _federated_rpc(self, federated, *, function_name: str, args: dict) -> dict:
+        local_account_id, alias = federated
+        try:
+            return reservation_handler.federation_devices.rpc(
+                local_account_id=local_account_id, alias=alias,
+                function_name=function_name, args=args,
+            )
+        except Exception as e:
+            key = 'error' if function_name.startswith("IDL:") else 'a'
+            return {key: map_arg(str(e))}
 
     def run_device_rpc_for_gid(self, *, gid: int, function_name: str, args: dict) -> dict:
         """Run an ordinary device RPC against an already-authorized device.
@@ -334,6 +371,12 @@ class RpcManager:
             device_type     str   e.g. "pluto"
         """
         if sub == "get_drivers":
+            federated = self._federated_route(
+                token=unmap_arg(args['token']) if 'token' in args else None,
+                device_id=unmap_arg(args['device_id']) if 'device_id' in args else None,
+            )
+            if federated is not None:
+                return self._federated_rpc(federated, function_name="IDL:get_drivers", args=args)
             gid, err = self._resolve_idl_target(args)
             if err is not None or gid is None:
                 return {'error': map_arg(err or 'Unable to resolve device')}

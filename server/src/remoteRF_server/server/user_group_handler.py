@@ -610,7 +610,7 @@ class UserGroupHandler:
             self.cursor.execute(
                 "SELECT code_id, code_name, group_id, uses, duration_sec, "
                 "federation_contract_id, federation_contract_version, "
-                "allowed_issuer_deployment_id, federation_expires_at "
+                "allowed_issuer_deployment_id, federation_expires_at, cluster_name "
                 "FROM EnrollmentCodes"
             )
             rows = self.cursor.fetchall() or []
@@ -631,6 +631,7 @@ class UserGroupHandler:
                             "federation_contract_version": r[6],
                             "allowed_issuer_deployment_id": r[7],
                             "federation_expires_at": r[8],
+                            "cluster_name": r[9],
                         }
                     )
                 except Exception:

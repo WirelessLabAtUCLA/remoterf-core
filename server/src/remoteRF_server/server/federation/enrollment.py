@@ -8,7 +8,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from remoterf_federation_core import (
     FederationError,
@@ -24,6 +24,8 @@ from remoterf_federation_core import (
 )
 
 from .destination import ActionRegistry, FederationBusinessError, ServerFederationExecutor
+
+CLUSTER_CODE = "cluster"
 from .migrations import configure_connection, migrate_gate_f_usergroups_schema
 from .principals import PreparedFederatedAccount, prepare_federated_account
 
@@ -294,6 +296,19 @@ class ServerFederatedEnrollHandler:
         """Never mutates owner authorization; invalid cases wait for owner tx."""
         claims = action.claims
         payload = action.request.value["payload"]
+        if payload["code_name"] == CLUSTER_CODE:
+            # No code to check: the home lab's signature under an active
+            # cluster contract is the vouching. Prepare a proxy only once.
+            with sqlite3.connect(self.usergroups_path) as conn:
+                if get_principal_tx(conn, claims["iss"], claims["sub"]) is not None:
+                    return None
+            return self.account_preparer(
+                self.reservations_path,
+                issuer_deployment_id=claims["iss"],
+                remote_subject_id=claims["sub"],
+                perms_path=self.perms_path,
+                now=int(self.clock()),
+            )
         with sqlite3.connect(self.usergroups_path) as conn:
             conn.row_factory = sqlite3.Row
             receipt = conn.execute(
@@ -367,10 +382,42 @@ class ServerFederatedEnrollHandler:
             "membership_present": membership_present,
         }
 
+    def _cluster_enroll(self, tx, action, now):
+        """Cluster enrolment: the contract names the cluster; the proxy joins
+        every group attached to it here. Re-running only re-adds memberships."""
+        from . import cluster as cluster_module
+
+        claims = action.claims
+        found = cluster_module.contract_cluster(claims["contract_id"])
+        if found is None:
+            raise FederationBusinessError("code_invalid")
+        name, cluster = found
+        principal = get_principal_tx(tx, claims["iss"], claims["sub"])
+        if principal is None:
+            prepared = action.prepared
+            if not isinstance(prepared, PreparedFederatedAccount):
+                raise RuntimeError("federated proxy preparation unavailable")
+            principal = resolve_or_create_principal_tx(
+                tx, issuer=claims["iss"], subject=claims["sub"], prepared=prepared, now=now
+            )
+        elif principal[4] != "active":
+            raise FederationBusinessError("principal_disabled")
+        else:
+            tx.execute("UPDATE FederatedPrincipals SET last_seen_at=? WHERE id=?", (now, principal[0]))
+        cluster_module.join_account(tx, name, cluster, int(principal[3]), kind="proxy")
+        self._audit(tx, action, code="ok", principal_id=principal[0], metadata={"cluster": name})
+        # Group names stay local; the home lab learns only which cluster admitted it.
+        return self._result(
+            action, redemption_id=str(uuid5(NAMESPACE_URL, f"remoterf-cluster:{name}:{principal[0]}")),
+            membership_present=True, groups=[{"group_id": "0", "group_name": f"cluster {name}"}], now=now,
+        )
+
     def __call__(self, tx, action):
         claims = action.claims
         payload = action.request.value["payload"]
         now = int(self.clock())
+        if payload["code_name"] == CLUSTER_CODE:
+            return self._cluster_enroll(tx, action, now)
         receipt = lookup_redemption_tx(
             tx, claims["iss"], claims["sub"], claims["request_id"]
         )
