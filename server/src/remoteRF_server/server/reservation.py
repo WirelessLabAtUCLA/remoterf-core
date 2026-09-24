@@ -168,6 +168,21 @@ class ReservationHandler:
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+                    if 'a' in args:
+                        # A partner device: the owner answers, over the HOME's
+                        # grant; the client then punches to the owner itself.
+                        from .federation.home_devices import HomeDeviceError
+
+                        if self.federation_devices is None:
+                            return {"ace": map_arg("This home has no partner devices.")}
+                        try:
+                            answer = self.federation_devices.direct_offer(
+                                local_account_id=self.get_uid(username),
+                                token=unmap_arg(args['a']), ice=unmap_arg(args['ice']),
+                            )
+                        except HomeDeviceError as exc:
+                            return {"ace": map_arg(str(exc))}
+                        return {key: map_arg(value) for key, value in answer.items()}
                     from .direct_path import offer
                     return offer(self._session_hash(password), username, unmap_arg(args['ice']))
                 else:
@@ -1406,6 +1421,35 @@ class ReservationHandler:
             (int(reservation_id),),
         )
         return {"cancelled": True}
+
+    @db_connection
+    def federated_live_reservation(
+        self,
+        *,
+        issuer_deployment_id: str,
+        remote_subject_id: str,
+        reservation_id: int,
+        now: datetime | None = None,
+    ) -> dict | None:
+        """{local_account_id, device_id, username} for a federation-created
+        reservation of this exact principal that is live right now, else None."""
+
+        row = self.cursor.execute(
+            "SELECT f.local_account_id, r.device_id, r.username, r.start_time, r.end_time "
+            "FROM FederatedReservations f JOIN Reservations r ON r.res_id = f.res_id "
+            "WHERE f.res_id = ? AND f.issuer_deployment_id = ? AND f.remote_subject_id = ?",
+            (int(reservation_id), canonical_uuid(issuer_deployment_id), canonical_uuid(remote_subject_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        moment = now or datetime.now()
+        try:
+            live = _parse_reservation_datetime(row[3]) <= moment < _parse_reservation_datetime(row[4])
+        except ValueError:
+            return None
+        if not live:
+            return None
+        return {"local_account_id": int(row[0]), "device_id": int(row[1]), "username": row[2]}
 
     @db_connection
     def federated_active_reservation(

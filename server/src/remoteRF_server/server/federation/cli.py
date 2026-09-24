@@ -355,8 +355,51 @@ def cmd_cluster(argv: list[str]) -> int:
     return 0
 
 
+def cmd_peers(argv: list[str]) -> int:
+    """`federation peers [list] | add <deployment_id> <host:port> --ca <ca.crt> [--name <tls name>]
+    | remove <deployment_id>`: the partner listeners this HOME dials directly."""
+    from ...common.utils.ansi_codes import Sty
+    from . import cluster
+    from .peers import PeerStore
+
+    store = PeerStore(cluster._db_path())
+    verb = argv[0] if argv else "list"
+    words = [a for a in argv[1:] if not a.startswith("--")]
+    flags = dict(zip([a for a in argv[1:] if a.startswith("--")], [a for a in argv[2:] if not a.startswith("--")]))
+    try:
+        if verb == "list" and not words:
+            rows = store.list()
+            if not rows:
+                _print("  No partner routes; the cluster agent records one from each lab's signed status note.",
+                       Sty.GRAY)
+            for row in rows:
+                _print(f"  {row['display_name']}  {row['deployment_id']}  {row['endpoint']}  "
+                       f"({row['via']}, {row['source']})")
+            return 0
+        if verb == "add" and len(words) == 2 and "--ca" in flags:
+            deployment_id, endpoint = words
+            route = {"grpc_endpoint": endpoint, "tls_server_name": flags.get("--name") or endpoint.rsplit(":", 1)[0],
+                     "ca_pem": Path(flags["--ca"]).read_text("utf-8")}
+            store.upsert(deployment_id=deployment_id, display_name=flags.get("--name") or deployment_id,
+                         route=route, source="admin")
+            _print(f"  {deployment_id} is dialed at {endpoint} from now on.", Sty.GRAY)
+            return 0
+        if verb == "remove" and len(words) == 1:
+            gone = store.remove(words[0])
+            _print(f"  {words[0]}: {'removed; the broker forwards to it again' if gone else 'no such peer'}.", Sty.GRAY)
+            return 0
+    except (ValueError, ContractError, OSError) as exc:
+        _print(f"  {exc}", Sty.WARNING)
+        return 1
+    print("Usage: federation peers [list] | add <deployment_id> <host:port> --ca <ca.crt> [--name <tls name>] "
+          "| remove <deployment_id>", file=sys.stderr)
+    return 2
+
+
 def main(argv) -> int:
     # `cluster <verb> …` from the table; `global cluster …` is the old spelling.
+    if argv and argv[0] == "peers":
+        return cmd_peers(argv[1:])
     if argv and argv[0] in ("cluster", "clusters"):
         argv = argv[1:] or ["list"]
     if argv and argv[0] in ("list", "create", "invite", "join", "accept", "remove", "groups", "codes", "info"):

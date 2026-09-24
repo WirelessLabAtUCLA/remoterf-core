@@ -44,6 +44,12 @@ GATE_H_JTI_ACTIONS = (
     "device_cancel",
     "device_rpc",
 )
+# Schema 8: where each partner's FederationV2 listener is and the CA pinned
+# for it (the HOME dials it directly instead of the broker), and the
+# federated direct path's `direct_open` grants join the replay table.
+PEERS_MIGRATION_VERSION = 8
+PEERS_MIGRATION_NAME = "federation_peers_direct_open_v1"
+PEERS_JTI_ACTIONS = GATE_H_JTI_ACTIONS + ("direct_open",)
 FEDERATED_PASSWORD_SALT = "!remoterf-federated-salt-v2!"
 FEDERATED_PASSWORD_HASH = "!remoterf-federated-no-password-v2!"
 
@@ -423,6 +429,28 @@ _GATE_H_MIGRATION_CHECKSUM = hashlib.sha256(
 
 # Written into reservations.db so a federated reservation row and the record
 # authorizing it commit together in one transaction.
+# The Gate H rebuild, once more, with the direct path's action admitted.
+_PEERS_JTI_REBUILD = _GATE_H_JTI_REBUILD.replace(
+    _GATE_H_JTI_ACTION_CHECK, ",".join(f"'{name}'" for name in PEERS_JTI_ACTIONS)
+).replace("FederationGrantJTIsGateH", "FederationGrantJTIsPeers")
+
+_PEERS_DDL = """
+CREATE TABLE IF NOT EXISTS FederationPeers (
+    deployment_id TEXT PRIMARY KEY CHECK(length(deployment_id)=36),
+    display_name TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    tls_server_name TEXT NOT NULL,
+    ca_pem TEXT NOT NULL,
+    via TEXT NOT NULL CHECK(via IN ('direct','relay')),
+    source TEXT NOT NULL CHECK(source IN ('admin','cluster')),
+    updated_at INTEGER NOT NULL
+);
+"""
+
+_PEERS_MIGRATION_CHECKSUM = hashlib.sha256(
+    (_PEERS_JTI_REBUILD + _PEERS_DDL).encode("utf-8")
+).hexdigest()
+
 _GATE_H_RESERVATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS FederatedReservations (
     res_id INTEGER PRIMARY KEY,
@@ -838,6 +866,39 @@ def migrate_gate_h_usergroups_schema(conn: sqlite3.Connection) -> None:
 
 def migrate_gate_h_reservations_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_GATE_H_RESERVATIONS_DDL)
+
+
+def _peers_jti_needs_rebuild(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        ("FederationGrantJTIs",),
+    ).fetchone()
+    return row is not None and "'direct_open'" not in (row[0] or "")
+
+
+def migrate_peers_usergroups_schema(conn: sqlite3.Connection) -> None:
+    """Schema 8: FederationPeers, and `direct_open` in the replay table."""
+
+    migrate_gate_h_usergroups_schema(conn)
+    row = conn.execute(
+        "SELECT checksum FROM SchemaMigrations WHERE name=?",
+        (PEERS_MIGRATION_NAME,),
+    ).fetchone()
+    if row is not None and row[0] != _PEERS_MIGRATION_CHECKSUM:
+        raise SchemaNotReady("Peers migration checksum mismatch")
+    if _peers_jti_needs_rebuild(conn):
+        conn.executescript(_PEERS_JTI_REBUILD)
+    conn.executescript(_PEERS_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO SchemaMigrations "
+        "(version,name,checksum,applied_at) VALUES (?,?,?,?)",
+        (
+            PEERS_MIGRATION_VERSION,
+            PEERS_MIGRATION_NAME,
+            _PEERS_MIGRATION_CHECKSUM,
+            int(time.time()),
+        ),
+    )
 
 
 def migrate_home_devices_reservations_schema(conn: sqlite3.Connection) -> None:

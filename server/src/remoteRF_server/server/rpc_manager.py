@@ -170,10 +170,15 @@ class RpcManager:
     def _federated_rpc(self, federated, *, function_name: str, args: dict) -> dict:
         local_account_id, alias = federated
         try:
-            return reservation_handler.federation_devices.rpc(
+            results = reservation_handler.federation_devices.rpc(
                 local_account_id=local_account_id, alias=alias,
                 function_name=function_name, args=args,
             )
+            if function_name.startswith("IDL:"):
+                # The Client learns here that this token drives a partner's
+                # device, and opens its direct path to that lab (Gate I).
+                results["federated"] = map_arg(alias["owner_deployment_id"])
+            return results
         except Exception as e:
             key = 'error' if function_name.startswith("IDL:") else 'a'
             return {key: map_arg(str(e))}

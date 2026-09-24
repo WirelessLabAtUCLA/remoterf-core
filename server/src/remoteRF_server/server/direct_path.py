@@ -19,6 +19,11 @@ ICE (aioice) punches one UDP pair between a logged-in client and this Server;
 QUIC (aioquic) carries device RPCs over it, one bidirectional stream per call:
 4-byte big-endian length + GenericRPCRequest, reply likewise. Control RPCs
 (ACC:*) stay on gRPC and are refused here. Signaling is ACC:direct_offer.
+
+A *bound* path is the owner side of a federated reservation (docs/
+deployment-groups.md §7.6): it carries no bearer token, every call is
+re-authorized by the binding and pinned to its device, and a refusal closes
+the path.
 """
 
 from __future__ import annotations
@@ -113,6 +118,7 @@ STUN_SECONDS = 1.5  # a STUN server answers in milliseconds or not at all
 CERT_DIR: Optional[Path] = None  # set by start_server_runtime
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
+_thread: Optional[threading.Thread] = None
 _lock = threading.Lock()
 _paths: dict[str, "_Path"] = {}
 
@@ -177,15 +183,28 @@ def peer_address(ice: Connection) -> tuple[str, int]:
     return ice._nominated[1].remote_addr
 
 
-def _dispatch(request: grpc_pb2.GenericRPCRequest, peer_host: str) -> dict:
+class PathRefused(Exception):
+    """A bound path's authorizer said no: the reply carries why, then the path closes."""
+
+
+def _dispatch(request: grpc_pb2.GenericRPCRequest, peer_host: str, bound: Optional[dict] = None) -> dict:
     """Run one call exactly as GenericRPCServicer.Call does, device plane only."""
     from .rpc_manager import rpc_manager
 
     name = request.function_name
-    if not (name.startswith("IDL:") or rpc_manager._looks_like_device_rpc(name)):
+    device = rpc_manager._looks_like_device_rpc(name)
+    if bound is not None:
+        if not (device or name == "IDL:get_drivers"):
+            return {"a": map_arg(f"{name} is not available on the direct path")}
+        reason = bound["authorize"](name)
+        if reason is not None:
+            raise PathRefused(reason)
+    elif not (device or name.startswith("IDL:")):
         return {"a": map_arg(f"{name} is not available on the direct path")}
     token = RELAYED.set(is_offsite(peer_host))
     try:
+        if bound is not None:
+            return bound["run"](name, dict(request.args))
         return rpc_manager.run_rpc(function_name=name, args=request.args)
     except Exception as exc:  # noqa: BLE001 - the reply carries it, as a device error would
         return {"a": map_arg(str(exc))}
@@ -255,10 +274,11 @@ class _Protocol(QuicConnectionProtocol):
 class _Path:
     """One client session's punched pair and the QUIC connection over it."""
 
-    def __init__(self, key: str, user: str, ice: Connection):
+    def __init__(self, key: str, user: str, ice: Connection, bound: Optional[dict] = None):
         self.key = key
         self.user = user
         self.ice = ice
+        self.bound = bound
         self.peer: Optional[tuple[str, int]] = None
         self.calls = 0
         self.task: Optional[asyncio.Task] = None
@@ -330,7 +350,7 @@ class _Path:
         task.add_done_callback(self.streams.discard)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        bad_frame = None
+        bad_frame = refused = None
         try:
             try:
                 request = grpc_pb2.GenericRPCRequest()
@@ -341,9 +361,13 @@ class _Path:
                 bad_frame = f"bad frame: {type(exc).__name__}: {exc}"
                 results = {"a": map_arg(bad_frame)}
             else:
-                results = await asyncio.get_running_loop().run_in_executor(
-                    None, _dispatch, request, self.peer[0]
-                )
+                try:
+                    results = await asyncio.get_running_loop().run_in_executor(
+                        None, _dispatch, request, self.peer[0], self.bound
+                    )
+                except PathRefused as exc:
+                    refused = str(exc)
+                    results = {"a": map_arg(refused)}
             writer.write(frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
             writer.write_eof()
             self.calls += 1
@@ -353,6 +377,9 @@ class _Path:
             # A client that cannot frame a request is not ours; its bytes are
             # still arriving and would only pile up in this stream's buffer.
             printf(f"Direct path dropped: {self.user} sent a {bad_frame}", Sty.GRAY)
+            await self.close()
+        if refused is not None:
+            printf(f"Direct path refused: {self.user}: {refused}", Sty.GRAY)
             await self.close()
 
     async def close(self) -> None:
@@ -367,7 +394,7 @@ class _Path:
         await close_ice(self.ice)
 
 
-async def _offer(key: str, user: str, remote: dict) -> dict:
+async def _offer(key: str, user: str, remote: dict, bound: Optional[dict] = None) -> dict:
     old = _paths.get(key)
     if old is not None:
         await old.close()
@@ -386,7 +413,7 @@ async def _offer(key: str, user: str, remote: dict) -> dict:
     except Exception:
         await close_ice(ice)
         raise
-    path = _paths[key] = _Path(key, user, ice)
+    path = _paths[key] = _Path(key, user, ice, bound)
     path.task = asyncio.ensure_future(path.run())
     return {
         "ufrag": ice.local_username,
@@ -396,14 +423,15 @@ async def _offer(key: str, user: str, remote: dict) -> dict:
 
 
 def _get_loop() -> asyncio.AbstractEventLoop:
-    global _loop
+    global _loop, _thread
     with _lock:
         if _loop is None:
             _loop = asyncio.new_event_loop()
             quiet_aioice_errors(_loop)
-            threading.Thread(
+            _thread = threading.Thread(
                 target=_loop.run_forever, name="remoterf-direct", daemon=True
-            ).start()
+            )
+            _thread.start()
         return _loop
 
 
@@ -426,11 +454,25 @@ def offer(session_key: str, user: str, ice: str) -> dict:
     return {"ice": map_arg(json.dumps(answer)), "server_name": map_arg(hostname() or "")}
 
 
+def offer_bound(session_key: str, user: str, ice: str, *, bound: dict) -> dict:
+    """The owner side of a federated reservation's path.
+
+    ``bound["authorize"](function_name)`` decides every call (None allows,
+    else the reason) and ``bound["run"](function_name, args)`` executes it
+    against the reservation's device. Returns the ICE answer; raises when no
+    path could be prepared.
+    """
+    remote = json.loads(ice)
+    key = f"{session_key}/{str(remote.get('id', ''))[:32]}"
+    return asyncio.run_coroutine_threadsafe(_offer(key, user, remote, bound), _get_loop()).result(20)
+
+
 def shutdown() -> None:
-    """Close every path and stop the loop (server stop, tests)."""
-    global _loop
+    """Close every path, stop the loop and release it (server stop, tests)."""
+    global _loop, _thread
     with _lock:
         loop, _loop = _loop, None
+        thread, _thread = _thread, None
     if loop is None:
         return
 
@@ -441,3 +483,8 @@ def shutdown() -> None:
     with contextlib.suppress(Exception):
         asyncio.run_coroutine_threadsafe(_close_all(), loop).result(10)
     loop.call_soon_threadsafe(loop.stop)
+    if thread is not None:
+        thread.join(10)
+    if not loop.is_running():
+        with contextlib.suppress(Exception):
+            loop.close()  # the selector and its wake-up pipe go with it

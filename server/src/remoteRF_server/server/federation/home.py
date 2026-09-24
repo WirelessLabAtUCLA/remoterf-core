@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Mapping
 from uuid import uuid4
 
+import grpc
 import jwt
 import requests
 from cryptography.hazmat.primitives import serialization
@@ -24,6 +25,7 @@ from remoterf_federation_core import (
     BROKER_REQUEST_TYP,
     DEFAULT_ACTION_RETRY_POLICIES,
     FEDERATION_GRANT_TYP,
+    MAX_DEVICE_FORWARD_REQUEST_BYTES,
     MAX_DEVICE_FORWARD_RESPONSE_BYTES,
     MAX_PROTOCOL_INTEGER,
     PERMISSIONS_CONNECT_TIMEOUT_SECONDS,
@@ -53,6 +55,7 @@ from remoterf_federation_core import (
 )
 
 from .migrations import configure_connection, migrate_gate_e_usergroups_schema
+from .peers import PeerStore
 
 FORWARD_PATH = "/v2/broker/federation/forward"
 MAX_FORWARD_RESPONSE_BYTES = 32768
@@ -376,7 +379,13 @@ class ServerHomeGrantIssuer:
 
 
 class HomeFederationOutbound:
-    """Fresh grant and broker credentials per attempt, with one bounded retry."""
+    """Fresh grant per attempt, with one bounded retry.
+
+    A destination with a FederationPeers row is dialed directly: its own
+    FederationV2 listener, TLS pinned to the CA in the row. Any other
+    destination goes through the broker's forward path, as before. Grant,
+    envelope and result verification are the same either way.
+    """
 
     def __init__(
         self,
@@ -404,6 +413,7 @@ class HomeFederationOutbound:
         self.read_timeout = self.timeout
         self.overall_timeout = self.timeout * 2
         self.sender = sender
+        self.peers = PeerStore(issuer.usergroups_path)
         self._sender_accepts_deadline = bool(
             sender is not None
             and len(inspect.signature(sender).parameters) >= 3
@@ -480,6 +490,50 @@ class HomeFederationOutbound:
                 "invalid_transport_response", retryable=False
             ) from None
 
+    def peer(self, deployment_id: str) -> dict | None:
+        """The FederationPeers row for a destination, or None (broker path)."""
+        return self.peers.get(deployment_id)
+
+    def _dial(self, route: dict, grant: str, request_json: str, deadline: float) -> dict:
+        """FederationV2.Execute on the peer's own listener, pinned to its CA."""
+        from ...common.grpc import federation_pb2 as pb
+        from ...common.grpc import federation_pb2_grpc as rpc
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        credentials = grpc.ssl_channel_credentials(
+            root_certificates=route["ca_pem"].encode("utf-8")
+        )
+        options = (
+            ("grpc.ssl_target_name_override", route["tls_server_name"]),
+            ("grpc.default_authority", route["tls_server_name"]),
+            ("grpc.max_send_message_length", MAX_DEVICE_FORWARD_REQUEST_BYTES),
+            ("grpc.max_receive_message_length", MAX_DEVICE_FORWARD_RESPONSE_BYTES),
+        )
+        # ponytail: one channel per call; cache per peer if the handshake
+        # ever shows up in a fan-out budget.
+        with grpc.secure_channel(route["endpoint"], credentials, options=options) as channel:
+            response = rpc.FederationV2Stub(channel).Execute(
+                pb.FederationRequest(
+                    protocol_version="2", grant=grant, request_json=request_json
+                ),
+                timeout=remaining,
+            )
+        return {
+            "protocol_version": response.protocol_version,
+            "signed_result": response.signed_result or None,
+            "error": (
+                {
+                    "code": response.error.code,
+                    "message": response.error.message,
+                    "retryable": response.error.retryable,
+                }
+                if response.HasField("error")
+                else None
+            ),
+        }
+
     def _broker_token(self, body: bytes) -> str:
         now = int(self.issuer.clock())
         claims = build_broker_request_claims(
@@ -531,6 +585,13 @@ class HomeFederationOutbound:
         )
         own_deadline = time.monotonic() + budget
         deadline = own_deadline if deadline is None else min(float(deadline), own_deadline)
+        route = None if self.sender is not None else self.peer(destination_deployment_id)
+        logger.info(
+            "federation_transport destination=%s action=%s via=%s",
+            canonical_uuid(destination_deployment_id),
+            action,
+            "in-process" if self.sender is not None else route["via"] if route else "broker",
+        )
         for attempt in range(attempts):
             if time.monotonic() >= deadline:
                 raise TransportFailure("route_unavailable", retryable=False)
@@ -544,25 +605,30 @@ class HomeFederationOutbound:
                 code_name=code_name,
                 device_payload=device_payload,
             )
-            body = canonical_json(
-                {
-                    "protocol_version": "2",
-                    "grant": issued.grant,
-                    "request_json": issued.request.json,
-                }
-            ).encode("utf-8")
-            outer = self._broker_token(body)
             try:
-                received = (
-                    self.sender(body, outer, deadline)
-                    if self._sender_accepts_deadline
-                    else self.sender(body, outer)
-                    if self.sender is not None
-                    else self._send(
-                        body, outer, deadline, max_forward_response_bytes(action)
+                if route is not None:
+                    received = self._dial(
+                        route, issued.grant, issued.request.json, deadline
                     )
-                )
-            except (requests.RequestException, TimeoutError, ConnectionError, OSError):
+                else:
+                    body = canonical_json(
+                        {
+                            "protocol_version": "2",
+                            "grant": issued.grant,
+                            "request_json": issued.request.json,
+                        }
+                    ).encode("utf-8")
+                    outer = self._broker_token(body)
+                    received = (
+                        self.sender(body, outer, deadline)
+                        if self._sender_accepts_deadline
+                        else self.sender(body, outer)
+                        if self.sender is not None
+                        else self._send(
+                            body, outer, deadline, max_forward_response_bytes(action)
+                        )
+                    )
+            except (requests.RequestException, grpc.RpcError, TimeoutError, ConnectionError, OSError):
                 if attempt + 1 < attempts:
                     continue
                 raise TransportFailure("route_unavailable", retryable=False) from None

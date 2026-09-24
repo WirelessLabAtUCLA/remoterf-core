@@ -18,8 +18,10 @@ replayed because the grant's JTI was already consumed.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -28,6 +30,7 @@ from remoterf_federation_core import (
     DeviceProtocolError,
     canonical_json,
     canonical_uuid,
+    contract_allows,
     decode_device_b64,
     empty_device_payload,
     encode_device_b64,
@@ -45,6 +48,91 @@ from .migrations import configure_connection, migrate_gate_h_reservations_schema
 MAX_DEVICE_RPC_REQUEST_BYTES = (MAX_DEVICE_ACTION_REQUEST_BYTES // 4) * 3
 MAX_DEVICE_RPC_RESPONSE_BYTES = (MAX_DEVICE_RESULT_BYTES // 4) * 3
 
+# The one control-plane RPC a federated caller may run without a live
+# reservation: it returns the driver schema the Client needs to install a
+# driver before its reservation starts.  Natively this RPC is reachable by
+# anyone who knows a device id, so gating it on local visibility is
+# strictly tighter, not looser.
+IDL_FUNCTION = "IDL:get_drivers"
+
+
+def run_bound_rpc(rpc_manager, *, device_id: int, function_name: str, args) -> dict:
+    """One RPC against a device the caller was already authorized for.
+
+    The HOME never holds this deployment's device bearer token, and a
+    federated caller may not smuggle one in to reach another device: the call
+    is pinned to ``device_id`` whatever its arguments name.
+    """
+
+    args = dict(args)
+    args.pop("a", None)
+    args.pop("token", None)
+    if function_name == IDL_FUNCTION:
+        args.pop("device_name", None)
+        args["device_id"] = map_arg(int(device_id))
+        return rpc_manager.run_rpc(function_name=function_name, args=args)
+    return rpc_manager.run_device_rpc_for_gid(
+        gid=int(device_id), function_name=function_name, args=args
+    )
+
+
+def path_authorizer(*, reservations, usergroups_path, claims, reservation_id, device_id, clock):
+    """Per-call authorization for a federated direct path.
+
+    Not a bearer token: each call re-derives that the contract which admitted
+    the grant still allows DEVICE_CONTROL, the proxy is still active, and the
+    reservation is still live (``IDL:get_drivers`` needs visibility only), so
+    a cancel, a suspend or a revoke closes the path within one call.
+    Returns None to allow, else the reason the caller sees.
+    """
+
+    from .destination import ServerFederationExecutor
+
+    issuer, subject = claims["iss"], claims["sub"]
+    contract_id, version = claims["contract_id"], claims["contract_version"]
+
+    def authorize(function_name: str):
+        account_id = None
+        if usergroups_path is not None:
+            with closing(sqlite3.connect(usergroups_path, timeout=10.0)) as conn:
+                conn.row_factory = sqlite3.Row
+                configure_connection(conn)
+                row = conn.execute(
+                    "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
+                    (contract_id, version),
+                ).fetchone()
+                principal = conn.execute(
+                    "SELECT status, local_account_id FROM FederatedPrincipals "
+                    "WHERE issuer_deployment_id=? AND remote_subject_id=?",
+                    (issuer, subject),
+                ).fetchone()
+            try:
+                terms = ServerFederationExecutor._terms(row) if row is not None else None
+            except Exception:  # noqa: BLE001 - unreadable terms are no authority
+                terms = None
+            if terms is None or not contract_allows(
+                terms, row["state"], "DEVICE_CONTROL", now=int(clock()),
+                superseded=row["superseded_by_version"] is not None,
+            ):
+                return "the agreement with your home lab is no longer active"
+            if principal is None or principal["status"] != "active":
+                return "your account at this lab is disabled"
+            account_id = int(principal["local_account_id"])
+        if function_name == IDL_FUNCTION and account_id is not None:
+            visible = {
+                int(entry["local_device_id"])
+                for entry in reservations.federated_visible_devices(local_account_id=account_id)
+            }
+            return None if int(device_id) in visible else "device is not visible"
+        live = reservations.federated_live_reservation(
+            issuer_deployment_id=issuer, remote_subject_id=subject, reservation_id=reservation_id,
+        )
+        if live is None or int(live["device_id"]) != int(device_id):
+            return "the reservation has ended"
+        return None
+
+    return authorize
+
 
 class _DeviceHandlerBase:
     """Shared destination-local resolution for every device action."""
@@ -60,8 +148,10 @@ class _DeviceHandlerBase:
         clock=None,
         reservation_handler=None,
         rpc_manager=None,
+        usergroups_path=None,
     ):
         self.reservations_path = Path(reservations_path)
+        self.usergroups_path = Path(usergroups_path) if usergroups_path else None
         self.local_deployment_id = canonical_uuid(local_deployment_id)
         self.display_name = str(display_name)
         self.clock = clock or (lambda: int(time.time()))
@@ -294,12 +384,7 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
 
     action = "device_rpc"
 
-    # The one control-plane RPC a federated caller may run without a live
-    # reservation: it returns the driver schema the Client needs to install a
-    # driver before its reservation starts.  Natively this RPC is reachable by
-    # anyone who knows a device id, so gating it on local visibility is
-    # strictly tighter, not looser.
-    IDL_FUNCTION = "IDL:get_drivers"
+    IDL_FUNCTION = IDL_FUNCTION
 
     @staticmethod
     def _parse_frame(payload):
@@ -373,22 +458,10 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
         device_id = int(payload["local_device_id"])
         function_name, args = self._parse_frame(payload)
 
-        # The HOME never holds this deployment's device bearer token, and a
-        # federated caller may not smuggle one in to reach another device.
-        args.pop("a", None)
-        args.pop("token", None)
-
         try:
-            if function_name == self.IDL_FUNCTION:
-                # Pin the schema lookup to the device the grant named; a
-                # caller-supplied name or id would otherwise widen it.
-                args.pop("device_name", None)
-                args["device_id"] = map_arg(int(device_id))
-                results = self.rpc.run_rpc(function_name=function_name, args=args)
-            else:
-                results = self.rpc.run_device_rpc_for_gid(
-                    gid=device_id, function_name=function_name, args=args
-                )
+            results = run_bound_rpc(
+                self.rpc, device_id=device_id, function_name=function_name, args=args
+            )
         except Exception:
             raise FederationBusinessError("device_unavailable") from None
 
@@ -412,6 +485,74 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
         }
 
 
+class ServerDirectOpenHandler(_DeviceHandlerBase):
+    """Answer a client's ICE offer for one live federated reservation: Gate I
+    across deployments (docs/deployment-groups.md §7.6).
+
+    Authorization (an active proxy, a reservation of its own that is live
+    right now) is decided and the grant consumed inside the executor's
+    transaction; the path itself is opened in finalize(), after commit. Every
+    call on that path is then re-authorized by ``path_authorizer``.
+    """
+
+    action = "direct_open"
+
+    def _live(self, action):
+        claims, payload = action.claims, action.request.value["payload"]
+        live = self.reservations.federated_live_reservation(
+            issuer_deployment_id=claims["iss"],
+            remote_subject_id=claims["sub"],
+            reservation_id=int(payload["reservation_id"]),
+        )
+        if live is None:
+            raise FederationBusinessError("no_active_reservation")
+        return live
+
+    def __call__(self, tx, action):
+        now = int(self.clock())
+        principal_id, _account_id = self._principal(tx, action.claims)
+        live = self._live(action)
+        reservation_id = int(action.request.value["payload"]["reservation_id"])
+        self._receipt(
+            tx, action, code="authorized", principal_id=principal_id,
+            device_id=live["device_id"], reservation_id=reservation_id,
+        )
+        self._audit(
+            tx, action, code="authorized", principal_id=principal_id,
+            metadata={"local_device_id": str(live["device_id"]), "reservation_id": str(reservation_id)},
+        )
+        return {
+            **self._ok(action, empty_device_payload("direct_open"), now=now),
+            "status": "error",
+            "error_code": FINALIZE_PENDING,
+        }
+
+    def finalize(self, action, result):
+        from .. import direct_path
+
+        claims, payload = action.claims, action.request.value["payload"]
+        live = self._live(action)
+        reservation_id = int(payload["reservation_id"])
+        device_id = int(live["device_id"])
+        rpc = self.rpc
+        authorize = path_authorizer(
+            reservations=self.reservations, usergroups_path=self.usergroups_path, claims=claims,
+            reservation_id=reservation_id, device_id=device_id, clock=self.clock,
+        )
+
+        def run(function_name, args):
+            return run_bound_rpc(rpc, device_id=device_id, function_name=function_name, args=args)
+
+        try:
+            answer = direct_path.offer_bound(
+                f"federated/{claims['iss']}/{claims['sub']}/{reservation_id}",
+                live["username"], payload["ice"], bound={"run": run, "authorize": authorize},
+            )
+        except Exception:
+            raise FederationBusinessError("direct_path_unavailable") from None
+        return {**result, "status": "ok", "error_code": None, "payload": {"ice": json.dumps(answer)}}
+
+
 def build_device_handlers(
     *,
     reservations_path,
@@ -420,6 +561,7 @@ def build_device_handlers(
     clock=None,
     reservation_handler=None,
     rpc_manager=None,
+    usergroups_path=None,
 ) -> dict:
     common = {
         "reservations_path": reservations_path,
@@ -428,6 +570,7 @@ def build_device_handlers(
         "clock": clock,
         "reservation_handler": reservation_handler,
         "rpc_manager": rpc_manager,
+        "usergroups_path": usergroups_path,
     }
     return {
         "device_list": ServerDeviceListHandler(**common),
@@ -435,6 +578,7 @@ def build_device_handlers(
         "device_reserve": ServerDeviceReserveHandler(**common),
         "device_cancel": ServerDeviceCancelHandler(**common),
         "device_rpc": ServerDeviceRpcHandler(**common),
+        "direct_open": ServerDirectOpenHandler(**common),
     }
 
 
@@ -451,19 +595,19 @@ def build_server_gate_h_executor(
     reservation_handler=None,
     rpc_manager=None,
 ):
-    """Gate G registry plus the five device actions.
+    """Gate G registry plus the device actions.
 
     The Gate H usergroups migration runs first because it widens the grant
     replay table's action CHECK; without it a device grant's JTI could not be
     consumed and every device action would fail closed as an internal error.
     """
 
-    from .migrations import migrate_gate_h_usergroups_schema
+    from .migrations import migrate_peers_usergroups_schema
     from .permissions import build_server_gate_g_executor
 
     with sqlite3.connect(Path(usergroups_path), timeout=10.0) as conn:
         configure_connection(conn)
-        migrate_gate_h_usergroups_schema(conn)
+        migrate_peers_usergroups_schema(conn)
     executor = build_server_gate_g_executor(
         usergroups_path=usergroups_path,
         reservations_path=reservations_path,
@@ -481,6 +625,7 @@ def build_server_gate_h_executor(
         clock=clock,
         reservation_handler=reservation_handler,
         rpc_manager=rpc_manager,
+        usergroups_path=usergroups_path,
     ).items():
         executor.registry.register(action, handler)
     return executor

@@ -95,6 +95,9 @@ DEFAULT_ACTION_RETRY_POLICIES = MappingProxyType(
         "device_reserve": ActionRetryPolicy.NO_RETRY,
         "device_cancel": ActionRetryPolicy.NO_RETRY,
         "device_rpc": ActionRetryPolicy.NO_RETRY,
+        # The owner opens a path on the first attempt; a second offer would
+        # only replace it.
+        "direct_open": ActionRetryPolicy.NO_RETRY,
     }
 )
 ACTION_REQUEST_FIELDS = frozenset({"protocol_version", "action", "payload"})

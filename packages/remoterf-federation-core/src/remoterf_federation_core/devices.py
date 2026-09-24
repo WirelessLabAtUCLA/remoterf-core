@@ -42,6 +42,8 @@ MAX_RESERVATION_HORIZON_SECONDS = 365 * 24 * 3600
 DEVICE_READ_TIMEOUT_SECONDS = 11.0
 DEVICE_WRITE_TIMEOUT_SECONDS = 11.0
 DEVICE_RPC_TIMEOUT_SECONDS = 30.0
+# An ICE offer/answer is a few candidate lines; the owner only parses it.
+MAX_ICE_BYTES = 8192
 # Broker end-to-end budget for one forwarded device_rpc.
 DEVICE_FORWARD_TOTAL_TIMEOUT_SECONDS = 35.0
 # HOME fan-out budget for a cross-deployment device or reservation listing.
@@ -59,7 +61,7 @@ def device_action_timeout(action: object) -> float:
 
     if action == "device_rpc":
         return DEVICE_RPC_TIMEOUT_SECONDS
-    if action in ("device_reserve", "device_cancel"):
+    if action in ("device_reserve", "device_cancel", "direct_open"):
         return DEVICE_WRITE_TIMEOUT_SECONDS
     if action in READ_ONLY_DEVICE_ACTIONS:
         return DEVICE_READ_TIMEOUT_SECONDS
@@ -100,6 +102,9 @@ DEVICE_ACTION_CAPABILITIES = {
     "device_reservations": "DEVICE_READ",
     "device_cancel": "DEVICE_RESERVE",
     "device_rpc": "DEVICE_CONTROL",
+    # Gate I across deployments: the owner answers a client's ICE offer for a
+    # live reservation, then the data plane runs client <-> owner directly.
+    "direct_open": "DEVICE_CONTROL",
 }
 DEVICE_CONTRACT_CAPABILITIES = frozenset(DEVICE_ACTION_CAPABILITIES.values())
 DEVICE_ACTIONS = frozenset(DEVICE_ACTION_CAPABILITIES)
@@ -137,6 +142,7 @@ DEVICE_PAYLOAD_FIELDS = {
     "device_reservations": _BASE_PAYLOAD_FIELDS,
     "device_cancel": _BASE_PAYLOAD_FIELDS | {"reservation_id"},
     "device_rpc": _BASE_PAYLOAD_FIELDS | {"local_device_id", "request_b64"},
+    "direct_open": _BASE_PAYLOAD_FIELDS | {"reservation_id", "ice"},
 }
 
 # Destination-local identifiers are opaque decimal strings on the wire.  A
@@ -246,10 +252,12 @@ def validate_device_payload(action: str, payload: object) -> dict:
             raise DeviceProtocolError("invalid_reservation_time")
         clean["start_time"] = start
         clean["end_time"] = end
-    if action == "device_cancel":
+    if action in ("device_cancel", "direct_open"):
         clean["reservation_id"] = _local_id(
             payload["reservation_id"], "invalid_reservation_id"
         )
+    if action == "direct_open":
+        clean["ice"] = _text(payload["ice"], "invalid_ice", MAX_ICE_BYTES)
     if action == "device_rpc":
         # Kept as the encoded string: the canonical request bytes are what the
         # grant's request_sha256 commits to.
@@ -270,6 +278,7 @@ def build_device_payload(
     end_time: int | None = None,
     reservation_id: str | None = None,
     request_b64: str | None = None,
+    ice: str | None = None,
 ) -> dict:
     """Return only the action-specific payload fields, unvalidated bases aside."""
 
@@ -279,10 +288,12 @@ def build_device_payload(
     if action == "device_reserve":
         extra["start_time"] = start_time
         extra["end_time"] = end_time
-    if action == "device_cancel":
+    if action in ("device_cancel", "direct_open"):
         extra["reservation_id"] = reservation_id
     if action == "device_rpc":
         extra["request_b64"] = request_b64
+    if action == "direct_open":
+        extra["ice"] = ice
     if action not in DEVICE_PAYLOAD_FIELDS:
         raise DeviceProtocolError("unknown_action")
     return extra
@@ -423,6 +434,10 @@ def validate_device_payload_result(value: object, *, action: str) -> dict:
         if set(value) != {"cancelled"}:
             raise DeviceProtocolError("invalid_result_payload")
         return {"cancelled": _flag(value["cancelled"], "invalid_result_payload")}
+    if action == "direct_open":
+        if set(value) != {"ice"}:
+            raise DeviceProtocolError("invalid_result_payload")
+        return {"ice": _text(value["ice"], "invalid_result_payload", MAX_ICE_BYTES)}
     if set(value) != {"response_b64"}:
         raise DeviceProtocolError("invalid_result_payload")
     decode_device_b64(
@@ -447,6 +462,8 @@ def empty_device_payload(action: str) -> dict:
         return {"cancelled": False}
     if action == "device_rpc":
         return {"response_b64": None}
+    if action == "direct_open":
+        return {"ice": None}
     raise DeviceProtocolError("unknown_action")
 
 

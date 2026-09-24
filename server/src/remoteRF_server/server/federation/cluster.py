@@ -753,16 +753,22 @@ def _publish_roster(name: str, cluster: dict) -> None:
 
 
 def _publish_status(name: str, cluster: dict) -> None:
-    """Any lab: post our counts for this cluster when they change."""
-    sharing = _sharing(name)
-    if sharing == cluster.get("status"):
+    """Any lab: post our counts for this cluster, and the route the other
+    labs may dial us on directly, when either changes."""
+    from .peers import own_route
+
+    note = _sharing(name)
+    route = own_route()
+    if route is not None:
+        note["route"] = route
+    if note == cluster.get("status"):
         return
     key, _, me = g._signing_material()
     owner = me if cluster["role"] == "owner" else cluster["peer"]
-    status = {"cluster_name": name, "owner": owner, "deployment_id": me, "issued_at": int(time.time()), **sharing}
+    status = {"cluster_name": name, "owner": owner, "deployment_id": me, "issued_at": int(time.time()), **note}
     signature = base64.b64encode(key.sign(canonical_json(status).encode())).decode("ascii")
     g.call("POST", "/v2/broker/clusters/roster", {"protocol_version": "2", "status": status, "signature": signature})
-    cluster["status"] = sharing
+    cluster["status"] = note
 
 
 def _take_statuses(name: str, cluster: dict, statuses: list[dict]) -> None:
@@ -777,6 +783,20 @@ def _take_statuses(name: str, cluster: dict, statuses: list[dict]) -> None:
         if _roster_signed_by(peer, status, item.get("signature", "")):
             parties[peer]["sharing"] = {"groups": status["groups"], "devices": status["devices"],
                                         "detail": status.get("detail", [])}
+            if status.get("route"):
+                _pin_route(peer, parties[peer].get("display_name"), status["route"])
+
+
+def _pin_route(peer: str, display_name: str | None, route: dict) -> None:
+    """A lab's own signed route: from now on the HOME dials it directly.
+    A malformed one leaves the broker path in place."""
+    from .peers import PeerStore
+
+    try:
+        PeerStore(_db_path()).upsert(deployment_id=peer, display_name=display_name or peer, route=route,
+                                     source="cluster")
+    except (ValueError, sqlite3.Error):
+        pass
 
 
 def _roster_signed_by(owner: str, roster: dict, signature: str) -> bool:

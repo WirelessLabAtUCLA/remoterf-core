@@ -382,7 +382,7 @@ class ServerHomeDevices:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT r.res_id, r.salt, r.hash, a.alias_id, a.owner_deployment_id, "
-                "a.remote_device_id, h.local_account_id "
+                "a.remote_device_id, h.local_account_id, h.remote_reservation_id "
                 "FROM HomeFederatedReservations h "
                 "JOIN Reservations r ON r.res_id=h.res_id "
                 "JOIN FederatedDeviceAliases a ON a.alias_id=r.device_id"
@@ -401,6 +401,38 @@ class ServerHomeDevices:
                 (int(alias_id),),
             ).fetchone()
         return int(row[0]) if row else None
+
+    def direct_offer(self, *, local_account_id: int, token: str, ice: str) -> dict:
+        """Have the owner answer this client's ICE offer for the reservation
+        behind a HOME-minted token (docs/deployment-groups.md §7.6).
+
+        Returns the answer plus what the client needs to pin the owner's QUIC
+        handshake: the owner's TLS name and CA from its FederationPeers row.
+        Without that row there is no direct route, and the client simply
+        keeps driving the device through this HOME.
+        """
+
+        route = self.resolve_token(token)
+        if route is None or int(route["local_account_id"]) != int(local_account_id):
+            raise HomeDeviceError("That token does not name a partner device of yours.")
+        owner = route["owner_deployment_id"]
+        peer = self.outbound.peer(owner)
+        if peer is None:
+            raise HomeDeviceError("No direct route to the partner lab is known yet.")
+        candidate = self._destination(local_account_id, owner, "DEVICE_CONTROL")
+        try:
+            result = self._forward(
+                local_account_id, candidate, "direct_open",
+                reservation_id=str(route["remote_reservation_id"]), ice=ice,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HomeDeviceError(_failure_text(exc)) from None
+        return {
+            "ice": result["payload"]["ice"],
+            "server_name": peer["tls_server_name"],
+            "ca_pem": peer["ca_pem"],
+            "owner": owner,
+        }
 
     def rpc(self, *, local_account_id: int, alias, function_name: str, args: dict) -> dict:
         """Run one device RPC on the owner; returns the owner's results map."""
