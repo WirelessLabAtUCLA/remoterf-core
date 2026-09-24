@@ -268,3 +268,22 @@ def test_cluster_code_enrols_a_student_into_the_partners_attached_groups(home, t
         # The device shows up at HOME through the ordinary alias path.
         devices = _acc(home, "get_dev")
         assert any(int(k) >= ALIAS_BASE for k in devices)
+
+
+def test_the_v2_schema_service_sends_a_partner_token_to_the_v1_plane(home):
+    """The Client tries Dynamic v2 first; for a partner device the HOME must
+    answer with a protocol error (fall back), never a reservation error."""
+    from remoteRF_server.server import dynamic_v2
+
+    plane, account_id = home["plane"], home["account_id"]
+    plane.record_enrollment(local_account_id=account_id, destination_deployment_id=DEST)
+    alias = next(int(k) for k in _acc(home, "get_dev") if int(k) >= ALIAS_BASE)
+    start, end = _window()
+    token = _acc(home, "reserve_device", dd=alias, st=int(start.timestamp()), et=int(end.timestamp()))["Token"]
+    with patch("remoteRF_server.server.reservation.reservation_handler", home["reservations"]):
+        with pytest.raises(dynamic_v2.RemoteRFProtocolError, match="v1 device plane"):
+            dynamic_v2.session_manager.schema_for_token(token)
+        with pytest.raises(dynamic_v2.RemoteRFProtocolError):
+            dynamic_v2.session_manager.open(token)
+        with pytest.raises(dynamic_v2.RemoteRFReservationError):
+            dynamic_v2.session_manager.schema_for_token("not-a-token")  # a native miss is still a miss
