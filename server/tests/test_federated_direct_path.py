@@ -27,6 +27,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from aioice import Candidate, Connection
@@ -55,6 +56,10 @@ def federated(home, tmp_path, monkeypatch):
     ca_pem = write_certs(cert_dir)
     monkeypatch.setattr(direct_path, "CERT_DIR", cert_dir)
     monkeypatch.setenv("REMOTERF_STUN_SERVER", "off")
+    # Fixed pools on both ends: the handlers keep a connection per thread, so
+    # a pool that grows between rounds would read as a leak in the soak.
+    loop = direct_path._get_loop()
+    loop.call_soon_threadsafe(loop.set_default_executor, ThreadPoolExecutor(4, "remoterf-direct-call"))
     PeerStore(home["dest_db"]).upsert(
         deployment_id=DEST, display_name="Destination", source="admin",
         route={"grpc_endpoint": "127.0.0.1:1", "tls_server_name": SERVER_NAME, "ca_pem": ca_pem.decode()},
@@ -71,6 +76,9 @@ def federated(home, tmp_path, monkeypatch):
         yield {**home, "token": reserved["Token"], "res_id": res_id, "remote_res_id": remote, "ca_pem": ca_pem}
     finally:
         direct_path.shutdown()
+
+
+_OFFERS = ThreadPoolExecutor(2, "test-offer")  # the blocking ACC calls, off the loop
 
 
 class Client:
@@ -90,7 +98,7 @@ class Client:
         loop = asyncio.get_running_loop()
         self.ice = ice = Connection(ice_controlling=True, use_ipv6=False)
         await ice.gather_candidates()
-        reply = await loop.run_in_executor(None, self.offer, ice)
+        reply = await loop.run_in_executor(_OFFERS, self.offer, ice)
         if "ace" in reply:
             await ice.close()
             raise direct_path.PathRefused(reply["ace"])
@@ -210,7 +218,7 @@ def test_a_cancelled_reservation_closes_the_path_on_the_next_call(federated):
             await client.punch()
             assert (await client.call("Test:rx:CALL0"))["value"] == 42
             assert "UC" in await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _acc(fed, "cancel_res", res_id=fed["res_id"])
+                _OFFERS, lambda: _acc(fed, "cancel_res", res_id=fed["res_id"])
             )
             assert "reservation has ended" in (await client.call("Test:rx:CALL0"))["a"]
             assert await _gone()

@@ -157,6 +157,7 @@ def _table() -> list[Command]:
         Command(("cluster groups",), "Choose which of your groups a cluster shares (interactive)", _federation("groups"), "Clusters"),
         Command(("cluster codes create",), "Codes for your users to join a cluster (interactive)", _federation("codes create"), "Clusters"),
         Command(("cluster codes list",), "List cluster codes", _federation("codes list"), "Clusters"),
+        Command(("cluster peers",), "Partner listeners this lab dials directly: cluster peers [add <id> <host:port> --ca <ca.crt> | remove <id>]", _federation("peers"), "Clusters"),
         Command(("cluster accept",), "", _federation("accept"), "Clusters", hidden=True),
         Command(("global cluster",), "", _federation("cluster"), "Global", hidden=True),
         # ---- gist ----
