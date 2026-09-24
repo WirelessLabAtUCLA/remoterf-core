@@ -241,6 +241,22 @@ def test_the_path_cap_is_per_reservation_not_per_owner(federated):
     asyncio.run(run())
 
 
+def test_an_offer_id_cannot_smuggle_a_session_separator(federated):
+    fed = federated
+    assert direct_path._key("s", {"id": "a/b/c"}) == "s/abc" and direct_path._key("s", {}) == "s/"
+
+    async def run():
+        client = Client(fed, offer_id="p/q")
+        try:
+            await client.punch()
+            (key,) = direct_path._paths
+            assert key.endswith("/pq") and key.rsplit("/", 1)[0].endswith(str(fed["remote_res_id"]))
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_only_get_drivers_of_the_idl_family_is_allowed_on_a_bound_path(federated):
     fed = federated
 

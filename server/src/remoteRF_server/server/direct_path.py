@@ -440,6 +440,12 @@ def _get_loop() -> asyncio.AbstractEventLoop:
         return _loop
 
 
+def _key(session_key: str, remote: dict) -> str:
+    """session/offer-id; the id may not carry the separator, or a client could
+    give each offer a session of its own and dodge the cap."""
+    return f"{session_key}/{str(remote.get('id', ''))[:32].replace('/', '')}"
+
+
 def offer(session_key: str, user: str, ice: str) -> dict:
     """ACC:direct_offer, already authenticated: answer the client's ICE offer.
 
@@ -450,7 +456,7 @@ def offer(session_key: str, user: str, ice: str) -> dict:
     """
     try:
         remote = json.loads(ice)
-        key = f"{session_key}/{str(remote.get('id', ''))[:32]}"
+        key = _key(session_key, remote)
         answer = asyncio.run_coroutine_threadsafe(
             _offer(key, user, remote), _get_loop()
         ).result(20)
@@ -468,8 +474,7 @@ def offer_bound(session_key: str, user: str, ice: str, *, bound: dict) -> dict:
     path could be prepared.
     """
     remote = json.loads(ice)
-    key = f"{session_key}/{str(remote.get('id', ''))[:32]}"
-    return asyncio.run_coroutine_threadsafe(_offer(key, user, remote, bound), _get_loop()).result(20)
+    return asyncio.run_coroutine_threadsafe(_offer(_key(session_key, remote), user, remote, bound), _get_loop()).result(20)
 
 
 def shutdown() -> None:
