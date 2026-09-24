@@ -196,7 +196,10 @@ def _dispatch(request: grpc_pb2.GenericRPCRequest, peer_host: str, bound: Option
     if bound is not None:
         if not (device or name == "IDL:get_drivers"):
             return {"a": map_arg(f"{name} is not available on the direct path")}
-        reason = bound["authorize"](name)
+        try:
+            reason = bound["authorize"](name)
+        except Exception as exc:  # noqa: BLE001 - undecidable is not a refusal: the call does not run
+            return {"a": map_arg(f"authorization unavailable: {exc}")}
         if reason is not None:
             raise PathRefused(reason)
     elif not (device or name.startswith("IDL:")):
@@ -398,8 +401,10 @@ async def _offer(key: str, user: str, remote: dict, bound: Optional[dict] = None
     old = _paths.get(key)
     if old is not None:
         await old.close()
-    session = key.split("/", 1)[0]
-    siblings = [path for k, path in _paths.items() if k.split("/", 1)[0] == session]
+    # The session is everything but the offer id: one login's processes, or
+    # one federated reservation's.
+    session = key.rsplit("/", 1)[0]
+    siblings = [path for k, path in _paths.items() if k.rsplit("/", 1)[0] == session]
     for path in siblings[: max(0, len(siblings) - MAX_PATHS_PER_SESSION + 1)]:
         await path.close()
     ice = Ice(ice_controlling=False, stun_server=stun_server(default_route_address()))
