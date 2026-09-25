@@ -333,6 +333,8 @@ def start_server_runtime(
         )
     cert_dir = Path(cert_dir)
     direct_path.CERT_DIR = cert_dir
+    direct_path.BIND_HOST = bind_host
+    direct_path.UDP_PORT = int(os.getenv("REMOTERF_DIRECT_UDP_PORT", grpc_port) or 0)
 
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
@@ -393,6 +395,7 @@ def start_server_runtime(
         )
         reservation_handler.update_devices()
         server.start()
+        direct_path.start_listener()
         if run_reservation_updates:
             update_thread = threading.Thread(
                 target=update_devices,
