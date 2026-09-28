@@ -270,6 +270,25 @@ def test_cluster_code_enrols_a_student_into_the_partners_attached_groups(home, t
         assert any(int(k) >= ALIAS_BASE for k in devices)
 
 
+def test_a_partner_schema_by_id_never_asks_the_owner_for_v2(home):
+    """The Client asks by id for v2 first; a v2 driver cannot drive a partner device."""
+    plane, account_id = home["plane"], home["account_id"]
+    plane.record_enrollment(local_account_id=account_id, destination_deployment_id=DEST)
+    alias = next(int(k) for k in _acc(home, "get_dev") if int(k) >= ALIAS_BASE)
+    start, end = _window()
+    _acc(home, "reserve_device", dd=alias, st=int(start.timestamp()), et=int(end.timestamp()))
+    from remoteRF_server.server import rpc_manager as rpc_module
+
+    with patch.object(rpc_module, "reservation_handler", home["reservations"]), \
+            patch.object(plane, "rpc", wraps=plane.rpc) as forwarded:
+        schema = rpc_module.RpcManager().run_rpc(
+            function_name="IDL:get_drivers",
+            args={"device_id": map_arg(alias), "schema_versions": map_arg(["2.0"])},
+        )
+    assert "federated" in schema and unmap_arg(schema["device_type"]) == "test"
+    assert "schema_versions" not in forwarded.call_args.kwargs["args"]
+
+
 def test_the_v2_schema_service_sends_a_partner_token_to_the_v1_plane(home):
     """The Client tries Dynamic v2 first; for a partner device the HOME must
     answer with a protocol error (fall back), never a reservation error."""

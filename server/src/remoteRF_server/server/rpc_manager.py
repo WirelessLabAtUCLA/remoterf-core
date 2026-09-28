@@ -388,6 +388,9 @@ class RpcManager:
                 device_id=unmap_arg(args['device_id']) if 'device_id' in args else None,
             )
             if federated is not None:
+                # Partner devices use the v1 device plane: never ask the owner
+                # for a v2 schema whose driver could not drive them.
+                args = {k: v for k, v in args.items() if k != "schema_versions"}
                 return self._federated_rpc(federated, function_name="IDL:get_drivers", args=args)
             gid, err = self._resolve_idl_target(args)
             if err is not None or gid is None:
