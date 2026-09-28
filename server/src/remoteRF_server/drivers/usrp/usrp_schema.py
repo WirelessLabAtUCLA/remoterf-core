@@ -284,11 +284,21 @@ def _construct(value):
             if value.get("lo_offset") is not None:
                 args.append(value["lo_offset"])
         obj = constructor(*args, **kwargs)
+        # TuneRequest(f, lo) places the RF LO manually at f + lo. Clients before
+        # this fix modelled only the offset and send AUTO / 0.0 for the RF
+        # fields next to it; applied, those defaults would undo the offset.
+        keep_rf = (
+            value.get("lo_offset") is not None
+            and str(value.get("rf_freq_policy", "")).rsplit(".", 1)[-1].upper() == "AUTO"
+            and not value.get("rf_freq")
+        )
         for field in (
             "rf_freq", "dsp_freq", "rf_freq_policy", "dsp_freq_policy",
             "args",
         ):
             if field == "args" and legacy_constructor_args:
+                continue
+            if keep_rf and field in {"rf_freq", "rf_freq_policy"}:
                 continue
             if field in value and hasattr(obj, field):
                 converted = _construct(value[field])

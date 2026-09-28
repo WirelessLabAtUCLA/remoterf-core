@@ -346,12 +346,13 @@ class DeviceSchemaTests(unittest.TestCase):
             NONE = object()
 
         class TuneRequest:
-            def __init__(self, target_freq=0.0, lo_offset=None):
+            # As UHD's tune_request_t(target, lo_off): an offset places the
+            # RF LO manually at target + offset.
+            def __init__(self, target_freq=0.0, lo_off=None):
                 self.target_freq = float(target_freq)
-                self.lo_offset = lo_offset
-                self.rf_freq = 0.0
+                self.rf_freq = 0.0 if lo_off is None else float(target_freq) + float(lo_off)
                 self.dsp_freq = 0.0
-                self.rf_freq_policy = TuneRequestPolicy.AUTO
+                self.rf_freq_policy = TuneRequestPolicy.AUTO if lo_off is None else TuneRequestPolicy.MANUAL
                 self.dsp_freq_policy = TuneRequestPolicy.AUTO
                 self.args = DeviceAddr()
 
@@ -566,6 +567,22 @@ class DeviceSchemaTests(unittest.TestCase):
         self.assertIs(tune.dsp_freq_policy, TuneRequestPolicy.AUTO)
         self.assertIsInstance(tune.args, DeviceAddr)
         self.assertEqual(tune.args.value, "mode_n=integer")
+
+        def offset_tune(**rf):
+            return usrp_schema._construct({
+                "__uhd_type__": "TuneRequest", "target_freq": 915e6, "lo_offset": 5e6,
+                "dsp_freq": 0.0, "dsp_freq_policy": "AUTO",
+                "args": {"__uhd_type__": "DeviceAddr", "items": {}}, **rf,
+            })
+
+        # An older Client's TuneRequest(f, lo) sends AUTO / 0.0 RF defaults
+        # next to the offset: the manual f + lo survives them.
+        tune = offset_tune(rf_freq=0.0, rf_freq_policy="AUTO")
+        self.assertIs(tune.rf_freq_policy, TuneRequestPolicy.MANUAL)
+        self.assertEqual(tune.rf_freq, 920e6)
+        # A current Client sends UHD's own state; an explicit RF choice wins.
+        self.assertEqual(offset_tune(rf_freq=920e6, rf_freq_policy="MANUAL").rf_freq, 920e6)
+        self.assertEqual(offset_tune(rf_freq=921e6, rf_freq_policy="MANUAL").rf_freq, 921e6)
 
         subdev = usrp_schema._construct({"__uhd_type__": "SubdevSpec", "spec": "A:0"})
         self.assertIsInstance(subdev, SubdevSpec)
