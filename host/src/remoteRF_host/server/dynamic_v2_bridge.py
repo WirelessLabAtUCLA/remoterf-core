@@ -27,11 +27,19 @@ from .dynamic_v2 import (
     SampleDataV1Servicer,
     session_manager,
 )
-from .v2_errors import RemoteRFProtocolError
+from .v2_errors import RemoteRFError, RemoteRFProtocolError, error_envelope
 
 
 _CONTROL = DynamicControlV2Servicer()
 _SAMPLES = SampleDataV1Servicer()
+_RESPONSE_TYPES = {
+    "Negotiate": grpc_pb2.NegotiateResponse,
+    "GetSchema": grpc_pb2.GetSchemaResponse,
+    "OpenSession": grpc_pb2.OpenSessionResponse,
+    "Invoke": grpc_pb2.InvokeResponse,
+    "CloseHandle": grpc_pb2.CloseResponse,
+    "CloseSession": grpc_pb2.CloseResponse,
+}
 
 
 def _wire_arg(args: dict) -> bytes:
@@ -163,7 +171,21 @@ def run_bridge(*, operation: str, args: dict, gid: int) -> dict:
     """Execute one serialized v2 protobuf request for a trusted server tunnel."""
     operation = str(operation or "")
     wire = _wire_arg(args)
+    try:
+        response = _dispatch(operation, wire, gid)
+    except RemoteRFError as exc:
+        # A closed session or a mismatched device is the client's to handle,
+        # typed as the servicer would type it, not an opaque tunnel failure.
+        if operation == "SampleFrame":
+            response = _SAMPLES._error_frame(grpc_pb2.SampleFrame.FromString(wire), exc)
+        elif operation in _RESPONSE_TYPES:
+            response = _RESPONSE_TYPES[operation](error=error_envelope(exc))
+        else:
+            raise
+    return {"wire": map_arg(response.SerializeToString())}
 
+
+def _dispatch(operation: str, wire: bytes, gid: int):
     if operation == "Negotiate":
         request = grpc_pb2.NegotiateRequest.FromString(wire)
         response = _CONTROL.Negotiate(request, None)
@@ -193,5 +215,4 @@ def run_bridge(*, operation: str, args: dict, gid: int) -> dict:
         response = _SAMPLE_BRIDGE.process(request, gid=gid)
     else:
         raise RemoteRFProtocolError(f"unknown tunneled Dynamic v2 operation: {operation!r}")
-
-    return {"wire": map_arg(response.SerializeToString())}
+    return response

@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import sys
+import threading
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -28,7 +31,13 @@ from remoteRF_host.drivers.usrp.uhd_manifest import (
     TARGET_UHD_VERSION,
     build_usrp_schema_v2,
 )
-from remoteRF_host.server.dynamic_v2 import session_manager, snapshot_native
+from remoteRF_host.server.dynamic_v2 import (
+    HandleEntry,
+    SampleDataV1Servicer,
+    SessionManager,
+    session_manager,
+    snapshot_native,
+)
 from remoteRF_host.server.dynamic_v2_bridge import run_bridge
 
 
@@ -319,6 +328,266 @@ class DynamicV2BridgeTests(unittest.TestCase):
             samples,
             np.array([1 + 2j, 3 + 4j], dtype=np.complex64),
         )
+
+
+    def test_closed_session_errors_stay_typed_across_the_tunnel(self):
+        invoked = self.call(
+            "Invoke",
+            grpc_pb2.InvokeRequest(
+                session_id="gone",
+                handle="h",
+                method="get_time_now",
+            ),
+            grpc_pb2.InvokeResponse,
+        )
+        self.assertEqual(invoked.error.code, "RemoteRFSessionExpiredError")
+
+        closed = self.call(
+            "CloseSession",
+            grpc_pb2.CloseSessionRequest(session_id="gone"),
+            grpc_pb2.CloseResponse,
+        )
+        self.assertEqual(closed.error.code, "RemoteRFSessionExpiredError")
+
+        frame = self.call(
+            "SampleFrame",
+            grpc_pb2.SampleFrame(
+                session_id="gone",
+                handle="h",
+                operation_id="op",
+                direction=grpc_pb2.SAMPLE_DIRECTION_RX,
+                kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+            ),
+            grpc_pb2.SampleFrame,
+        )
+        self.assertEqual(frame.kind, grpc_pb2.SAMPLE_FRAME_ERROR)
+        self.assertEqual(frame.error.code, "RemoteRFSessionExpiredError")
+        self.assertEqual(frame.operation_id, "op")
+
+    def test_session_of_another_device_is_refused_typed(self):
+        opened = self.open_session()
+        result = run_bridge(
+            operation="Invoke",
+            args={
+                "wire": map_arg(
+                    grpc_pb2.InvokeRequest(
+                        session_id=opened.session_id,
+                        handle=opened.device_handle,
+                        method="get_time_now",
+                    ).SerializeToString()
+                )
+            },
+            gid=8,
+        )
+        invoked = grpc_pb2.InvokeResponse.FromString(unmap_arg(result["wire"]))
+        self.assertEqual(invoked.error.code, "RemoteRFProtocolError")
+
+    def test_unknown_operation_is_still_a_tunnel_error(self):
+        with self.assertRaises(Exception):
+            run_bridge(operation="Nope", args={"wire": map_arg(b"")}, gid=7)
+
+    def test_rx_prefetch_serves_sample_frames_across_tunnel_calls(self):
+        class StreamingRX:
+            threads = set()
+
+            def recv(self, buffer, metadata, timeout):
+                self.threads.add(threading.current_thread().name)
+                buffer[...] = 5 + 6j
+                metadata.error_code = "none"
+                metadata.time_spec = types.SimpleNamespace(get_real_secs=lambda: 2.5)
+                time.sleep(0.001)
+                return buffer.shape[-1]
+
+        opened = self.open_session()
+        session = session_manager.get(opened.session_id)
+        streamer = session_manager.register_handle(
+            session,
+            StreamingRX(),
+            "uhd.usrp.RXStreamer",
+            parent=opened.device_handle,
+        )
+        streamer.cpu_format = "fc32"
+        streamer.stream_channels = [0]
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            session_manager._start_rx_prefetch(session, streamer)
+        self.assertTrue(streamer.rx_worker.is_alive())
+
+        common = {
+            "session_id": opened.session_id,
+            "handle": streamer.handle,
+            "generation": streamer.generation,
+            "direction": grpc_pb2.SAMPLE_DIRECTION_RX,
+        }
+        for index in range(3):
+            operation = f"rx-{index}"
+            self.call(
+                "SampleFrame",
+                grpc_pb2.SampleFrame(
+                    **common,
+                    operation_id=operation,
+                    sequence=2 * index + 1,
+                    kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                    credits=1,
+                ),
+                grpc_pb2.SampleFrame,
+            )
+            with patch(
+                "remoteRF_host.drivers.usrp.usrp_schema._construct",
+                return_value=FakeRXMetadata(),
+            ):
+                received = self.call(
+                    "SampleFrame",
+                    grpc_pb2.SampleFrame(
+                        **common,
+                        operation_id=operation,
+                        sequence=2 * index + 2,
+                        kind=grpc_pb2.SAMPLE_FRAME_REQUEST,
+                        dtype=np.dtype(np.complex64).str,
+                        shape=[1000],
+                        channels=[0],
+                        sample_count=1000,
+                        timeout_sec=1.0,
+                        metadata_json="{}",
+                    ),
+                    grpc_pb2.SampleFrame,
+                )
+            self.assertEqual(received.kind, grpc_pb2.SAMPLE_FRAME_DATA, received.error)
+            self.assertEqual(received.sample_count, 1000)
+            samples = np.frombuffer(received.payload, dtype=np.complex64)
+            self.assertTrue(np.all(samples == np.complex64(5 + 6j)))
+
+        self.assertTrue(all("rx-prefetch" in name for name in StreamingRX.threads))
+        worker = streamer.rx_worker
+        self.call(
+            "CloseSession",
+            grpc_pb2.CloseSessionRequest(session_id=opened.session_id),
+            grpc_pb2.CloseResponse,
+        )
+        worker.join(timeout=1.0)
+        self.assertFalse(worker.is_alive())
+
+
+    def test_prefetch_recv_in_flight_does_not_delay_sample_frames(self):
+        in_recv = threading.Event()
+
+        class SlowRX:
+            def recv(self, buffer, metadata, timeout):
+                in_recv.set()
+                time.sleep(0.5)
+                metadata.error_code = "none"
+                return buffer.shape[-1]
+
+        opened = self.open_session()
+        session = session_manager.get(opened.session_id)
+        streamer = session_manager.register_handle(
+            session, SlowRX(), "uhd.usrp.RXStreamer", parent=opened.device_handle
+        )
+        streamer.cpu_format = "fc32"
+        streamer.stream_channels = [0]
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            session_manager._start_rx_prefetch(session, streamer)
+        self.assertTrue(in_recv.wait(1.0))
+        started = time.monotonic()
+        frame = self.call(
+            "SampleFrame",
+            grpc_pb2.SampleFrame(
+                session_id=opened.session_id,
+                handle=streamer.handle,
+                generation=streamer.generation,
+                operation_id="rx",
+                direction=grpc_pb2.SAMPLE_DIRECTION_RX,
+                sequence=1,
+                kind=grpc_pb2.SAMPLE_FRAME_OPEN,
+                credits=1,
+            ),
+            grpc_pb2.SampleFrame,
+        )
+        self.assertEqual(frame.kind, grpc_pb2.SAMPLE_FRAME_RESULT)
+        self.assertLess(time.monotonic() - started, 0.2)
+
+class RXPrefetchTests(unittest.TestCase):
+    @staticmethod
+    def entry(**kwargs):
+        return HandleEntry(
+            handle="rx",
+            type_id="uhd.rx_streamer.RXStreamer",
+            value=kwargs.pop("value", object()),
+            parent=None,
+            generation=1,
+            **kwargs,
+        )
+
+    def test_coalesces_batches_and_preserves_remainder(self):
+        entry = self.entry()
+        entry.rx_prefetch.put(
+            (np.array([[1, 2, 3]], dtype=np.complex64), {"error_code": "none"})
+        )
+        entry.rx_prefetch.put(
+            (np.array([[4, 5]], dtype=np.complex64), {"error_code": "none"})
+        )
+        first = np.empty((1, 4), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(entry, first, 0.1)
+        self.assertEqual(count, 4)
+        self.assertEqual(metadata["error_code"], "none")
+        np.testing.assert_array_equal(first, [[1, 2, 3, 4]])
+
+        second = np.empty((1, 1), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(entry, second, 0.1)
+        self.assertEqual(count, 1)
+        np.testing.assert_array_equal(second, [[5]])
+
+    def test_empty_queue_reports_timeout(self):
+        buffer = np.empty((1, 4), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(self.entry(), buffer, 0.01)
+        self.assertEqual(count, 0)
+        self.assertEqual(metadata["error_code"], "timeout")
+
+    def test_reports_queue_overflow_once(self):
+        entry = self.entry()
+        entry.rx_prefetch.put(
+            (np.array([[1]], dtype=np.complex64), {"error_code": "none"})
+        )
+        entry.rx_prefetch_overflowed = True
+        buffer = np.empty((1, 1), dtype=np.complex64)
+        count, metadata = SampleDataV1Servicer._recv_prefetched(entry, buffer, 0.1)
+        self.assertEqual(count, 1)
+        self.assertEqual(metadata["error_code"], "overflow")
+        self.assertFalse(entry.rx_prefetch_overflowed)
+
+    def test_worker_drains_native_stream_until_stopped(self):
+        class StreamingRX:
+            def __init__(self):
+                self.calls = 0
+
+            def recv(self, buffer, metadata, timeout):
+                self.calls += 1
+                buffer[...] = self.calls
+                metadata.error_code = "none"
+                time.sleep(0.001)
+                return buffer.shape[-1]
+
+        streamer = StreamingRX()
+        entry = self.entry(value=streamer, stream_channels=[0], cpu_format="fc32")
+        session = types.SimpleNamespace(closed=False)
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        manager = SessionManager()
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            manager._start_rx_prefetch(session, entry)
+            deadline = time.monotonic() + 1.0
+            while entry.rx_prefetch.empty() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(entry.rx_prefetch.empty())
+            manager._stop_rx_prefetch(entry)
+        self.assertIsNone(entry.rx_worker)
+        self.assertTrue(entry.rx_prefetch.empty())
 
 
 if __name__ == "__main__":
