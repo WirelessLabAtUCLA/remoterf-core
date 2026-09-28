@@ -416,6 +416,10 @@ async def _serve_call(path, reader: asyncio.StreamReader, writer: asyncio.Stream
         path.calls += 1
     except Exception as exc:  # noqa: BLE001 - one lost stream must not take the path down
         logger.debug("direct path stream: %s", exc)
+    finally:
+        # Ends our side of the stream on every path; Python < 3.12 does not
+        # close an abandoned StreamWriter, and the half-open stream lingers.
+        writer.close()
     if bad_frame is not None:
         # A client that cannot frame a request is not ours; its bytes are
         # still arriving and would only pile up in this stream's buffer.
