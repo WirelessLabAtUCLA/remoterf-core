@@ -212,6 +212,13 @@ class PlutoSchema(DeviceSchema):
     def call_tx_destroy_buffer(self):
         self.device.tx_destroy_buffer()
 
+    def reset_for_next_holder(self):
+        """A reservation ended: stop its cyclic transmission, and drop its RX
+        buffer so the next holder's rx_buffer_size takes effect."""
+        if self.device is not None:
+            self.device.tx_destroy_buffer()
+            self.device.rx_destroy_buffer()
+
     @idl_expose(kind="call")
     def call_disable_dds(self):
         """Disable the internal DDS tone generator."""

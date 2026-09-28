@@ -1105,4 +1105,8 @@ class UsrpSchema(DeviceSchema):
         self._streamers().clear()
         return count
 
+    def reset_for_next_holder(self):
+        """A reservation ended: its v1 streamers are not the next holder's."""
+        self._streamers().clear()
+
     # endregion

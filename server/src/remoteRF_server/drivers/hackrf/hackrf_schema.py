@@ -432,6 +432,11 @@ class HackRFSchema(DeviceSchema):
         # device and has been observed to crash its native libhackrf path.
         return None
 
+    def reset_for_next_holder(self):
+        """A reservation ended: stop its transmission and drop its IQ bytes."""
+        if self.device is not None:
+            self.call_close()
+
     @idl_expose(kind="call")
     def call_enumerate(self):
         """Return attached serials as a JSON array for broad client compatibility."""

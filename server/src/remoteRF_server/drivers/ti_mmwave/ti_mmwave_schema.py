@@ -657,3 +657,11 @@ class TiMmWaveSchema(DeviceSchema):
     def call_flush_frames(self):
         """Discard queued and partially assembled data frames."""
         return self.device.flush_frames()
+
+    def reset_for_next_holder(self):
+        """A reservation ended: stop its sensor and drop its unread frames."""
+        if self.device is None or self.device.closed:
+            return
+        if self.device.running:
+            self.device.stop()
+        self.device.flush_frames()

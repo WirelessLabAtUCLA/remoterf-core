@@ -62,6 +62,8 @@ class _DeviceState:
     ident: str
     dtype: str
     io_lock: threading.RLock = field(default_factory=threading.RLock)
+    # The last reservation ended; see _reset_locked().
+    reset_pending: bool = False
 
 # gid -> state
 _devices: Dict[int, _DeviceState] = {}
@@ -762,10 +764,14 @@ def set_device(device_id: int, salt: str, hash: str):
         st = _devices.get(int(device_id))
         if not st:
             return
-        was_reserved = bool(st.salt or st.hsh)
+        previous = (st.salt, st.hsh)
         st.salt = str(salt or "")
         st.hsh = str(hash or "")
-        notify_end = was_reserved and not (st.salt or st.hsh)
+        # The holder changed: the reservation ended, or a back-to-back one
+        # replaced it without the device ever being free.
+        notify_end = any(previous) and previous != (st.salt, st.hsh)
+        if notify_end:
+            st.reset_pending = True
 
     if notify_end:
         for callback in tuple(_reservation_end_callbacks):
@@ -773,6 +779,31 @@ def set_device(device_id: int, salt: str, hash: str):
                 callback(int(device_id))
             except Exception as exc:
                 print(f"Warning: reservation cleanup callback failed for {device_id}: {exc}")
+        # Now, not at the next call: a transmitter left running must stop
+        # even when nobody reserves the device next.
+        threading.Thread(target=_reset_if_pending, args=(int(device_id),), daemon=True).start()
+
+
+def _reset_locked(st: _DeviceState) -> None:
+    """Under st.io_lock: drop what the last reservation left on the device
+    (buffers, streamers, a running transmitter) before anyone else drives it."""
+    if not st.reset_pending:
+        return
+    st.reset_pending = False
+    reset = getattr(st.dev, "reset_for_next_holder", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception as exc:
+            print(f"Warning: resetting {st.name or st.ident} for its next reservation failed: {exc}")
+
+
+def _reset_if_pending(device_id: int) -> None:
+    with _state_lock:
+        st = _devices.get(int(device_id))
+    if st is not None:
+        with st.io_lock:
+            _reset_locked(st)
 
 
 def register_reservation_end_callback(callback) -> None:
@@ -1073,6 +1104,7 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
 
     lock.acquire()
     try:
+        _reset_locked(st)
         yield int(gid), dev
     finally:
         lock.release()
@@ -1099,6 +1131,7 @@ def acquire_device_by_gid(gid: int) -> Iterator[Tuple[int, object]]:
 
     lock.acquire()
     try:
+        _reset_locked(st)
         yield int(gid), dev
     finally:
         lock.release()
