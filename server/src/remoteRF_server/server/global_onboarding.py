@@ -381,6 +381,11 @@ def ensure_consent() -> bool:
     """
     if load().get("GLOBAL_CONSENT", "").lower() in {"yes", "no"}:
         return True
+    if sys.stdin is None or not sys.stdin.isatty():
+        # A service start (--headless under systemd) has no one to answer:
+        # start outside Global and ask at the next start from a terminal.
+        print("RemoteRF Global participation not asked (no terminal); `serverrf global join` joins.")
+        return True
     from ..common.utils.panel import print_panel
 
     print()

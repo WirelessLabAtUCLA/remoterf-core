@@ -29,6 +29,10 @@ class ConsentTests(unittest.TestCase):
         )
         patch.start()
         self.addCleanup(patch.stop)
+        # The prompts are only asked at a terminal; these tests answer them.
+        tty = mock.patch.object(g.sys, "stdin", mock.Mock(isatty=mock.Mock(return_value=True)))
+        tty.start()
+        self.addCleanup(tty.stop)
         self.setUpSubmitStub()
 
     def answer(self, *replies):
@@ -48,6 +52,14 @@ class ConsentTests(unittest.TestCase):
         # Asked once: a second start must not prompt at all.
         with mock.patch.object(builtins, "input", mock.Mock(side_effect=AssertionError)):
             self.assertTrue(g.ensure_consent())
+
+    def test_a_start_without_a_terminal_is_not_asked(self):
+        # A service start must not refuse to run on an unanswered question.
+        g.sys.stdin.isatty.return_value = False
+        with mock.patch.object(builtins, "input", mock.Mock(side_effect=AssertionError)):
+            self.assertTrue(g.ensure_consent())
+        self.assertNotIn("GLOBAL_CONSENT", g.load())
+        self.assertFalse(g.participating())
 
     def test_joining_writes_configuration_and_identity(self):
         with mock.patch.object(g, "name_available", return_value=True):
