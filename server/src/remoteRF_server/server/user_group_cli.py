@@ -22,7 +22,53 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from ..common.utils.panel import print_table
+from .global_onboarding import invite, lan_endpoint
 from .user_group_handler import user_group_handler
+
+
+def _print_device_choices() -> None:
+    """The ids a whitelist can name, so nobody has to guess."""
+    from . import device_manager
+
+    devices = device_manager.get_all_devices_str()
+    if not devices:
+        print("No devices are configured yet (devices.yml).")
+        return
+    print("Devices on this server:")
+    for gid in sorted(devices):
+        print(f"  {gid:>4}  {devices[gid]}")
+
+
+def _invites(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Add the pasteable `invite` form to code rows (bare for LAN-only groups)."""
+    lan_only = {
+        int(g["group_id"]): bool(g.get("lan_only"))
+        for g in user_group_handler.get_all_user_groups(include_users=False) or []
+    }
+    for row in rows:
+        code = str(row.get("code_name", ""))
+        # A federation-bound code is redeemed through its signed invitation,
+        # never typed as a Global invite.
+        federated = row.get("federation_contract_id") is not None
+        row["invite"] = code if federated else invite(
+            code, lan_only=lan_only.get(int(row.get("group_id", -1)), False)
+        )
+    return rows
+
+
+def _fmt_duration(seconds: int) -> str:
+    seconds = int(seconds)
+    if seconds <= 0:
+        return "never expires"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 from .user_group_handler import user_group_handler
 
@@ -69,8 +115,8 @@ def make_user_group_local(session) -> None:
             if s.lower() in CANCEL:
                 return None
 
-            if not s:
-                print("Please enter at least one device id (e.g. '0,1,2') or 'c' to cancel.")
+            if not s or s.lower() in {"all", "*"}:
+                print("List the device ids this group may use, e.g. '0,1,2'.")
                 continue
 
             # Allow both commas and whitespace
@@ -93,10 +139,6 @@ def make_user_group_local(session) -> None:
                     seen.add(v)
                     out.append(v)
 
-            if len(out) == 0:
-                print("Please enter at least one device id (or 'c' to cancel).")
-                continue
-
             return out
 
     # ---- Group name ----
@@ -108,6 +150,7 @@ def make_user_group_local(session) -> None:
         return
 
     # ---- Parameters ----
+    _print_device_choices()
     devices_whitelist = _prompt_int_list("Devices whitelist (e.g. 0,1,2) (c to cancel): ")
     if devices_whitelist is None:
         return
@@ -124,6 +167,10 @@ def make_user_group_local(session) -> None:
     if lifetime_sec is None:
         return
 
+    # Off the LAN means through the Global relay: codes for a LAN-only group
+    # cannot be redeemed there and its members cannot log in there.
+    lan_only = not _prompt_yes_no("Reachable from outside your network (via Global)? (Y/n): ", default_no=False)
+
     # ---- Final confirmation ----
     wl_str = ",".join(map(str, devices_whitelist))
     print("\nAbout to create user group with:")
@@ -132,6 +179,7 @@ def make_user_group_local(session) -> None:
     print(f"  max_reservation_time_sec : {max_reservation_time_sec}")
     print(f"  max_reservations         : {max_reservations}")
     print(f"  lifetime_sec             : {lifetime_sec}")
+    print(f"  lan_only                 : {'yes' if lan_only else 'no'}")
 
     if not _prompt_yes_no("Proceed? (y/n): ", default_no=True):
         return
@@ -143,6 +191,7 @@ def make_user_group_local(session) -> None:
         max_reservation_time_sec=max_reservation_time_sec,
         max_reservations=max_reservations,
         lifetime_sec=lifetime_sec,
+        lan_only=lan_only,
     )
 
     if group_id is not None:
@@ -197,87 +246,13 @@ def list_user_groups_local(session) -> None:
     include_users = False
 
     groups: List[Dict[str, Any]] = user_group_handler.get_all_user_groups(include_users=include_users) or []
-
-    if not groups:
-        print("No user groups found.")
-        return
-
-    # Print a compact table-like view.
-    def _fmt(v: Any) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, (list, tuple)):
-            return ",".join(str(x) for x in v)
-        if isinstance(v, dict):
-            return str(v)
-        return str(v)
-
-    # Prefer common keys if present
-    preferred = [
-        "group_id",
-        "id",
-        "group_name",
-        "name",
-        "devices_whitelist",
-        "max_reservation_time_sec",
-        "max_reservations",
-        "lifetime_sec",
-        "created_at",
-        "users",
-    ]
-
-    # Choose columns: preferred keys that exist in at least one record, then any remaining keys.
-    present = set().union(*(g.keys() for g in groups))
-    columns = [k for k in preferred if k in present]
-    columns += [k for k in sorted(present) if k not in columns]
-
-    # If not including users, drop users column if present to keep output clean.
-    if not include_users and "users" in columns:
-        columns.remove("users")
-
-    # Compute widths (cap long values)
-    def _cap(s: str, n: int = 48) -> str:
-        return s if len(s) <= n else s[: n - 3] + "..."
-
-    widths = {c: len(c) for c in columns}
-    rows: List[List[str]] = []
-    for g in groups:
-        row = []
-        for c in columns:
-            val = _fmt(g.get(c, ""))
-            val = _cap(val)
-            widths[c] = max(widths[c], len(val))
-            row.append(val)
-        rows.append(row)
-
-    # Header
-    header = "  ".join(c.ljust(widths[c]) for c in columns)
-    sep = "  ".join("-" * widths[c] for c in columns)
-    print(header)
-    print(sep)
-
-    # Rows
-    for row in rows:
-        print("  ".join(row[i].ljust(widths[columns[i]]) for i in range(len(columns))))
-
-    # If include_users, print expanded user lists (if present) for readability
-    # if include_users:
-    #     # Find a reasonable key name for users if exists
-    #     user_key = "users" if any("users" in g for g in groups) else None
-    #     if user_key:
-    #         print("\nUsers per group:")
-    #         for g in groups:
-    #             gid = g.get("group_id", g.get("id", "?"))
-    #             name = g.get("group_name", g.get("name", ""))
-    #             users = g.get(user_key, [])
-    #             if not users:
-    #                 continue
-    #             print(f"  {gid} {name}:")
-    #             if isinstance(users, list):
-    #                 for u in users:
-    #                     print(f"    - {u}")
-    #             else:
-    #                 print(f"    - {users}")
+    for group in groups:
+        group["devices_whitelist"] = group.get("devices_whitelist") or "all"
+    columns = [
+        "group_id", "group_name", "devices_whitelist", "max_reservation_time_sec",
+        "max_reservations", "lifetime_sec", "lan_only", "created_at",
+    ] + (["users"] if include_users else [])
+    print_table("User groups", groups, columns, empty="No user groups found.")
 
 def edit_user_group_local(session) -> None:
 
@@ -309,6 +284,9 @@ def edit_user_group_local(session) -> None:
             return None  # cancelled
         if s == "":
             return ""    # unchanged
+        if s.lower() in {"all", "*"}:
+            print("List the device ids this group may use, e.g. '0,1,2'.")
+            return _prompt_devices_optional(msg)
         parts = [p for p in s.replace(",", " ").split() if p]
         try:
             vals = [int(p) for p in parts]
@@ -351,6 +329,7 @@ def edit_user_group_local(session) -> None:
     if group_name == "":
         group_name = None
 
+    _print_device_choices()
     devices_whitelist = _prompt_devices_optional(
         "New devices whitelist (e.g. 0,1,2 | Enter unchanged, c cancel): "
     )
@@ -377,6 +356,11 @@ def edit_user_group_local(session) -> None:
     if lifetime_sec == "":
         lifetime_sec = None
 
+    lan_only_raw = _prompt_raw("LAN only? (y/n | Enter unchanged, c cancel): ")
+    if lan_only_raw is None:
+        return
+    lan_only = None if lan_only_raw == "" else lan_only_raw.lower() in {"y", "yes"}
+
     # Ensure at least one change
     if (
         group_name is None
@@ -384,6 +368,7 @@ def edit_user_group_local(session) -> None:
         and max_res_time is None
         and max_reservations is None
         and lifetime_sec is None
+        and lan_only is None
     ):
         print("No changes specified. Nothing to do.")
         return
@@ -392,7 +377,7 @@ def edit_user_group_local(session) -> None:
     def _fmt_devices(v: Optional[List[int]]) -> str:
         if v is None:
             return "(unchanged)"
-        return ",".join(map(str, v))
+        return ",".join(map(str, v)) or "all"
 
     print("\nAbout to edit user group:")
     print(f"  group_id                : {group_id}")
@@ -401,6 +386,7 @@ def edit_user_group_local(session) -> None:
     print(f"  max_reservation_time_sec: {max_res_time if max_res_time is not None else '(unchanged)'}")
     print(f"  max_reservations        : {max_reservations if max_reservations is not None else '(unchanged)'}")
     print(f"  lifetime_sec            : {lifetime_sec if lifetime_sec is not None else '(unchanged)'}")
+    print(f"  lan_only                : {('yes' if lan_only else 'no') if lan_only is not None else '(unchanged)'}")
 
     if not _prompt_yes_no("Proceed? (y/n): "):
         return
@@ -412,6 +398,7 @@ def edit_user_group_local(session) -> None:
         max_reservation_time_sec=max_res_time,  # type: ignore[arg-type]
         max_reservations=max_reservations,      # type: ignore[arg-type]
         lifetime_sec=lifetime_sec,              # type: ignore[arg-type]
+        lan_only=lan_only,
     )
 
     if ok:
@@ -458,9 +445,20 @@ def make_enrollment_codes_local(session) -> None:
     if count is None:
         return
 
-    group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
-    if group_id is None:
+    groups = {int(g["group_id"]): g for g in user_group_handler.get_all_user_groups(include_users=False) or []}
+    if not groups:
+        print("No user groups yet. Create one first with `groups create`.")
         return
+    print("Your groups:")
+    for gid, g in sorted(groups.items()):
+        print(f"  {gid:>3}  {g['group_name']}" + ("  (LAN only)" if g.get("lan_only") else ""))
+    while True:
+        group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
+        if group_id is None:
+            return
+        if group_id in groups:
+            break
+        print(f"No group with id {group_id}; pick one from the list.")
 
     char_count = _prompt_int("Characters per code name? [10] (c to cancel): ", default=10, min_v=4)
     if char_count is None:
@@ -513,8 +511,17 @@ def make_enrollment_codes_local(session) -> None:
         uses=uses,
         duration_sec=duration_sec,
     )
-    print("\nCreated enrollment codes:")
-    print(result)
+    created = [r for r in user_group_handler.get_all_enrollment_codes() or [] if r.get("code_name") in code_names]
+    if not created:
+        print(f"\nNo codes were created{f': {result}' if result else ''}.")
+        return
+    print(f"\n{result}")
+    rows = _invites(created)
+    if rows and rows[0]["invite"] == rows[0]["code_name"]:
+        print(f"Hand these out as is; users connect first with: remoterf -c -a {lan_endpoint() or '<lan address>'}")
+    else:
+        print("Hand these out as is; users enter one at: remoterf --register")
+    print_table("Enrollment codes", rows, ["invite"])
 
 def remove_enrollment_code_local(session) -> None:
 
@@ -531,7 +538,9 @@ def remove_enrollment_code_local(session) -> None:
     mode = (mode or "n").lower()
 
     if mode.startswith("n"):
-        code_name = _prompt("Enter code_name (c to cancel): ")
+        code_name = _prompt("Enter code or invite (c to cancel): ")
+        if code_name:
+            code_name = code_name.rpartition("/")[2].strip()  # invite -> bare code
         if not code_name:
             return
         if not _yes(f"Delete enrollment code '{code_name}'? (y/n): "):
@@ -561,53 +570,62 @@ def remove_enrollment_code_local(session) -> None:
     print("Unknown option. Use 'n' or 'g'.")
 
 def list_enrollment_codes_local(session) -> None:
-    rows: List[Dict[str, Any]] = user_group_handler.get_all_enrollment_codes() or []
+    """Codes with the same group and parameters share one block, so 200 codes
+    for one class are a header and a few lines of invites, not 200 records."""
+    import textwrap
 
+    from ..common.utils.panel import content_width, print_panel
+
+    rows = _invites(user_group_handler.get_all_enrollment_codes() or [])
     if not rows:
-        print("No enrollment codes found.")
+        print_table("Enrollment codes", [], [], empty="No enrollment codes found.")
         return
+    groups = {
+        int(g["group_id"]): g
+        for g in user_group_handler.get_all_user_groups(include_users=False) or []
+    }
+    buckets: Dict[tuple, List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            int(row.get("group_id", -1)),
+            int(row.get("uses", 0)),
+            int(row.get("duration_sec", 0)),
+            row.get("federation_contract_id"),
+            row.get("federation_contract_version"),
+            row.get("allowed_issuer_deployment_id"),
+            row.get("cluster_name"),
+        )
+        buckets.setdefault(key, []).append(row)
 
-    preferred = [
-        "code_name",
-        "group_id",
-        "uses",
-        "uses_left",
-        "remaining_uses",
-        "duration_sec",
-        "expires_at",
-        "created_at",
-    ]
-    present = set().union(*(r.keys() for r in rows))
-    cols = [c for c in preferred if c in present] + [c for c in sorted(present) if c not in preferred]
-
-    def _fmt(v: Any) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, (list, tuple)):
-            return ",".join(str(x) for x in v)
-        return str(v)
-
-    def _cap(s: str, n: int = 48) -> str:
-        return s if len(s) <= n else s[: n - 3] + "..."
-
-    # Compute widths
-    widths = {c: len(c) for c in cols}
-    table: List[List[str]] = []
-    for r in rows:
-        row = []
-        for c in cols:
-            cell = _cap(_fmt(r.get(c, "")))
-            widths[c] = max(widths[c], len(cell))
-            row.append(cell)
-        table.append(row)
-
-    # Print
-    header = "  ".join(c.ljust(widths[c]) for c in cols)
-    sep = "  ".join("-" * widths[c] for c in cols)
-    print(header)
-    print(sep)
-    for row in table:
-        print("  ".join(row[i].ljust(widths[cols[i]]) for i in range(len(cols))))
+    width = content_width()
+    lines: List[str] = []
+    for (gid, uses, duration, contract, version, issuer, cluster_name), items in sorted(
+        buckets.items(), key=lambda kv: (kv[0][0], kv[0][3] or "", -kv[0][1], kv[0][2])
+    ):
+        group = groups.get(gid, {})
+        head = " · ".join([
+            f"cluster {cluster_name}" if cluster_name else f"group {gid} {group.get('group_name', '?')}".rstrip(),
+            f"{_plural(uses, 'use')} left",
+            _fmt_duration(duration),
+            _plural(len(items), "code"),
+        ] + (["LAN only"] if group.get("lan_only") else []))
+        if contract:
+            head += f" · federated: contract {contract} v{version}, issuer {issuer}"
+        if lines:
+            lines.append("")
+        lines += textwrap.wrap(head, width=width) or [head]
+        lines += [
+            "  " + line
+            for line in textwrap.wrap(
+                "  ".join(item["invite"] for item in items),
+                width=width - 2,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        ]
+    print(flush=True)
+    print_panel("Enrollment codes", lines, literal=True, max_width=None)
+    print(flush=True)
 
 def _resolve_download_dir() -> Path:
     """
@@ -707,7 +725,7 @@ def export_user_groups_csv_local() -> Optional[Path]:
 
 
 def export_enrollment_codes_csv_local() -> Optional[Path]:
-    rows: List[Dict[str, Any]] = user_group_handler.get_all_enrollment_codes() or []
+    rows: List[Dict[str, Any]] = _invites(user_group_handler.get_all_enrollment_codes() or [])
     if not rows:
         print("No enrollment codes found.")
         return None

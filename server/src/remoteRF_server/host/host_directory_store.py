@@ -37,6 +37,9 @@ def repo_root_from_file(file: str) -> Path:
     return p.parents[3]
 
 def cfg_dir_from_file(file: str) -> Path:
+    configured = os.getenv("REMOTERF_CONFIG_DIR")
+    if configured and configured.strip():
+        return Path(configured).expanduser()
     return repo_root_from_file(file) / ".config"
 
 def sanitize_env_key(s: str) -> str:

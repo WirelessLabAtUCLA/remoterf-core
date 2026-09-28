@@ -77,6 +77,18 @@ def _default_config_dir() -> Path:
     return Path.home() / ".config" / "remoterf"
 
 
+def _global_hostname() -> str | None:
+    """The deployment's public relay hostname, once Global has approved it."""
+    try:
+        from remoteRF_server.server.global_onboarding import hostname, participating
+
+        # As soon as a name has been chosen, not only once approved: adding it
+        # later would mean reissuing the CA and re-enrolling every client.
+        return hostname() if participating() else None
+    except Exception:
+        return None
+
+
 def _detect_local_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -86,71 +98,10 @@ def _detect_local_ip() -> str:
         s.close()
 
 
-def generate_certs(
-    *,
-    static_ip: str | None,
-    days: int = 365,
-    ca_days: int = 3650,
-    bits: int = 2048,
-    config_dir: Path | None = None,
-    out_subdir: str = "certs",
-    dns: list[str] | None = None,
-    cn: str | None = None,
-    force: bool = False,
-) -> None:
-    _ensure_openssl()
-
-    base_dir = (config_dir or _default_config_dir()).expanduser().resolve()
-    out_dir = (base_dir / out_subdir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    ips: list[str] = []
-    if static_ip and static_ip.strip():
-        ips.append(static_ip.strip())
-    else:
-        ips.append(_detect_local_ip())
-
-    dns = [d.strip() for d in (dns or []) if d and d.strip()]
-    sans: list[str] = [f"IP:{ip}" for ip in ips] + [f"DNS:{d}" for d in dns]
-    san_line = ",".join(sans)
-    cn = cn or (dns[0] if dns else ips[0])
-
-    ca_key = out_dir / "ca.key"
-    ca_crt = out_dir / "ca.crt"
-    srv_key = out_dir / "server.key"
-    srv_csr = out_dir / "server.csr"
-    srv_crt = out_dir / "server.crt"
-
-    targets = [ca_key, ca_crt, srv_key, srv_csr, srv_crt]
-
-    if not force:
-        existing = [p for p in targets if p.exists()]
-        if existing:
-            raise SystemExit(
-                "Refusing to overwrite existing files:\n  "
-                + "\n  ".join(str(p) for p in existing)
-                + "\nRe-run with --force to replace them."
-            )
-    else:
-        for p in targets:
-            if p.exists():
-                p.unlink()
-        extra = out_dir / "ca.srl"
-        if extra.exists():
-            extra.unlink()
-
-    _run(["openssl", "genrsa", "-out", str(ca_key), str(bits)])
-    _run([
-        "openssl", "req", "-x509", "-new", "-nodes",
-        "-key", str(ca_key),
-        "-sha256",
-        "-days", str(ca_days),
-        "-subj", "/CN=remoteRF Local CA",
-        "-out", str(ca_crt),
-    ])
-
-    _run(["openssl", "genrsa", "-out", str(srv_key), str(bits)])
-
+def _issue_server_cert(out_dir: Path, *, san_line: str, cn: str, days: int, bits: int) -> None:
+    """Sign a new server.crt for the existing server.key under the existing CA."""
+    ca_key, ca_crt = out_dir / "ca.key", out_dir / "ca.crt"
+    srv_key, srv_csr, srv_crt = out_dir / "server.key", out_dir / "server.csr", out_dir / "server.crt"
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
 
@@ -207,6 +158,79 @@ extendedKeyUsage = serverAuth
             "-extensions", "v3_req",
         ])
 
+
+def generate_certs(
+    *,
+    static_ip: str | None,
+    days: int = 365,
+    ca_days: int = 3650,
+    bits: int = 2048,
+    config_dir: Path | None = None,
+    out_subdir: str = "certs",
+    dns: list[str] | None = None,
+    cn: str | None = None,
+    force: bool = False,
+) -> None:
+    _ensure_openssl()
+
+    base_dir = (config_dir or _default_config_dir()).expanduser().resolve()
+    out_dir = (base_dir / out_subdir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ips: list[str] = []
+    if static_ip and static_ip.strip():
+        ips.append(static_ip.strip())
+    else:
+        ips.append(_detect_local_ip())
+
+    dns = [d.strip() for d in (dns or []) if d and d.strip()]
+    # An approved RemoteRF Global deployment is also reached at its public
+    # relay hostname, and TLS stays end-to-end through that relay — so the
+    # name has to be in this certificate or clients cannot verify it.
+    global_name = _global_hostname()
+    if global_name and global_name not in dns:
+        dns.append(global_name)
+    sans: list[str] = [f"IP:{ip}" for ip in ips] + [f"DNS:{d}" for d in dns]
+    san_line = ",".join(sans)
+    cn = cn or (dns[0] if dns else ips[0])
+
+    ca_key = out_dir / "ca.key"
+    ca_crt = out_dir / "ca.crt"
+    srv_key = out_dir / "server.key"
+    srv_csr = out_dir / "server.csr"
+    srv_crt = out_dir / "server.crt"
+
+    targets = [ca_key, ca_crt, srv_key, srv_csr, srv_crt]
+
+    if not force:
+        existing = [p for p in targets if p.exists()]
+        if existing:
+            raise SystemExit(
+                "Refusing to overwrite existing files:\n  "
+                + "\n  ".join(str(p) for p in existing)
+                + "\nRe-run with --force to replace them."
+            )
+    else:
+        for p in targets:
+            if p.exists():
+                p.unlink()
+        extra = out_dir / "ca.srl"
+        if extra.exists():
+            extra.unlink()
+
+    _run(["openssl", "genrsa", "-out", str(ca_key), str(bits)])
+    _run([
+        "openssl", "req", "-x509", "-new", "-nodes",
+        "-key", str(ca_key),
+        "-sha256",
+        "-days", str(ca_days),
+        "-subj", "/CN=remoteRF Local CA",
+        "-out", str(ca_crt),
+    ])
+
+    _run(["openssl", "genrsa", "-out", str(srv_key), str(bits)])
+    _issue_server_cert(out_dir, san_line=san_line, cn=cn, days=days, bits=bits)
+
     print("\nGenerated certs/keys:")
     print(f"  Output dir: {out_dir}")
     print(f"  CA cert:    {ca_crt}")
@@ -242,6 +266,45 @@ extendedKeyUsage = serverAuth
     else:
         print("  Server: (failed to parse dates)")
 
+
+
+def certificate_names(cert_path: Path) -> tuple[list[str], list[str]]:
+    """(IP SANs, DNS SANs) of a PEM certificate."""
+    from cryptography import x509
+    from cryptography.x509.oid import ExtensionOID
+
+    cert = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
+    try:
+        san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+    except x509.ExtensionNotFound:
+        return [], []
+    return (
+        [str(ip) for ip in san.get_values_for_type(x509.IPAddress)],
+        list(san.get_values_for_type(x509.DNSName)),
+    )
+
+
+def ensure_certificate_names(cert_dir: Path, names: list[str]) -> bool:
+    """Add missing DNS names to server.crt by reissuing it under the existing
+    CA and key, keeping its expiry. Returns True when a new cert was written;
+    False when nothing was missing or there are no certs to amend yet."""
+    cert_dir = Path(cert_dir)
+    files = [cert_dir / n for n in ("ca.key", "ca.crt", "server.key", "server.crt")]
+    if not all(f.exists() for f in files):
+        return False
+    ips, dns = certificate_names(cert_dir / "server.crt")
+    missing = [n for n in names if n and n not in dns]
+    if not missing:
+        return False
+    _ensure_openssl()
+    dns = dns + missing
+    _, srv_na = _x509_dates(cert_dir / "server.crt")
+    _, ca_na = _x509_dates(cert_dir / "ca.crt")
+    ends = [d for d in (srv_na, ca_na) if d]
+    days = max(1, (min(ends) - datetime.now(timezone.utc)).days) if ends else 365
+    san_line = ",".join([f"IP:{ip}" for ip in ips] + [f"DNS:{d}" for d in dns])
+    _issue_server_cert(cert_dir, san_line=san_line, cn=dns[0], days=days, bits=2048)
+    return True
 
 
 import argparse

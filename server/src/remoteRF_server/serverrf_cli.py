@@ -184,6 +184,7 @@ def _tos_ack_path() -> Path:
     return _cfg_dir() / "tos.env"
 
 
+DEFAULT_GRPC_PORT = 61005
 _TOS_VERSION = "2026"
 _TOS_URL = "https://remoterf.net/tos"
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
@@ -197,38 +198,41 @@ def _tos_acknowledged() -> bool:
 
 
 def _print_tos_acknowledgement() -> None:
-    print(
-        "\n"
-        "RemoteRF 2026\n"
-        "Terms of Service Acknowledgement\n"
-        "\n"
-        "By continuing, you confirm that you have reviewed and agree to the\n"
-        "RemoteRF Terms of Service and understand that use of the client and\n"
-        "service is at your own risk. RemoteRF is not liable for losses or\n"
-        "damages arising from use of the platform.\n"
-        "\n"
-        f"Terms of Service: {_TOS_URL}\n"
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    print()
+    print_panel(
+        "Terms of Service",
+        [
+            f"{marker()} RemoteRF 2026",
+            "",
+            "By continuing, you confirm that you have reviewed and agree",
+            "to the RemoteRF Terms of Service and understand that use of",
+            "the client and service is at your own risk. RemoteRF is not",
+            "liable for losses or damages arising from use of the",
+            "platform.",
+            "",
+            f"Terms of Service: {_TOS_URL}",
+        ],
     )
+    print()
 
 
 def _ensure_tos_acknowledged() -> bool:
     if _tos_acknowledged():
         return True
 
-    _print_tos_acknowledgement()
-    while True:
-        try:
-            answer = input("Do you agree to the RemoteRF Terms of Service? (yes/no): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("\nTerms of Service acknowledgement is required before starting the server.")
-            return False
+    from remoteRF_server.common.utils.panel import confirm
 
-        if answer in {"y", "yes"}:
-            break
-        if answer in {"n", "no"}:
-            print("Terms of Service not accepted. Server startup cancelled.")
-            return False
-        print("Please answer yes or no.")
+    _print_tos_acknowledgement()
+    # No default: accepting terms is never something a bare Enter should do.
+    accepted = confirm("Do you agree to the RemoteRF Terms of Service?")
+    if accepted is None:
+        print("\n  Terms of Service acknowledgement is required before starting the server.")
+        return False
+    if not accepted:
+        print("  Terms of Service not accepted. Server startup cancelled.")
+        return False
 
     _write_env_kv(
         _tos_ack_path(),
@@ -240,132 +244,154 @@ def _ensure_tos_acknowledged() -> bool:
             "REMOTERF_TOS_ACKNOWLEDGED_BY": getpass.getuser(),
         },
     )
-    print(f"Terms of Service acknowledgement saved to: {_tos_ack_path()}")
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+    printf(f"  Saved to {_tos_ack_path()}", Sty.GRAY)
     return True
+
+# -----------------------------
+# First-run setup
+# -----------------------------
+
+def _detect_lan_address() -> str:
+    import socket
+
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("192.0.2.1", 1))
+            return probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        return "127.0.0.1"
+
+
+def _ensure_network_configured() -> bool:
+    """Ask for the address and ports on first run, instead of failing later.
+
+    Runs before the RemoteRF Global question so the address this deployment
+    reports to Global is the one the operator actually chose.
+    """
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    kv = _read_env_kv(_server_env_path())
+    if kv.get("GRPC_PORT") and kv.get("CERT_PORT"):
+        return True
+
+    detected = _detect_lan_address()
+    print()
+    print_panel(
+        "Network setup",
+        [f"{marker()} Where clients reach this server. Enter keeps the default."],
+    )
+    print()
+    try:
+        address = input(f"  Address on your network [{detected}]: ").strip() or detected
+        grpc_raw = input(f"  gRPC port [{DEFAULT_GRPC_PORT}]: ").strip() or str(
+            DEFAULT_GRPC_PORT
+        )
+        cert_raw = input(f"  Certificate port [{int(grpc_raw) + 1}]: ").strip() or str(
+            int(grpc_raw) + 1
+        )
+    except (EOFError, KeyboardInterrupt, ValueError):
+        print("\n  Setup cancelled.")
+        return False
+
+    try:
+        grpc_port, cert_port = int(grpc_raw), int(cert_raw)
+    except ValueError:
+        print("  Ports must be whole numbers.")
+        return False
+    for port, name in ((grpc_port, "gRPC port"), (cert_port, "certificate port")):
+        if _validate_port(port, name=name):
+            print(f"  {name} is out of range.")
+            return False
+    if grpc_port == cert_port:
+        print("  The two ports must differ.")
+        return False
+
+    kv.update(GRPC_PORT=str(grpc_port), CERT_PORT=str(cert_port), STATIC_IP=address)
+    _write_env_kv(_server_env_path(), kv)
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+    printf(f"  Saved to {_server_env_path()}", Sty.GRAY)
+    return True
+
+
+def _ensure_certificates() -> bool:
+    """Issue the deployment's TLS material on first run.
+
+    Deliberately after the RemoteRF Global question: if this deployment asked
+    for a public name, that name belongs in the certificate from the start.
+    Adding it later means reissuing the CA, which breaks every enrolled client.
+    """
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    certs = _certs_dir()
+    if (certs / "server.crt").exists() and (certs / "server.key").exists():
+        return True
+
+    kv = _read_env_kv(_server_env_path())
+    address = (kv.get("STATIC_IP") or "").strip() or _detect_lan_address()
+    names: List[str] = []
+    try:
+        from remoteRF_server.server.global_onboarding import hostname, participating
+
+        if participating() and hostname():
+            names.append(hostname())
+    except Exception:  # noqa: BLE001 - certificates must not depend on Global
+        pass
+
+    print()
+    print_panel(
+        "Certificates",
+        [f"{marker()} Issuing TLS for " + ", ".join([address, *names]) + "."],
+    )
+    print()
+    result = _gen_certs(
+        static_ip=address,
+        days=365,
+        ca_days=3650,
+        bits=2048,
+        dns=names,
+        cn=None,
+        force=False,
+        no_detect_ip=True,
+        quiet=True,
+    )
+    if result not in (None, 0):
+        return False
+    printf(f"  Saved to {certs}", Sty.GRAY)
+    return True
+
+
+def _ensure_certificate_names() -> None:
+    """A Global hostname chosen after the certificates were issued goes into
+    server.crt now, under the existing CA, so enrolled clients keep their trust."""
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+    try:
+        from remoteRF_server.server.global_onboarding import hostname, participating
+        from remoteRF_server.tools.gen_certs import ensure_certificate_names
+
+        name = hostname() if participating() else None
+        if name and ensure_certificate_names(_certs_dir(), [name]):
+            printf(f"  Server certificate now also covers {name} (CA unchanged).", Sty.GRAY)
+    except Exception as exc:  # noqa: BLE001 - never block startup on this
+        printf(f"  Could not add the Global hostname to the server certificate: {exc}", Sty.YELLOW)
+
 
 # -----------------------------
 # Help (exact commands only)
 # -----------------------------
 
 def print_help() -> None:
-    print(
-        "RemoteRF Server CLI Help\n"
-        f"{BANNER_CREDIT}\n"
-        "\n"
-        "Usage:\n"
-        "  serverrf -h | --help\n"
-        "\n"
-        "Serve:\n"
-        "  serverrf -s | --serve              Run server (NOTE: only when -s/--serve is the FIRST arg)\n"
-        "  serverrf --serve --headless         Run without the interactive administration shell\n"
-        "\n"
-        "Certs:\n"
-        "  serverrf --gen-certs <static_ip> [options]\n"
-        "  serverrf --show-certs [-v]\n"
-        "  serverrf --wipe-certs [-y]\n"
-        "\n"
-        "Ports:\n"
-        "  serverrf -c | --config [options]\n"
-        "\n"
-        "Port options:\n"
-        "  --main-port <int>                  Set GRPC_PORT\n"
-        "  --cert-port <int>                  Set CERT_PORT\n"
-        "  --show | -s                        Show current ports and static IP\n"
-        "  -w | --wipe [-y]                   Wipe ONLY port config (server.env)\n"
-        "\n"
-        "Hosts:\n"
-        "  serverrf --host --token-create <host_id> [--length <int>]   Create/rotate host token\n"
-        "  serverrf --host --show                     Show all host token records\n"
-        "  serverrf --host --delete <host_id>         Delete host token record\n"
-        "  serverrf --host --wipe [-y]                Wipe ALL host token records\n"
-        "  serverrf --host --list --secrets           (optional) include salt/hash\n"
-        "\n"
-        "Devices:\n"
-        "  serverrf -d | --device [options]\n"
-        "  Inventory: ~/.config/remoterf/devices.yml (canonical YAML)\n"
-        "\n"
-        "Device options:\n"
-        "  --add --pluto <id:name:iio_serial>  Add an ADALM-Pluto\n"
-        "  --add --pluto-mimo <id:name:iio_serial>\n"
-        "                                      Add an ADALM-Pluto MIMO (all channels enabled)\n"
-        "  --add --rtl-sdr <id:name:selector>   Add an RTL-SDR by serial or index=N\n"
-        "  --add --ti-mmwave <id:name:cp2105_serial>\n"
-        "                                      Add a TI mmWave dual-UART radar\n"
-        "  --add --usrp-2901 <id:name:serial>  Add a serial-bound NI USRP-2901\n"
-        "  --add --usrp2901 <id:name:serial>   Legacy alias for --usrp-2901\n"
-        "  --add --usrp <id:name:serial>       Legacy alias for --usrp-2901\n"
-        "  --add --usrp-b205-mini <id:name:serial>\n"
-        "                                      Add a serial-bound USRP B205-mini\n"
-        "  --add --usrp-n210 <id:name:addr>    Add an address-bound N210\n"
-        "  --add --usrp-profile <id:name:profile:selector>\n"
-        "                                      Add any registered USRP profile\n"
-        "  --remove <id>                       Remove device\n"
-        "  --edit-name <id> <name>             Override device name\n"
-        "  --show | -s                         Show all devices\n"
-        "  -w | --wipe [-y]                    Wipe device inventory\n"
+    from remoteRF_server.server.commands import cmd_help
 
-        "\n"
-        "Cert options (for --gen-certs):\n"
-        "  --days <int>        Server cert validity in days (default: 365)\n"
-        "  --ca-days <int>     CA cert validity in days (default: 3650)\n"
-        "  --bits <int>        RSA key size (default: 2048)\n"
-        "  --dns <name>        DNS SAN entry (repeatable)\n"
-        "  --cn <name>         Common Name (defaults to first SAN entry)\n"
-        "  --force             Overwrite existing certs/keys\n"
-        "  --no-detect-ip      Do not auto-detect IP when none provided\n"
-        "\n"
-        "Global:\n"
-        "  -y, --yes           Skip wipe confirmation prompts\n"
-        "  -v, --verbose       With --show-certs, also print x509 details (requires openssl)\n"
-        "\n"
-        "Gist Status:\n"
-        "  serverrf --gist --set --id <gist_id> --file <filename> [--token <tok> | --token-stdin]\n"
-        "  serverrf --gist --show [--secrets]\n"
-        "  serverrf --gist --wipe [-y]\n"
-        "\n"
-        "Examples:\n"
-        "  serverrf --gist --set --id 2a35e0... --file ucla-wlab-remoterf-status.json\n"
-        "  serverrf --gist --set --id 2a35e0... --file status.json --token-stdin\n"
-        "  serverrf --gist --show\n"
-        "  serverrf --gist --wipe -y\n"
-        "\n"
-        # "  serverrf --gen-certs 192.168.1.24 --dns rrf2 --dns rrf2.local --force\n"
-        "  serverrf --gen-certs 192.168.1.50 --days 3650 --force\n"
-        "  serverrf --show-certs -v\n"
-        "  serverrf --wipe-certs -y\n"
-        "\n"
-        "  serverrf --config --main-port 61005\n"
-        "  serverrf --config --cert-port 61006\n"
-        "  serverrf --config --show\n"
-        "  serverrf -c -s\n"
-        "  serverrf --config --wipe -y\n"
-        "\n"
-        "  serverrf --host --token-create lab-host-01 --length 8 --force\n"
-        "  serverrf --host --show\n"
-        "  serverrf --host --delete lab-host-01\n"
-        "  serverrf --host --wipe -y\n"
-        "\n"
-        "  serverrf --device --add --pluto 0:pluto_aaa:123123\n"
-        "  serverrf --device --add --pluto-mimo 1:pluto_mimo:104473f6\n"
-        "  serverrf --device --add --rtl-sdr 4:rtl_fm:serial=00000001\n"
-        "  serverrf --device --add --ti-mmwave 5:ti_radar:00DF4F69\n"
-        "  serverrf --device --add --usrp-2901 1:usrp2901_lab:31A2B3C\n"
-        "  serverrf --device --add --usrp-b205-mini 3:b205mini_lab:31E9F48\n"
-        "  serverrf --device --add --usrp-n210 2:n210_lab:192.168.137.21\n"
-        "  serverrf --device --add --usrp-profile 4:x310_lab:x3xx:192.168.10.2\n"
-        "  serverrf --device --show\n"
-        "  serverrf --device --wipe -y\n"
-        "\n"
-        "  serverrf -s\n"
-        "  serverrf --serve\n"
-        "  serverrf --serve --headless\n"
-        "\n"
-    )
+    cmd_help([])
 
-
-# -----------------------------
-# Serve
-# -----------------------------
 
 def _serve(*, headless: bool = False) -> int:
     """
@@ -374,6 +400,20 @@ def _serve(*, headless: bool = False) -> int:
     """
     if not _ensure_tos_acknowledged():
         return 1
+
+    # Network first: the address reported to RemoteRF Global has to be the one
+    # the operator chose, not a guess made before they were asked.
+    if not _ensure_network_configured():
+        return 1
+
+    from remoteRF_server.server.global_onboarding import ensure_consent, start_agent
+    if not ensure_consent():
+        return 1
+
+    if not _ensure_certificates():
+        return 1
+    _ensure_certificate_names()
+    start_agent()
 
     # UHD writes native log messages to stderr/std::clog. Set this before the
     # server imports device drivers so those messages cannot corrupt the
@@ -437,23 +477,25 @@ def _redact(s: str) -> str:
 
 
 def _gist_show(*, show_secrets: bool = False) -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
     p = _gist_env_path()
     if not p.exists():
         print(f"No gist config found (missing {p}).")
         return 0
 
     kv = _read_env_kv(p)
-    print(f"Gist config: {p}")
-    gid = kv.get("STATUS_GIST_ID", "")
-    fn = kv.get("STATUS_GIST_FILENAME", "")
     tok = kv.get("GITHUB_TOKEN", "")
-
-    print(f"  STATUS_GIST_ID={gid}")
-    print(f"  STATUS_GIST_FILENAME={fn}")
-    if show_secrets:
-        print(f"  GITHUB_TOKEN={tok}")
-    else:
-        print(f"  GITHUB_TOKEN={_redact(tok)}  (use --secrets to show)")
+    rows = [
+        f"{marker()} {p}",
+        "",
+        f"gist id   {kv.get('STATUS_GIST_ID', '')}",
+        f"filename  {kv.get('STATUS_GIST_FILENAME', '')}",
+        f"token     {tok if show_secrets else _redact(tok) + '  (use --secrets to show)'}",
+    ]
+    print()
+    print_panel("Gist status", rows, literal=True)
+    print()
     return 0
 
 
@@ -550,33 +592,34 @@ def _looks_like_pem_cert(p: Path) -> bool:
 
 
 def _show_certs(*, verbose: bool) -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
     d = _certs_dir()
-    print(f"Certs dir: {d}")
     if not d.exists():
-        print("  (missing)")
+        print(f"Certs dir: {d}\n  (missing)")
         return 1
 
     files = sorted([p for p in d.iterdir() if p.is_file()])
     if not files:
-        print("  (empty)")
+        print(f"Certs dir: {d}\n  (empty)")
         return 1
 
+    rows = [f"{marker()} {d}", ""]
     for p in files:
         try:
             size = p.stat().st_size
         except Exception:
             size = -1
-
         tag = ""
         if p.suffix in (".crt", ".pem") and _looks_like_pem_cert(p):
-            tag = " [cert]"
+            tag = "  [cert]"
         elif p.suffix == ".key":
-            tag = " [key]"
-        print(f"  - {p.name} ({size} bytes){tag}")
+            tag = "  [key]"
+        rows.append(f"{p.name} ({size} bytes){tag}")
 
     rc, _ = _run_capture(["openssl", "version"])
     if rc != 0:
-        print("\n(openssl not available; install it to view cert expiry)")
+        rows += ["", "(openssl not available; install it to view cert expiry)"]
     else:
         candidates: List[Path] = []
         ca = d / "ca.crt"
@@ -592,18 +635,20 @@ def _show_certs(*, verbose: bool) -> int:
             if p.suffix in (".crt", ".pem") and _looks_like_pem_cert(p):
                 candidates.append(p)
 
-        if candidates:
-            print("\nExpiry:")
-            for p in candidates:
-                na = _x509_notafter_utc(p)
-                if not na:
-                    print(f"  {p.name}: (could not read notAfter)")
-                    continue
-                remaining = _fmt_remaining(na)
-                local = na.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-                print(f"  {p.name}: expires {local}  ({remaining})")
-        else:
-            print("\nExpiry / Remaining:\n  (no cert files found)")
+        rows += ["", "Expiry:"]
+        if not candidates:
+            rows.append("  (no cert files found)")
+        for p in candidates:
+            na = _x509_notafter_utc(p)
+            if not na:
+                rows.append(f"  {p.name}: (could not read notAfter)")
+                continue
+            remaining = _fmt_remaining(na)
+            local = na.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            rows.append(f"  {p.name}: expires {local}  ({remaining})")
+    print()
+    print_panel("Certificates", rows, literal=True)
+    print()
 
     if not verbose:
         return 0
@@ -663,6 +708,7 @@ def _gen_certs(
     cn: Optional[str],
     force: bool,
     no_detect_ip: bool,
+    quiet: bool = False,
 ) -> int:
     gen_path = _gen_certs_path()
     if not gen_path.exists():
@@ -691,6 +737,14 @@ def _gen_certs(
     if cn:
         cmd += ["--cn", cn]
 
+    if quiet:
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        rc, output = _run_capture(cmd)
+        for line in output.splitlines():
+            printf("  " + line.rstrip() if line.strip() else "", Sty.GRAY)
+        return rc
+
     rc = _run(cmd)
     if rc == 0:
         print("Generated certs:")
@@ -705,28 +759,28 @@ def _gen_certs(
 # -----------------------------
 
 def _config_show_ports() -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
     p = _server_env_path()
     kv = _read_env_kv(p)
-
-    print(f"Port config: {p}")
-    if not p.exists():
-        print("  (missing)")
-    elif not kv:
-        print("  (empty)")
-
+    rows = [f"{marker()} {p}" + ("" if p.exists() else "  (missing)"), ""]
+    fields = []
     if "GRPC_PORT" in kv:
-        print(f"  MAIN_PORT={kv['GRPC_PORT']}")
+        fields.append(("main port", kv["GRPC_PORT"]))
     if "CERT_PORT" in kv:
-        print(f"  CERT_PORT={kv['CERT_PORT']}")
-
+        fields.append(("cert port", kv["CERT_PORT"]))
     static_ip, source, err = _resolve_static_ip(kv)
     if static_ip:
-        print(f"  STATIC_IP={static_ip}")
+        fields.append(("static ip", static_ip))
         if source != f"{p} (STATIC_IP)":
-            print(f"  STATIC_IP_SOURCE={source}")
+            fields.append(("ip source", source))
     else:
-        print("  STATIC_IP=(not set)")
-        print(f"  STATIC_IP_ERROR={err or f'could not resolve from {source}'}")
+        fields.append(("static ip", f"(not set) {err or f'could not resolve from {source}'}"))
+    width = max(len(k) for k, _ in fields)
+    rows += [f"{k:<{width}}  {v}" for k, v in fields]
+    print()
+    print_panel("Config", rows, literal=True)
+    print()
     return 0
 
 
@@ -1322,6 +1376,8 @@ def _device_remove(global_id_str: str) -> int:
 
 
 def _device_show() -> int:
+    from remoteRF_server.common.utils.panel import print_table
+
     p = _devices_yaml_path()
     if not p.exists() and not _devices_env_path().exists():
         print(f"No devices configured (missing {p}).")
@@ -1332,18 +1388,13 @@ def _device_show() -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    print(f"Devices: {p}")
-    if not recs:
-        print("  (none)")
-        return 0
-
-    for gid in sorted(recs.keys()):
-        r = recs[gid]
-        dtype = r.get("TYPE", "")
-        name = r.get("NAME", "")
-        ik = r.get("IDENT_KIND", "")
-        ident = r.get("IDENT", "")
-        print(f"  {gid}: type={dtype} name={name} {ik}={ident}")
+    rows = [
+        {"id": gid, "type": r.get("TYPE", ""), "name": r.get("NAME", ""),
+         r.get("IDENT_KIND", "ident") or "ident": r.get("IDENT", "")}
+        for gid, r in sorted(recs.items())
+    ]
+    columns = list(dict.fromkeys(k for row in rows for k in row))
+    print_table("Devices", rows, columns, empty=f"(none) -- {p}")
     return 0
 
 
@@ -1374,12 +1425,375 @@ def _wipe_devices_only(*, yes: bool) -> int:
 # -----------------------------
 # CLI parser (ONLY commands in help)
 # -----------------------------
+
+# -----------------------------
+# The command table (server/commands.py) calls these by name. Each works from
+# a shell and from the console prompt; missing arguments are asked for.
+# -----------------------------
+
+def _flag(argv: List[str], name: str) -> Optional[str]:
+    for i, tok in enumerate(argv):
+        if tok == f"--{name}" and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(f"--{name}="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def _flags(argv: List[str], name: str) -> List[str]:
+    return [argv[i + 1] for i, tok in enumerate(argv) if tok == f"--{name}" and i + 1 < len(argv)]
+
+
+def _positional(argv: List[str]) -> List[str]:
+    out, skip = [], False
+    for tok in argv:
+        if skip:
+            skip = False
+            continue
+        if tok.startswith("--") and "=" not in tok:
+            skip = True
+            continue
+        if not tok.startswith("-"):
+            out.append(tok)
+    return out
+
+
+def _yes(argv: List[str]) -> bool:
+    return "-y" in argv or "--yes" in argv
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    try:
+        value = input(f"  {prompt}{f' [{default}]' if default else ''}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+    return value or default
+
+
+def _prompt_session():
+    """A prompt for the interactive group/code editors: the console's own when
+    inside the server, a fresh one from a shell."""
+    from remoteRF_server.server import commands
+
+    if commands._IN_DAEMON:
+        from remoteRF_server.server.grpc_server import session
+
+        return session
+    from prompt_toolkit import PromptSession
+
+    return PromptSession()
+
+
+def _device_add_hackrf(spec: str) -> int:
+    try:
+        gid, name, serial = _parse_serial_add_spec(spec, serial_label="serial")
+    except Exception as e:
+        print(f"ERROR: invalid hackrf spec: {e}", file=sys.stderr)
+        return 2
+    recs = _read_device_records()
+    if gid in recs:
+        print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+    recs[gid] = {"TYPE": "hackrf", "NAME": name, "IDENT_KIND": "serial", "IDENT": serial}
+    _write_device_records(recs)
+    print(f"Added device: {gid} type=hackrf name={name} serial={serial}")
+    return 0
+
+
+_DEVICE_TYPES: Dict[str, Tuple[str, Any]] = {
+    "pluto": ("iio serial", lambda spec: _device_add_pluto(spec)),
+    "pluto-mimo": ("iio serial", lambda spec: _device_add_pluto_mimo(spec)),
+    "rtl-sdr": ("serial (or index=N)", lambda spec: _device_add_rtl_sdr(spec)),
+    "hackrf": ("serial", _device_add_hackrf),
+    "ti-mmwave": ("CP2105 serial", lambda spec: _device_add_ti_mmwave(spec)),
+    "usrp-2901": ("serial", lambda spec: _device_add_usrp(spec)),
+    "usrp-b205-mini": ("serial", lambda spec: _device_add_usrp_b205mini(spec)),
+    "usrp-n210": ("address", lambda spec: _device_add_usrp_n210(spec)),
+    "usrp-profile": ("profile:selector", lambda spec: _device_add_usrp_profile(spec)),
+}
+
+
+def cmd_devices_list(argv: List[str]) -> int:
+    from remoteRF_server.server import commands, control
+
+    if commands._IN_DAEMON:
+        from remoteRF_server.server.grpc_server import get_devices
+
+        get_devices()
+        return 0
+    reply = control.call(["devices", "list"])
+    if reply is not None:
+        sys.stdout.write(reply[1])
+        return reply[0]
+    return _device_show()
+
+
+def cmd_devices_add(argv: List[str]) -> int:
+    pos = _positional(argv)
+    dtype = (pos[0] if pos else _ask(f"Type ({', '.join(_DEVICE_TYPES)})")).lower()
+    if dtype not in _DEVICE_TYPES:
+        print(f"ERROR: unknown device type {dtype!r}; one of: {', '.join(_DEVICE_TYPES)}", file=sys.stderr)
+        return 2
+    label, add = _DEVICE_TYPES[dtype]
+    name = pos[1] if len(pos) > 1 else _ask("Name")
+    ident = (
+        _flag(argv, "serial") or _flag(argv, "addr")
+        or (f"index={_flag(argv, 'index')}" if _flag(argv, "index") else None)
+        or (f"{_flag(argv, 'profile')}:{_flag(argv, 'selector')}" if _flag(argv, "profile") else None)
+        or (pos[2] if len(pos) > 2 else None)
+        or _ask(label)
+    )
+    if not name or not ident:
+        print("ERROR: a name and an identifier are required", file=sys.stderr)
+        return 2
+    gid = _flag(argv, "id")
+    if gid is None:
+        recs = _read_device_records()
+        gid = str(max(recs) + 1 if recs else 0)
+    return int(add(f"{gid}:{name}:{ident}"))
+
+
+def cmd_devices_remove(argv: List[str]) -> int:
+    pos = _positional(argv)
+    return _device_remove(pos[0] if pos else _ask("Device id"))
+
+
+def cmd_devices_rename(argv: List[str]) -> int:
+    pos = _positional(argv)
+    gid = pos[0] if pos else _ask("Device id")
+    name = pos[1] if len(pos) > 1 else _ask("New name")
+    return _device_edit_name(gid, name)
+
+
+def cmd_devices_wipe(argv: List[str]) -> int:
+    return _wipe_devices_only(yes=_yes(argv))
+
+
+def cmd_groups_list(argv):
+    from remoteRF_server.server.user_group_cli import list_user_groups_local
+
+    list_user_groups_local(_prompt_session())
+
+
+def cmd_groups_create(argv):
+    from remoteRF_server.server.user_group_cli import make_user_group_local
+
+    make_user_group_local(_prompt_session())
+
+
+def cmd_groups_edit(argv):
+    from remoteRF_server.server.user_group_cli import edit_user_group_local
+
+    edit_user_group_local(_prompt_session())
+
+
+def cmd_groups_remove(argv):
+    from remoteRF_server.server.user_group_cli import remove_user_group_local
+
+    remove_user_group_local(_prompt_session())
+
+
+def cmd_groups_csv(argv):
+    from remoteRF_server.server.user_group_cli import export_user_groups_csv_local
+
+    export_user_groups_csv_local()
+
+
+def cmd_codes_list(argv):
+    from remoteRF_server.server.user_group_cli import list_enrollment_codes_local
+
+    list_enrollment_codes_local(_prompt_session())
+
+
+def cmd_codes_create(argv):
+    from remoteRF_server.server.user_group_cli import make_enrollment_codes_local
+
+    make_enrollment_codes_local(_prompt_session())
+
+
+def cmd_codes_remove(argv):
+    from remoteRF_server.server.user_group_cli import remove_enrollment_code_local
+
+    remove_enrollment_code_local(_prompt_session())
+
+
+def cmd_codes_csv(argv):
+    from remoteRF_server.server.user_group_cli import export_enrollment_codes_csv_local
+
+    export_enrollment_codes_csv_local()
+
+
+def cmd_hosts_token(argv: List[str]) -> int:
+    from .host.host_auth_token import create_host_token
+
+    pos = _positional(argv)
+    host_id = pos[0] if pos else _ask("Host id")
+    if not host_id:
+        return 2
+    length = int(_flag(argv, "length") or 8)
+    try:
+        token = create_host_token(host_id, length=length, overwrite="--force" in argv)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
+    print(f'On the host, run:\n  hostrf --config --host {host_id} "{token}"')
+    return 0
+
+
+def cmd_hosts_tokens(argv: List[str]) -> int:
+    from .host.host_auth_token import show_host_tokens, wipe_all_host_tokens
+
+    if "wipe" in argv:
+        if not _yes(argv) and _ask("This deletes ALL host tokens. Type 'wipe' to confirm") != "wipe":
+            print("  Cancelled.")
+            return 1
+        print(f"Wiped {wipe_all_host_tokens()} host token record(s).")
+        return 0
+    show_host_tokens(include_secrets="--secrets" in argv, file=sys.stdout)
+    return 0
+
+
+def cmd_hosts_forget(argv: List[str]) -> int:
+    from .host.host_auth_token import delete_host_token
+
+    pos = _positional(argv)
+    host_id = pos[0] if pos else _ask("Host id")
+    if delete_host_token(host_id):
+        print(f"Deleted host token: {host_id}")
+        return 0
+    print(f"No host token found for: {host_id}")
+    return 1
+
+
+def cmd_certs_show(argv: List[str]) -> int:
+    return _show_certs(verbose="-v" in argv or "--verbose" in argv)
+
+
+def cmd_certs_reset(argv: List[str]) -> int:
+    pos = _positional(argv)
+    kv = _read_env_kv(_server_env_path())
+    ip = pos[0] if pos else ((kv.get("STATIC_IP") or "").strip() or _detect_lan_address())
+    if not _yes(argv):
+        print("  This replaces the CA: every enrolled client must re-run `remoterf -c` afterwards.")
+        if _ask("Type 'reset' to continue") != "reset":
+            print("  Cancelled.")
+            return 1
+    return _gen_certs(
+        static_ip=ip, days=int(_flag(argv, "days") or 365), ca_days=int(_flag(argv, "ca-days") or 3650),
+        bits=2048, dns=_flags(argv, "dns"), cn=None, force=True, no_detect_ip=True,
+    )
+
+
+def cmd_config_show(argv: List[str]) -> int:
+    return _config_show_ports()
+
+
+def cmd_config_wipe(argv: List[str]) -> int:
+    return _config_wipe_ports(yes=_yes(argv))
+
+
+def cmd_db_export(argv: List[str]) -> int:
+    """Archive the whole config root (databases, devices, keys, certs) into ~/Downloads."""
+    import sqlite3
+    import tarfile
+    import tempfile
+
+    root = _cfg_dir()
+    pos = _positional(argv)
+    out_dir = Path(pos[0]).expanduser() if pos else Path.home() / "Downloads"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    archive = out_dir / f"remoterf-export-{stamp}.tgz"
+    with tempfile.TemporaryDirectory() as tmp, tarfile.open(archive, "w:gz") as tar:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix == ".sock" or path.name.endswith("-journal"):
+                continue
+            arcname = str(Path("remoterf") / path.relative_to(root))
+            if path.suffix == ".db":
+                # A consistent snapshot even while the server is writing.
+                snapshot = Path(tmp) / path.name
+                with sqlite3.connect(path) as src, sqlite3.connect(snapshot) as dst:
+                    src.backup(dst)
+                tar.add(snapshot, arcname=arcname)
+            else:
+                tar.add(path, arcname=arcname)
+    os.chmod(archive, 0o600)
+    print(f"Exported {root} -> {archive}")
+    return 0
+
+
+def cmd_certs_wipe(argv: List[str]) -> int:
+    return _wipe_certs(yes=_yes(argv))
+
+
+def cmd_config_ports(argv: List[str]) -> int:
+    pos = _positional(argv)
+    grpc = pos[0] if pos else _ask("gRPC port", str(DEFAULT_GRPC_PORT))
+    cert = pos[1] if len(pos) > 1 else _ask("Certificate port", str(int(grpc) + 1))
+    try:
+        return _config_set_ports(main_port=int(grpc), cert_port=int(cert))
+    except ValueError:
+        print("ERROR: ports must be whole numbers", file=sys.stderr)
+        return 2
+
+
+def cmd_global(argv: List[str]) -> int:
+    from remoteRF_server.server.global_onboarding import main as global_main
+
+    rc = global_main(list(argv))
+    if rc == 0:
+        _ensure_certificate_names()
+    return rc
+
+
+def cmd_federation(argv: List[str]) -> int:
+    from remoteRF_server.server.federation.cli import main as federation_main
+
+    return federation_main(list(argv))
+
+
+def cmd_gist_show(argv: List[str]) -> int:
+    return _gist_show(show_secrets="--secrets" in argv)
+
+
+def cmd_gist_set(argv: List[str]) -> int:
+    import getpass
+
+    pos = _positional(argv)
+    gist_id = pos[0] if pos else _ask("Gist id")
+    filename = pos[1] if len(pos) > 1 else _ask("File name")
+    token = sys.stdin.readline().strip() if "--token-stdin" in argv else getpass.getpass("  GitHub token: ").strip()
+    if not (gist_id and filename and token):
+        print("ERROR: gist id, file name and token are required", file=sys.stderr)
+        return 2
+    return _gist_set(gist_id=gist_id, filename=filename, token=token)
+
+
+def cmd_gist_wipe(argv: List[str]) -> int:
+    return _gist_wipe(yes=_yes(argv))
+
+
+def _status_or_usage() -> int:
+    from remoteRF_server.server import control
+
+    reply = control.call(["status"])
+    if reply is None:
+        print("The server is not running. Start it with: serverrf -s")
+    else:
+        sys.stdout.write(reply[1])
+    print("Commands: serverrf help")
+    return 0
+
+
 def main() -> int:
+    from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
     argv = list(sys.argv[1:])
 
     if len(argv) == 0:
-        print("invalid args, expect serverrf <args>, run serverrf --help for more info", file=sys.stderr)
-        return 2
+        return _status_or_usage()
 
     # help
     if argv[0] in ("--help", "-h", "-help", "--h"):
@@ -1388,17 +1802,37 @@ def main() -> int:
 
     # IMPORTANT: ONLY "serverrf -s/--serve" (first arg) starts the server.
     if argv[0] in ("--serve", "-s"):
-        if len(argv) == 1:
-            return _serve()
-        if len(argv) == 2 and argv[1] == "--headless":
-            return _serve(headless=True)
-        else:
+        from remoteRF_server.server import console
+
+        flags = set(argv[1:])
+        if not flags <= {"--headless", "--foreground", "--daemon"} or len(flags) > 1:
             print(
-                "ERROR: -s/--serve accepts only the optional --headless flag.",
+                "ERROR: -s/--serve accepts one of --headless, --foreground or --daemon.",
                 file=sys.stderr,
             )
             return 2
+        if "--headless" in flags:
+            return _serve(headless=True)
+        # The console: attach to the running server, or start one. Inside the
+        # console this same command runs the server for real.
+        if console.attached() or "--foreground" in flags or not console.available():
+            if not console.available() and not console.attached():
+                printf("tmux is not installed; running in the foreground (Ctrl-C stops the server).", Sty.GRAY)
+            return _serve()
+        if "--daemon" in flags:
+            return 0 if console.start_detached(_cfg_dir(), ["--serve"]) else 1
+        return console.attach_or_start(_cfg_dir(), ["--serve"])
 
+    if not argv[0].startswith("-"):
+        from remoteRF_server.server.commands import dispatch
+
+        return dispatch(argv, in_daemon=False)
+
+    printf("  (old flag form; `serverrf help` shows the current commands)", Sty.GRAY)
+    return _legacy_main(argv)
+
+
+def _legacy_main(argv: List[str]) -> int:
     yes = False
     verbose = False
 
@@ -1796,7 +2230,7 @@ def main() -> int:
     if device_mode and (config_mode or show_certs or wipe_certs or (gen_ip is not None)):
         print("ERROR: --device cannot be combined with config/cert commands. Run them separately.", file=sys.stderr)
         return 2
-    
+
     if host_mode and (device_mode or config_mode or show_certs or wipe_certs or (gen_ip is not None)):
         print("ERROR: --host cannot be combined with device/config/cert commands. Run them separately.", file=sys.stderr)
         return 2
@@ -1859,7 +2293,7 @@ def main() -> int:
             tok = getpass.getpass("GitHub token (won't echo): ").strip()
 
         return int(_gist_set(gist_id=gist_id, filename=gist_filename, token=tok))
-            
+
     # ----------------
     # Host mode execution
     # ----------------

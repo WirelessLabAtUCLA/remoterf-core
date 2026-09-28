@@ -68,44 +68,50 @@ def _apply_initial_settings(device, settings):
 
 def connect_pluto_mimo(
     *,
-    serial,
+    serial="",
+    usb="",
     rx_enabled_channels=None,
     tx_enabled_channels=None,
     initial_settings=None,
 ):
     serial = (serial or "").strip()
-    if not serial:
-        print("An adalm_pluto_mimo serial must be provided")
+    usb = (usb or "").strip()
+    if not serial and not usb:
+        print("An adalm_pluto_mimo serial or usb bus address must be provided")
         return None
 
     try:
-        out = subprocess.check_output(
-            ["iio_info", "-s"],
-            text=True,
-            stderr=subprocess.STDOUT,
-        )
-
-        usb = None
-        for line in out.splitlines():
-            if (f"serial={serial}" in line) or (f"hw_serial={serial}" in line):
-                m = re.search(r"\[usb:([^\]]+)\]", line)
-                if m:
-                    usb = m.group(1).strip()
-                    break
-
         if not usb:
-            print(f"No adalm_pluto_mimo device found with serial {serial}")
-            return None
+            out = subprocess.check_output(
+                ["iio_info", "-s"],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+
+            for line in out.splitlines():
+                if (f"serial={serial}" in line) or (f"hw_serial={serial}" in line):
+                    m = re.search(r"\[usb:([^\]]+)\]", line)
+                    if m:
+                        usb = m.group(1).strip()
+                        break
+
+            if not usb:
+                print(f"No adalm_pluto_mimo device found with serial {serial}")
+                return None
 
         dev = adi.ad9361(f"usb:{usb}")
         dev.rx_enabled_channels = _normalize_channels(rx_enabled_channels, [0, 1])
         dev.tx_enabled_channels = _normalize_channels(tx_enabled_channels, [0, 1])
         _apply_initial_settings(dev, initial_settings or {})
-        print(f"Connected to adalm_pluto_mimo serial={serial} via usb:{usb}")
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        printf(f"Connected to adalm_pluto_mimo serial={serial} via usb:{usb}", Sty.GRAY)
         return dev
 
     except Exception as e:
-        print(f"Failed to connect to adalm_pluto_mimo serial={serial}: {e}")
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        printf(f"Failed to connect to adalm_pluto_mimo serial={serial}: {e}", Sty.GRAY)
         return None
 
 
@@ -122,6 +128,7 @@ class PlutoMIMOSchema(PlutoSchema):
     def make_device(**kwargs):
         return connect_pluto_mimo(
             serial=kwargs.get("serial"),
+            usb=kwargs.get("usb"),
             rx_enabled_channels=kwargs.get("rx_enabled_channels"),
             tx_enabled_channels=kwargs.get("tx_enabled_channels"),
             initial_settings=kwargs,

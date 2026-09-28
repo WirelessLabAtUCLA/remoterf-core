@@ -1,0 +1,20 @@
+syntax = "proto3";
+package remote_rf;
+import "grpc.proto";
+
+// Generic Gate E action transport. Authorization remains destination-local.
+service FederationV2 {
+  rpc Execute (FederationRequest) returns (FederationResponse);
+}
+
+message FederationRequest {
+  string protocol_version = 1;
+  string grant = 2;
+  string request_json = 3;
+}
+
+message FederationResponse {
+  string protocol_version = 1;
+  string signed_result = 2;
+  ErrorEnvelope error = 3;
+}

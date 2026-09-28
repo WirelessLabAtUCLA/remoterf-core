@@ -71,7 +71,9 @@ def connect_pluto(*, serial: str):
             return None
 
         dev = adi.Pluto(f"usb:{usb}")
-        print(f"Connected to Pluto serial={serial} via usb:{usb}")
+        from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+        printf(f"Connected to Pluto serial={serial} via usb:{usb}", Sty.GRAY)
         return dev
 
     except Exception as e:

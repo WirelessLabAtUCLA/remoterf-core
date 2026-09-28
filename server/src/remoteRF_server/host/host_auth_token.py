@@ -290,18 +290,8 @@ def wipe_all_host_tokens() -> int:
     return len(host_keys)
 
 def show_host_tokens(*, include_secrets: bool = False, file=sys.stdout) -> None:
-    recs = list_host_token_records(include_secrets=include_secrets)
-    if not recs:
-        print(f"No host tokens found ({_hosts_auth_path()}).", file=file)
-        return
+    from ..common.utils.panel import print_table
 
-    print(f"Host tokens ({_hosts_auth_path()}):", file=file)
-    for r in recs:
-        host_id = r.get("host_id", "")
-        status = r.get("status", "")
-        created = r.get("created_utc", "")
-        updated = r.get("updated_utc", "")
-        print(f"  - {host_id}  status={status}  created={created}  updated={updated}", file=file)
-        if include_secrets:
-            print(f"      salt={r.get('salt','')}", file=file)
-            print(f"      hash={r.get('hash','')}", file=file)
+    recs = list_host_token_records(include_secrets=include_secrets)
+    columns = ["host_id", "status", "created_utc", "updated_utc"] + (["salt", "hash"] if include_secrets else [])
+    print_table("Host tokens", recs, columns, empty=f"No host tokens found ({_hosts_auth_path()}).")

@@ -16,13 +16,10 @@
 import sqlite3
 import threading
 from typing import Tuple 
-from pathlib import Path
 from datetime import datetime
 
-from functools import wraps
-
 from ..common.utils import *
-from .device_manager import get_all_devices
+from .device_manager import get_registered_devices
 from .user_group_handler import user_group_handler
 
 class userperms:
@@ -119,10 +116,14 @@ class perms_db:
         if end_time < datetime.now():
             return False, 'End time must not be in the past'
         
-        # check if device exists
-        devices = get_all_devices()
+        # check if device is registered (Policy B: live connectivity is
+        # operational state, not reservation eligibility -- a registered
+        # device may be reserved for a future interval even while it is
+        # currently offline; connectivity is enforced separately, when the
+        # reservation is actually exercised)
+        devices = get_registered_devices()
         if device_id not in devices:
-            return False, 'Invalid device ID. Device either does not exist or is disconnected.'
+            return False, 'Invalid device ID. Device does not exist.'
         
         # check reservation duration
         reservation_duration = (end_time - start_time).total_seconds()
@@ -221,6 +222,23 @@ class perms_db:
             print("An error occurred:", e)
 
     @db_connection
+    def ensure_user(self, username: str) -> None:
+        """Add the minimal role only when no role exists; never reset one."""
+        self.cursor.execute(
+            """
+            SELECT 1 FROM Users WHERE Username = ?
+            UNION ALL SELECT 1 FROM PowerUsers WHERE Username = ?
+            UNION ALL SELECT 1 FROM Admins WHERE Username = ?
+            LIMIT 1
+            """,
+            (username, username, username),
+        )
+        if self.cursor.fetchone() is None:
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO Users (Username) VALUES (?)", (username,)
+            )
+
+    @db_connection
     def set_admin(self, username:str):
         print(f"Setting {username} as an admin")
         inpu = input(f"Are you sure you want to set {username} as an admin? \nThis gives them unrestricted access. (Y/N): ") 
@@ -278,49 +296,19 @@ class perms_db:
     
     @db_connection
     def print_perms(self):
-        print("Printing all permissions:")
-        print("Users:")
-        # SQL query to select all users from the Users table
-        query = 'SELECT * FROM Users'
+        from ..common.utils.panel import print_table
 
-        # Execute the query
-        self.cursor.execute(query)
-
-        # Fetch all results
-        results = self.cursor.fetchall()
-
-        # Print the results
-        for result in results:
-            print(result)
+        self.cursor.execute("SELECT * FROM Users")
+        columns = [item[0] for item in self.cursor.description or []]
+        rows = [dict(zip(columns, r)) for r in self.cursor.fetchall() or []]
+        print_table("Permissions", rows, columns, empty="No users found.")
             
-        print("\nPowerUsers:")
-        # SQL query to select all users from the PowerUsers table
-        query = 'SELECT * FROM PowerUsers'
-        
-        # Execute the query
-        self.cursor.execute(query)
-        
-        # Fetch all results
-        results = self.cursor.fetchall()
-        
-        # Print the results
-        for result in results:
-            print(result)
-            
-        print("\nAdmins:")
-        # SQL query to select all users from the Admins table
-        query = 'SELECT * FROM Admins'
-        
-        # Execute the query
-        self.cursor.execute(query)
-        
-        # Fetch all results
-        results = self.cursor.fetchall()
-        
-        # Print the results
-        for result in results:
-            print(result)
-    
+        for label, table in (("PowerUsers", "PowerUsers"), ("Admins", "Admins")):
+            self.cursor.execute(f"SELECT * FROM {table}")
+            names = [item[0] for item in self.cursor.description or []]
+            rows = [dict(zip(names, r)) for r in self.cursor.fetchall() or []]
+            print_table(label, rows, names, empty="(none)")
+
     @db_connection
     def rm_db(self):
         # SQL command to delete all entries from all tables

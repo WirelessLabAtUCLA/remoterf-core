@@ -226,6 +226,223 @@ You most likely will need to port forward, etc.
 Troubleshooting:
 Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server. Depending on the setup, you may also have ISP firewalls.
 
+## RemoteRF federation v2 Phase 1
+
+The `global-dev` branch implements the development-only Phase-1 federation
+boundary. A Server can issue and verify participant-signed
+`federated_enroll` and `permissions_read` actions under explicit bilateral
+contracts. Destination permission reads use current local membership and
+expiry state; unknown principals return signed empty membership without
+allocation, while disabled principals return a signed error.
+
+Ordinary `ACC:get_perms` remains the native permission operation. When a
+federation HOME aggregator is configured, its exact local/federation summary
+is additive in `details.home_permissions`; local output survives remote
+failure and is safe with zero devices.
+
+Gate H (`remoterf-federation-core==0.10.1`) adds the federated device plane:
+`device_list`, `device_reservations`, `device_reserve`, `device_cancel`, and
+`device_rpc` under the `DEVICE_READ`, `DEVICE_RESERVE`, and `DEVICE_CONTROL`
+contract capabilities. A contract without them still grants no hardware
+reach. The destination decides everything from its own tables (enrolled proxy,
+local device permissions, quotas, overlap, a federation-created reservation
+that is live now) and runs the RPC after the grant transaction commits through
+the ordinary `RpcManager` dispatch; the reservation's bearer token never leaves
+this Server. See [federated devices](docs/federated-devices-gate-h.md).
+
+Streaming, the sample plane, and DynamicControlV2 are not federated. The old
+Global-v1 connector/catalog and relay-ingress account gate have been removed
+from the Server runtime. Production remains unchanged until a separate cutover
+is authorized.
+
+See [federated enrollment](docs/federated-enrollment-v2.md); the cross-project
+runtime boundary is documented in `remoterf-vps-global/docs/phase1-runtime.md`.
+
+## RemoteRF Global v0 — Server Setup
+
+RemoteRF Global v0 is an **optional, external** networking proof of concept. It
+lets a public client reach this server through a relay, without this server
+implementing, depending on, or even knowing about RemoteRF Global:
+
+```
+Public RemoteRF Client
+        |  existing RemoteRF protocol (unmodified)
+        v
+ucla.global.remoterf.net
+        |  transparent Layer-4 TCP forwarding
+        v
+DigitalOcean VPS
+        |  WireGuard
+        v
+UCLA RemoteRF Server   <-- this repo, unchanged behavior
+        |
+        v
+       SDRs
+```
+
+The VPS never terminates or interprets RemoteRF traffic — it forwards raw TCP
+bytes. The TLS relationship stays exactly what it already is:
+
+```
+RemoteRF Client  <-- existing RemoteRF TLS -->  UCLA RemoteRF Server
+```
+
+This server remains a completely normal, independent RemoteRF deployment. If
+`global.remoterf.net` is offline or never existed, this server and ordinary
+LAN clients are unaffected. Nothing in this repository implements WireGuard,
+global accounts, or federation — that all lives in the separate
+`remoterf-vps-global` infrastructure project.
+
+**Inspection finding:** the existing server already supports this path through
+configuration alone. No server source changes were required for v0 — see
+"How this was verified" below.
+
+### Required configuration on the UCLA server
+
+1. **Bind to all local interfaces** so both the LAN and the WireGuard
+   interface (`wg0`, `10.77.0.2`) can reach the gRPC and certificate services:
+
+   ```bash
+   serverrf --config --main-port 61005 --cert-port 61006   # unless already set
+   REMOTERF_BIND_HOST=0.0.0.0 serverrf --serve --headless
+   ```
+
+   `REMOTERF_BIND_HOST` already takes precedence over this server's normal
+   LAN-address auto-discovery (see `_get_bind_host()` in
+   `src/remoteRF_server/server/grpc_server.py`). Setting it to `0.0.0.0` does
+   **not** expose the server to the public Internet by itself — see
+   "Security model" below.
+
+2. **Add a DNS SAN for the public hostname**, alongside the existing LAN IP
+   SAN, so a client dialing `ucla.global.remoterf.net` can validate this
+   server's real certificate:
+
+   ```bash
+   serverrf --gen-certs <LAN-static-ip> \
+     --dns ucla.global.remoterf.net \
+     --force
+   ```
+
+   `gen_certs.py` already supports a repeatable `--dns` flag alongside the
+   required IP SAN — both land in the same certificate, and existing LAN
+   clients keep working off the IP SAN. This is a certificate **regeneration**
+   (existing files must be replaced with `--force`), so any device/host that
+   trusts the old `server.crt`/`ca.crt` needs the new `ca.crt` too.
+
+### Optional recommendation (not required for v0)
+
+- Restrict inbound access to the RemoteRF ports (`61005`/`61006`, or whatever
+  `serverrf --config --show` reports) at the host firewall to the WireGuard
+  peer `10.77.0.1` and the UCLA LAN/subnet, if you want a tighter posture than
+  "listen on 0.0.0.0 and rely on there being no public route to this host."
+  Do **not** apply this automatically — a wrong rule can lock out LAN clients.
+  Never expose the RemoteRF ports directly to the public Internet; the VPS is
+  the only public ingress point.
+
+### WireGuard (host OS, not this repository)
+
+WireGuard is configured entirely outside this Python package, at the UCLA
+host OS level (see `remoterf-vps-global` for the VPS/tunnel setup). This
+server only needs to know:
+
+- UCLA host tunnel address: `10.77.0.2` (interface `wg0`)
+- VPS peer address: `10.77.0.1`
+
+RemoteRF Server does not manage WireGuard keys, does not depend on a
+WireGuard library, and does not need to distinguish whether a client arrived
+via the LAN, via `wg0`, or via the VPS relay — all three are just TCP
+connections to the same bound socket.
+
+### Security model
+
+```
+UCLA LAN        ------> RemoteRF Server
+WireGuard wg0   ------> RemoteRF Server
+public Internet   X     (no direct inbound path)
+```
+
+- Binding to `0.0.0.0` means the *application* listens on all local
+  interfaces; it is host/firewall policy that decides where it is actually
+  *reachable*.
+- There is still no direct public inbound exposure of UCLA. Public traffic
+  only reaches this server after the VPS relay forwards it across WireGuard.
+- Existing TLS/mTLS, account, and reservation authorization are unchanged.
+  Nothing about this setup weakens application authentication.
+
+### Known limitation: client source IP
+
+With the v0 TCP relay, this server sees the WireGuard peer address
+(`10.77.0.1`) as the source for every publicly-relayed connection, not the
+original Internet client's address. This is expected and acceptable for v0 —
+no PROXY protocol or custom IP-forwarding mechanism is introduced. Real
+per-client attribution is future RemoteRF Global identity/audit work, not
+part of this proof of concept.
+
+### End-to-end verification
+
+On the UCLA host:
+
+```bash
+# 1. Confirm WireGuard is up (expect 10.77.0.2)
+ip addr show wg0
+wg show
+
+# 2. Confirm RemoteRF is listening on both the LAN and wg0 addresses
+ss -lntp | grep -E ':61005|:61006'
+```
+
+From the VPS:
+
+```bash
+# 3. Confirm connectivity to both RemoteRF services over WireGuard
+nc -vz 10.77.0.2 61005   # gRPC
+nc -vz 10.77.0.2 61006   # certificate bootstrap
+```
+
+Verify the certificate identity (run from anywhere that can reach the port):
+
+```bash
+# 4. Confirm the DNS SAN is present, e.g. dialing over the WireGuard address
+openssl s_client -connect 10.77.0.2:61005 -servername ucla.global.remoterf.net </dev/null 2>/dev/null \
+  | openssl x509 -noout -ext subjectAltName
+```
+
+From a laptop outside UCLA, using the existing RemoteRF client, unmodified:
+
+```bash
+# 5. Dial the public hostname through the VPS relay
+remoterf -c -a ucla.global.remoterf.net:61005
+```
+
+Then use the existing account/login/config/reservation/device flow and
+perform one harmless device operation. Success is the existing RemoteRF
+client reaching this unmodified server through
+`ucla.global.remoterf.net -> VPS -> WireGuard -> RemoteRF Server`, over the
+same RemoteRF protocol and TLS relationship as any LAN client.
+
+### How this was verified (no source changes required)
+
+- **Bind address**: `_get_bind_host()` reads `REMOTERF_BIND_HOST` first and
+  only falls back to LAN auto-discovery (a UDP "connect" trick, then
+  `127.0.0.1`) when it is unset. The result is passed straight into
+  `grpc.server(...).add_secure_port(f"{bind_host}:{port}", ...)` as a plain
+  string, so `0.0.0.0` binds normally. Covered by `tests/test_bind_host.py`.
+- **Ports**: `GRPC_PORT` and `CERT_PORT` (default `61005`/`61006` in this
+  repo's `.env.server`, overridable via `serverrf --config`) are the only two
+  ports an ordinary client needs.
+- **Certificate/bootstrap flow**: `cert_provider.py` binds to the *same*
+  `bind_host` as the gRPC service and serves `ca.crt` verbatim (raw TCP or a
+  minimal HTTP GET) — it contains no LAN-only metadata, redirects, or
+  IP-literal assumptions. Clients trust `ca.crt`; the server presents
+  `server.crt`, which is self-signed by that CA (not a public CA).
+- **TLS SANs**: `gen_certs.py` already builds `subjectAltName` from *both* an
+  IP entry and any number of `--dns` entries in one certificate, so DNS and
+  LAN IP identities coexist. Covered by `tests/test_gen_certs.py`.
+- **HostRF**: `HostTunnelServicer` is registered on the *same* `grpc.server`
+  instance as the main RPC services in `start_server_runtime()` — it shares
+  the same bind address and port, so it needs no separate v0 configuration
+  and nothing here changes its behavior.
+
 ## Server Device Configuration
 
 ADALM-Pluto, RTL-SDR, TI mmWave, and local or HostRF-owned UHD inventories are supported.

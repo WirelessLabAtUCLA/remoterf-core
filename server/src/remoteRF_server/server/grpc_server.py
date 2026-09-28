@@ -16,14 +16,12 @@
 
 from __future__ import annotations
 import threading
+import logging
 import socket
 import os
-import io
 import sys
 import time
 from dataclasses import dataclass, field
-
-from typing import Tuple 
 
 # os.system('clear')
 
@@ -43,8 +41,7 @@ from typing import Any
 
 import grpc
 
-import traceback
-import contextlib
+logger = logging.getLogger("remoteRF_server.grpc")
 
 from ..common.grpc import *
 from .reservation import reservation_handler
@@ -57,14 +54,13 @@ from .dynamic_v2 import (
 from .host_dynamic_v2 import host_session_proxy
 from .acc_perms import perms
 from ..common.utils import *
-from .device_manager import close_local_devices, get_all_devices, get_all_devices_str
+from .device_manager import close_local_devices, get_registered_devices, get_all_devices_str
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
-from .user_group_handler import user_group_handler, start_usergroup_cleanup_loop
+from .user_group_handler import start_usergroup_cleanup_loop
 
 from ..host import host_tunnel_server as hts
-from ..host.host_tunnel_server import HostTunnelRegistry, HostTunnelServicer
+from ..host.host_tunnel_server import HostTunnelServicer
 from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
-from ..common.grpc import grpc_host_pb2 as host_tunnel_pb2
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
@@ -72,6 +68,7 @@ from prompt_toolkit.output import DummyOutput
 
 from ..tools.gist_status import start_status_publisher
 from .cert_provider import start_cert_provider, stop_cert_provider
+from . import direct_path
 
 from pathlib import Path
 
@@ -161,7 +158,7 @@ load_dotenv(dotenv_path)
 # Implement the GenericRPC service
 class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
     def Call(self, request, context):
-        
+
         # Remote Admin
         # function_name_args = request.function_name.split(':')
         # if function_name_args[0] == "RemoteAdmin":
@@ -176,11 +173,18 @@ class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
         #     return grpc_pb2.GenericRPCResponse(
         #         results=remote_admin_call(function_name=function_name_args[1], args=request.args)
         #     )
-            
-        # Normal RPC
-        response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
+
+        # Normal RPC. Everything below reads RELAYED instead of the peer:
+        # LAN-only groups do not exist to a call that came through the relay.
+        from .global_onboarding import RELAYED, is_relayed
+
+        token = RELAYED.set(is_relayed(context.peer()))
+        try:
+            response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
+        finally:
+            RELAYED.reset(token)
         return grpc_pb2.GenericRPCResponse(results=response)
-    
+
 
 @dataclass
 class ServerRuntime:
@@ -191,6 +195,10 @@ class ServerRuntime:
     bind_host: str
     grpc_port: int
     cert_port: int
+    writer_lock: Any = None
+    federation_permissions: Any = None
+    federation_devices: Any = None
+    control_server: Any = None
     _stop_lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
 
@@ -209,6 +217,7 @@ class ServerRuntime:
         try:
             termination.wait(timeout=max(1.0, float(grace_sec) + 2.0))
         finally:
+            direct_path.shutdown()
             session_manager.close_all()
             host_session_proxy.close_all()
             close_local_devices()
@@ -220,6 +229,17 @@ class ServerRuntime:
                 and self.update_thread is not threading.current_thread()
             ):
                 self.update_thread.join(timeout=2.0)
+            if self.control_server is not None:
+                self.control_server.stop()
+                self.control_server = None
+            if self.writer_lock is not None:
+                self.writer_lock.close()
+                self.writer_lock = None
+            close_permissions = getattr(self.federation_permissions, "close", None)
+            if close_permissions is not None:
+                close_permissions()
+            if self.federation_devices is not None:
+                self.federation_devices.close()
 
 
 def _load_server_credentials(cert_dir: Path):
@@ -262,12 +282,45 @@ def start_server_runtime(
     include_host_tunnel: bool = True,
     run_reservation_updates: bool = True,
     publish_status: bool = True,
+    federation_executor: Any = None,
+    home_federation_enroller: Any = None,
+    home_federation_permissions: Any = None,
 ) -> ServerRuntime:
     bind_host = str(bind_host or local_ip)
     grpc_port = int(local_port if grpc_port is None else grpc_port)
     certificate_port = int(
         cert_port if certificate_port is None else certificate_port
     )
+    from remoteRF_server.common.utils.db_location import get_db_dir
+    from .federation.legacy_state import acquire_runtime_writer_lock
+
+    writer_lock = acquire_runtime_writer_lock(get_db_dir())
+    from .federation.runtime import federation_enabled
+
+    home_federation_devices = None
+
+    try:
+        if federation_enabled():
+            supplied = (
+                federation_executor,
+                home_federation_enroller,
+                home_federation_permissions,
+            )
+            if any(value is not None for value in supplied):
+                if not all(value is not None for value in supplied):
+                    raise RuntimeError("Refusing partial federation activation")
+            else:
+                from .federation.runtime import build_configured_server_federation
+
+                configured = build_configured_server_federation(reservation_handler)
+                federation_executor = configured.executor
+                home_federation_enroller = configured.enroller
+                home_federation_permissions = configured.permissions
+                home_federation_devices = configured.devices
+    except Exception:
+        logger.error("federation_readiness_failure component=server_composition")
+        writer_lock.close()
+        raise
     if cert_dir is None:
         xdg_config = Path(
             os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")
@@ -279,6 +332,9 @@ def start_server_runtime(
             )
         )
     cert_dir = Path(cert_dir)
+    direct_path.CERT_DIR = cert_dir
+    direct_path.BIND_HOST = bind_host
+    direct_path.UDP_PORT = int(os.getenv("REMOTERF_DIRECT_UDP_PORT", grpc_port) or 0)
 
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
@@ -286,6 +342,13 @@ def start_server_runtime(
     ]
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
+    reservation_handler.federation_enroller = home_federation_enroller
+    reservation_handler.federation_permissions = home_federation_permissions
+    reservation_handler.federation_devices = home_federation_devices
+    from .deployment.capabilities import register_capabilities
+    from .federation.destination import register_grpc_federation
+    register_capabilities(server)
+    register_grpc_federation(server, federation_executor)
     grpc_pb2_grpc.add_GenericRPCServicer_to_server(GenericRPCServicer(), server)
     grpc_pb2_grpc.add_DynamicControlV2Servicer_to_server(
         DynamicControlV2Servicer(), server
@@ -293,16 +356,17 @@ def start_server_runtime(
     grpc_pb2_grpc.add_SampleDataV1Servicer_to_server(
         SampleDataV1Servicer(), server
     )
-
     try:
         server_credentials = _load_server_credentials(cert_dir)
     except Exception as e:
+        writer_lock.close()
         _print_tls_credentials_error(cert_dir, e)
         raise SystemExit(2)
 
     if include_host_tunnel:
         reg = hts.get_tunnel_registry()
         if reg is None:
+            writer_lock.close()
             raise RuntimeError("host tunnel registry is unavailable")
         hts.TUNNEL_REGISTRY = reg
         host_tunnel_pb2_grpc.add_HostTunnelServicer_to_server(
@@ -315,6 +379,7 @@ def start_server_runtime(
         server_credentials,
     )
     if bound_grpc_port == 0:
+        writer_lock.close()
         raise RuntimeError(
             f"could not bind secure gRPC server to {bind_host}:{grpc_port}"
         )
@@ -330,6 +395,7 @@ def start_server_runtime(
         )
         reservation_handler.update_devices()
         server.start()
+        direct_path.start_listener()
         if run_reservation_updates:
             update_thread = threading.Thread(
                 target=update_devices,
@@ -348,9 +414,24 @@ def start_server_runtime(
         host_session_proxy.close_all()
         if cert_server is not None:
             stop_cert_provider(cert_server)
+        close_permissions = getattr(home_federation_permissions, "close", None)
+        if close_permissions is not None:
+            close_permissions()
+        if home_federation_devices is not None:
+            home_federation_devices.close()
+        writer_lock.close()
         raise
 
-    return ServerRuntime(
+    from .control import ControlServer
+
+    control_server = ControlServer(control_handler)
+    try:
+        control_server.start()
+    except OSError as exc:
+        logger.warning("control socket unavailable: %s", exc)
+        control_server = None
+    global _runtime
+    _runtime = ServerRuntime(
         grpc_server=server,
         cert_server=cert_server,
         stop_event=stop_event,
@@ -358,7 +439,12 @@ def start_server_runtime(
         bind_host=bind_host,
         grpc_port=int(bound_grpc_port),
         cert_port=int(cert_server.server_address[1]),
+        writer_lock=writer_lock,
+        federation_permissions=home_federation_permissions,
+        federation_devices=home_federation_devices,
+        control_server=control_server,
     )
+    return _runtime
 
 
 def update_devices(stop_event: threading.Event) -> None:
@@ -384,11 +470,29 @@ def serve() -> None:
 start_time = datetime.now()
 
 def welcome():
-    printf(f"Server running nominally.", Sty.BOLD)
-    printf(BANNER_CREDIT, Sty.GRAY)
-    printf(f"Local IP: ", Sty.DEFAULT, f"{local_ip}", Sty.ITALIC, f" | Port: ", Sty.DEFAULT, f"{local_port}", Sty.ITALIC)
-    # printf(f"   -> Started at ", Sty.DEFAULT, f"{start_time}", Sty.DEFAULT)
-    printf("Input ", Sty.DEFAULT, "'help'", Sty.BOLD," for help menu.", Sty.DEFAULT)
+    from ..common.utils.panel import marker, print_panel
+    from . import console
+
+    rows = [
+        f"{marker()} Server running nominally.",
+        BANNER_CREDIT,
+        "",
+        f"bind    {local_ip}:{local_port}",
+    ]
+    try:
+        from . import global_onboarding as g
+
+        if g.participating() and g.state() == "active" and g.hostname():
+            rows.append(f"global  {g.hostname()}")
+    except Exception:  # noqa: BLE001 - the banner never fails on Global state
+        pass
+    rows += ["", "Input 'help' for help menu."]
+    if console.attached():
+        rows.append("Ctrl-C leaves this console (server keeps running); quit stops it.")
+    # Breathing room after first-run setup and driver bookkeeping.
+    print()
+    print_panel("RemoteRF Server", rows, literal=True)
+    print()
 
 def clear():
     os.system('clear')
@@ -479,7 +583,7 @@ def set_acc():
                         break
                     try:
                         device_id = int(device_id)
-                        if device_id not in get_all_devices():
+                        if device_id not in get_registered_devices():
                             printf("Invalid device id.", Sty.GRAY)
                             continue
                         start_time = session.prompt(stylize("Enter start time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
@@ -514,11 +618,10 @@ def set_acc():
         print("Canceled. Exiting ...")
 
 def get_devices():
-    data = get_all_devices_str()
-    
-    printf("Devices:", Sty.BOLD)
-    for key, value in data.items():
-        printf(f"Device ID:", Sty.DEFAULT, f' {key}', Sty.MAGENTA, f" Device Name: ", Sty.DEFAULT, f"{(value)}", Sty.GRAY)
+    from ..common.utils.panel import print_table
+
+    rows = [{"device_id": key, "name": value} for key, value in sorted(get_all_devices_str().items())]
+    print_table("Devices", rows, ["device_id", "name"], empty="No devices configured.")
 
 def _fmt_ms_ago(ms: int) -> str:
     if not ms:
@@ -532,70 +635,44 @@ def _fmt_ms_ago(ms: int) -> str:
     return f"{dt/60_000:.1f}m"
 
 def _cmd_hosts_status() -> None:
+    from ..common.utils.panel import print_table
+
     reg = hts.get_tunnel_registry()
     assert reg is not None
-    
-    # print("\n[hosts status] registry debug")
-    # print(f"  hts module: {hts.__name__}")
-    # reg = hts.get_tunnel_registry(create=False)
-    # print(f"  registry id: {id(reg) if reg else None}\n")
-
     hosts = reg.list_hosts()     # host_id -> HostStatus
     devices = reg.list_devices() # device_id -> DeviceStatus
+    by_host: dict[str, int] = {}
+    for ds in devices.values():
+        by_host[ds.host_id or "-"] = by_host.get(ds.host_id or "-", 0) + 1
+    rows = [
+        {
+            "host_id": hid,
+            "online": hs.online,
+            "last_seen": f"{_fmt_ms_ago(hs.last_seen_ms)} ago",
+            "devices": by_host.get(hid, 0),
+        }
+        for hid, hs in sorted(hosts.items(), key=lambda kv: kv[0])
+    ]
+    print_table("Hosts (live)", rows, ["host_id", "online", "last_seen", "devices"])
 
-    # Build host -> device list
-    by_host: dict[str, list[str]] = {}
-    for did, ds in devices.items():
-        by_host.setdefault(ds.host_id or "-", []).append(did)
-
-    printf("Hosts:", Sty.BOLD)
-    if not hosts:
-        printf("  (none)", Sty.GRAY)
-        return
-
-    for hid, hs in sorted(hosts.items(), key=lambda kv: kv[0]):
-        dlist = sorted(by_host.get(hid, []))
-        printf(
-            "  ", Sty.DEFAULT,
-            f"{hid}", Sty.MAGENTA,
-            "  online=", Sty.DEFAULT, f"{hs.online}", Sty.GRAY if hs.online else Sty.GRAY,
-            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(hs.last_seen_ms)} ago", Sty.GRAY,
-            "  devices=", Sty.DEFAULT, f"{len(dlist)}", Sty.GRAY
-        )
-        for did in dlist:
-            ds = devices.get(did)
-            if ds is None:
-                continue
-            printf(
-                "     - ", Sty.DEFAULT,
-                f"{did}", Sty.MAGENTA,
-                "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
-                "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GRAY if ds.online else Sty.GRAY,
-                "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.GRAY
-            )
 
 def _cmd_devices_status() -> None:
+    from ..common.utils.panel import print_table
+
     reg = hts.get_tunnel_registry()
     assert reg is not None
+    rows = [
+        {
+            "device_id": did,
+            "host": ds.host_id or "-",
+            "local_id": ds.host_local_id,
+            "online": ds.online,
+            "last_seen": f"{_fmt_ms_ago(ds.last_seen_ms)} ago",
+        }
+        for did, ds in sorted(reg.list_devices().items(), key=lambda kv: kv[0])
+    ]
+    print_table("Devices (live)", rows, ["device_id", "host", "local_id", "online", "last_seen"])
 
-    devices = reg.list_devices()
-    printf("Devices (live):", Sty.BOLD)
-    if not devices:
-        printf("  (none)", Sty.GRAY)
-        return
-
-    for did, ds in sorted(devices.items(), key=lambda kv: kv[0]):
-        printf(
-            "  ", Sty.DEFAULT,
-            f"{did}", Sty.MAGENTA,
-            "  host=", Sty.DEFAULT, f"{ds.host_id or '-'}", Sty.GRAY,
-            "  local_id=", Sty.DEFAULT, f"{ds.host_local_id}", Sty.GRAY,
-            "  online=", Sty.DEFAULT, f"{ds.online}", Sty.GREEN if ds.online else Sty.RED,
-            "  last_seen=", Sty.DEFAULT, f"{_fmt_ms_ago(ds.last_seen_ms)} ago", Sty.BLUE
-        )
-        
-from typing import Iterable
-import contextlib
 
 def _repo_root_guess() -> Path:
     """
@@ -979,194 +1056,237 @@ def _cmd_hosts_wipe(*, yes: bool = False) -> None:
 from typing import Callable
 
 def _norm_cmd(s: str) -> str:
-    return " ".join((s or "").strip().split()).lower()
+    # Only the command words are case-insensitive (commands.normalize); the
+    # arguments -- verification codes, tokens, passwords -- must survive intact.
+    words = (s or "").strip().split()
+    if words and words[0].lower() == "serverrf":
+        words = words[1:]
+    return " ".join(words)
+
+def _cmd_detach() -> None:
+    from . import console
+
+    if console.attached():
+        printf("Server keeps running. ", Sty.GRAY, "serverrf -s", Sty.MAGENTA, " to come back.", Sty.GRAY)
+        console.detach()
+    else:
+        printf("Not in the console; the server runs in this terminal. Use quit to stop it.", Sty.GRAY)
+
 
 def _cmd_status() -> None:
+    from ..common.utils.panel import marker, print_panel
+    from . import global_onboarding as g
+
     try:
-        uptime = datetime.now() - start_time
-        printf("Status:", Sty.BOLD)
-        printf("  Started: ", Sty.DEFAULT, f"{start_time}", Sty.BLUE)
-        printf("  Uptime : ", Sty.DEFAULT, f"{str(uptime).split('.')[0]}", Sty.BLUE)
-        printf("  Bind   : ", Sty.DEFAULT, f"{local_ip}:{local_port}", Sty.MAGENTA)
-        printf("  Cert   : ", Sty.DEFAULT, f"{local_ip}:{cert_port}", Sty.MAGENTA)
-    except Exception:
-        printf("Status unavailable.", Sty.RED)
+        uptime = str(datetime.now() - start_time).split(".")[0]
+        fields = [
+            ("started", str(start_time).split(".")[0]),
+            ("uptime", uptime),
+            ("bind", f"{local_ip}:{local_port}"),
+            ("cert", f"{local_ip}:{cert_port}"),
+            ("devices", str(len(get_all_devices_str()))),
+        ]
+        kv = g.load()
+        if g.participating():
+            state = kv.get("GLOBAL_STATE", "unregistered")
+            fields += [
+                ("", ""),
+                ("global", f"{state} -- {g._STATE_SUMMARY.get(state, '')}".rstrip(" -")),
+                ("hostname", g.hostname() or "-"),
+                ("share LAN", kv.get("GLOBAL_SHARE_LAN", "no")),
+                ("tunnel", g.tunnel_state()),
+                ("last report", (kv.get("GLOBAL_LAST_REPORT_AT") or "-").split(".")[0]),
+            ]
+        else:
+            fields += [("", ""), ("global", "not participating (serverrf global join)")]
+        width = max(len(name) for name, _ in fields)
+        rows = [f"{marker()} Server running since {fields[0][1]}", ""]
+        rows += [f"{name:<{width}}  {value}" if name else "" for name, value in fields]
+        print()
+        print_panel("Server status", rows, literal=True)
+        print()
+    except Exception as exc:  # noqa: BLE001
+        printf(f"Status unavailable: {exc}", Sty.RED)
 
+# Canonical spellings only; the aliases in DISPATCH are deliberately unlisted.
 def help() -> None:
-    printf("RemoteRF Server Shell", Sty.BOLD)
-    printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands. Type ", Sty.DEFAULT, "quit", Sty.MAGENTA, " to exit.", Sty.DEFAULT)
-    print()
+    from .commands import cmd_help
 
-    printf("Server:", Sty.BOLD)
-    printf("  help, h                  ", Sty.MAGENTA, "- Show this help", Sty.DEFAULT)
-    printf("  clear                    ", Sty.MAGENTA, "- Clear the screen", Sty.DEFAULT)
-    printf("  status                   ", Sty.MAGENTA, "- Show server status (uptime/bind)", Sty.DEFAULT)
-    printf("  quit / exit              ", Sty.MAGENTA, "- Exit the shell", Sty.DEFAULT)
-    print()
+    cmd_help([])
 
-    printf("Users:", Sty.BOLD)
-    printf("  users list               ", Sty.MAGENTA, "- List accounts", Sty.DEFAULT)
-    printf("  users manage             ", Sty.MAGENTA, "- Manage a user (perms / delete / reservations)", Sty.DEFAULT)
-    printf("  users purge              ", Sty.MAGENTA, "- Remove ALL users", Sty.DEFAULT)
-    print()
 
-    printf("Devices:", Sty.BOLD)
-    printf("  devices list             ", Sty.MAGENTA, "- List devices", Sty.DEFAULT)
-    printf("  devices status          ", Sty.MAGENTA, "- Live device online/last_seen/route", Sty.DEFAULT)
-    print()
+_runtime: ServerRuntime | None = None
+_exit_action: str | None = None   # "quit" | "restart", set when asked from another thread
 
-    printf("Reservations:", Sty.BOLD)
-    printf("  reservations list        ", Sty.MAGENTA, "- List reservations", Sty.DEFAULT)
-    printf("  reservations purge       ", Sty.MAGENTA, "- Remove ALL reservations", Sty.DEFAULT)
-    print()
+# Spellings the console accepted before the shared command table.
+_OLD_ALIASES = {
+    "server status": "status", "u list": "users list", "accounts list": "users list",
+    "setacc": "users manage", "rm aa": "users purge", "show p": "users perms",
+    "show d": "devices list", "show r": "reservations list", "rm ar": "reservations purge",
+    "rm db": "db purge", "mk group": "groups create", "mk g": "groups create",
+    "rm group": "groups remove", "rm g": "groups remove", "edit group": "groups edit",
+    "edit g": "groups edit", "show g": "groups list", "show groups": "groups list",
+    "mk codes": "codes create", "mk code": "codes create", "mk c": "codes create",
+    "show c": "codes list", "rm codes": "codes remove", "rm code": "codes remove",
+    "rm c": "codes remove", "host status": "hosts status", "tunnel devices": "devices status",
+}
 
-    printf("Groups:", Sty.BOLD)
-    printf("  groups list              ", Sty.MAGENTA, "- List user groups", Sty.DEFAULT)
-    printf("  groups create            ", Sty.MAGENTA, "- Create a user group (interactive)", Sty.DEFAULT)
-    printf("  groups edit              ", Sty.MAGENTA, "- Edit a user group (interactive)", Sty.DEFAULT)
-    printf("  groups delete            ", Sty.MAGENTA, "- Delete a user group (interactive)", Sty.DEFAULT)
-    printf("  groups csv               ", Sty.MAGENTA, "- Export ALL user groups as CSV to Downloads", Sty.DEFAULT)
-    print()
 
-    printf("Enrollment Codes:", Sty.BOLD)
-    printf("  codes list               ", Sty.MAGENTA, "- List enrollment codes", Sty.DEFAULT)
-    printf("  codes create             ", Sty.MAGENTA, "- Create enrollment codes (interactive)", Sty.DEFAULT)
-    printf("  codes delete             ", Sty.MAGENTA, "- Delete an enrollment code (interactive)", Sty.DEFAULT)
-    printf("  codes csv                ", Sty.MAGENTA, "- Export ALL enrollment codes as CSV to Downloads", Sty.DEFAULT)
-    print()
-    
-    printf("Host Tunnel (live):", Sty.BOLD)
-    printf("  hosts status            ", Sty.MAGENTA, "- Live host online/last_seen/devices", Sty.DEFAULT)
-    printf("  hosts wipe              ", Sty.MAGENTA, "- Wipe persisted host directory state (and clear in-memory)", Sty.DEFAULT)
+def _console_argv(inpu: str) -> list[str]:
+    import shlex
 
-    printf("Database:", Sty.BOLD)
-    printf("  db purge                 ", Sty.MAGENTA, "- Remove all database entries", Sty.DEFAULT)
-    print()
+    cmd = _norm_cmd(inpu)
+    for old, new in _OLD_ALIASES.items():
+        if cmd.lower() == old or cmd.lower().startswith(old + " "):
+            cmd = new + cmd[len(old):]
+            break
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
+
 
 def server_input(inpu: str) -> bool:
-    cmd = _norm_cmd(inpu)
-    if not cmd:
+    """One console line. False when the server should stop."""
+    from .commands import RestartRequested, StopRequested, dispatch
+
+    argv = _console_argv(inpu)
+    if not argv:
         return True
+    global _exit_action
+    try:
+        dispatch(argv, in_daemon=True)
+    except StopRequested:
+        _exit_action = "quit"
+        return False
+    except RestartRequested:
+        _exit_action = "restart"
+        return False
+    except Exception:
+        # A broken command must never take the server down with it.
+        import traceback
 
-    def _stay(fn: Callable[[], None]) -> bool:
-        fn()
-        return True
+        traceback.print_exc()
+        printf("That command failed; the server is still running.", Sty.WARNING)
+    return True
 
-    DISPATCH: dict[str, Callable[[], bool]] = {
-        # ---- server ----
-        "help": lambda: _stay(help),
-        "h": lambda: _stay(help),
-        "?": lambda: _stay(help),
 
-        "clear": lambda: _stay(clear),
-        "cls": lambda: _stay(clear),
+def control_handler(argv: list[str]) -> int:
+    """A command sent by `serverrf …` from a shell; runs here, in the server."""
+    from .commands import RestartRequested, StopRequested, dispatch
 
-        "status": lambda: _stay(_cmd_status),
-        "server status": lambda: _stay(_cmd_status),
+    try:
+        return dispatch(argv, in_daemon=True)
+    except StopRequested:
+        _request_exit("quit")
+    except RestartRequested:
+        _request_exit("restart")
+    except Exception as exc:
+        print(f"That command failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
-        "quit": lambda: False,
-        "exit": lambda: False,
-        "q": lambda: False,
 
-        # ---- users ----
-        "users list": lambda: _stay(reservation_handler.print_all_accounts),
-        "u list": lambda: _stay(reservation_handler.print_all_accounts),
-        "accounts list": lambda: _stay(reservation_handler.print_all_accounts),
+def _request_exit(action: str) -> None:
+    """Make the main loop finish as if `quit`/`restart` had been typed."""
+    global _exit_action
+    _exit_action = action
+    app = getattr(session, "app", None)
+    loop = getattr(app, "loop", None)
+    if app is not None and app.is_running and loop is not None:
+        loop.call_soon_threadsafe(lambda: app.exit(result=action))
+    elif _runtime is not None:
+        # Headless: wake the main thread's wait(); it runs the full stop there
+        # (a thread spawned here would be a daemon and die with the process).
+        _runtime.stop_event.set()
 
-        "users manage": lambda: _stay(set_acc),
-        "users manage": lambda: _stay(set_acc),
-        "setacc": lambda: _stay(set_acc),  # old
 
-        "users purge": lambda: _stay(reservation_handler.remove_all_users),
-        "rm aa": lambda: _stay(reservation_handler.remove_all_users),  # old
+def _reexec() -> None:
+    """Restart in place: same pid's tmux window, same argv, fresh process."""
+    from . import global_onboarding as g
 
-        # perms (kept; optional to advertise)
-        "users perms": lambda: _stay(perms.print_perms),
-        "show p": lambda: _stay(perms.print_perms),  # old
+    g.stop_agent()
+    if sys.stdin.isatty():
+        os.system("stty sane")
+    os.execv(sys.executable, [sys.executable, "-m", "remoteRF_server.serverrf_cli", *sys.argv[1:]])
 
-        # ---- devices ----
-        "devices list": lambda: _stay(get_devices),
-        "show d": lambda: _stay(get_devices),  # old
 
-        # ---- reservations ----
-        "reservations list": lambda: _stay(reservation_handler.print_all_reservations),
-        "show r": lambda: _stay(reservation_handler.print_all_reservations),  # old
+# The shared command table calls these by name (commands.py).
+def cmd_status(argv): _cmd_status()
+def cmd_detach(argv): _cmd_detach()
+def cmd_clear(argv): clear()
+def cmd_devices_status(argv): _cmd_devices_status()
+def cmd_hosts_status(argv): _cmd_hosts_status()
+def cmd_hosts_wipe(argv): _cmd_hosts_wipe(yes=("-y" in argv or "--yes" in argv))
+def cmd_users_list(argv): reservation_handler.print_all_accounts()
+def cmd_users_manage(argv): set_acc()
+def cmd_users_perms(argv): perms.print_perms()
+def cmd_users_purge(argv): reservation_handler.remove_all_users()
+def cmd_reservations_list(argv): reservation_handler.print_all_reservations()
+def cmd_reservations_purge(argv): reservation_handler.remove_all_reservations()
+def cmd_db_purge(argv): reservation_handler.rm_db()
+def cmd_stats_purge(argv):
+    from . import reservation
 
-        "reservations purge": lambda: _stay(reservation_handler.remove_all_reservations),
-        "rm ar": lambda: _stay(reservation_handler.remove_all_reservations),  # old
+    if not ("-y" in argv or "--yes" in argv):
+        try:
+            resp = session.prompt(stylize("Type 'purge-stats' to confirm deleting the activity log: ", Sty.RED))
+        except KeyboardInterrupt:
+            printf("Cancelled.", Sty.GRAY)
+            return
+        if (resp or "").strip().lower() != "purge-stats":
+            printf("Purge aborted.", Sty.GRAY)
+            return
+    with reservation.log_lock:
+        try:
+            reservation.LOG_PATH.unlink()
+        except FileNotFoundError:
+            printf("No activity log to purge.", Sty.GRAY)
+            return
+    printf(f"Purged activity log: {reservation.LOG_PATH}", Sty.GRAY)
+def cmd_devices_list(argv): get_devices()
 
-        # ---- db ----
-        "db purge": lambda: _stay(reservation_handler.rm_db),
-        "rm db": lambda: _stay(reservation_handler.rm_db),  # old
 
-        # ---- groups ----
-        "groups create": lambda: _stay(lambda: make_user_group_local(session)),
-        "mk group": lambda: _stay(lambda: make_user_group_local(session)),  # old
-        "mk g": lambda: _stay(lambda: make_user_group_local(session)),      # old
+def cmd_reload_devices(argv):
+    from . import device_manager
 
-        "groups delete": lambda: _stay(lambda: remove_user_group_local(session)),
-        "rm group": lambda: _stay(lambda: remove_user_group_local(session)),  # old
-        "rm g": lambda: _stay(lambda: remove_user_group_local(session)),      # old
+    device_manager.reload_devices()
 
-        "groups edit": lambda: _stay(lambda: edit_user_group_local(session)),
-        "edit group": lambda: _stay(lambda: edit_user_group_local(session)),  # old
-        "edit g": lambda: _stay(lambda: edit_user_group_local(session)),      # old
 
-        "groups list": lambda: _stay(lambda: list_user_groups_local(session)),
-        "show g": lambda: _stay(lambda: list_user_groups_local(session)),      # old
-        "show groups": lambda: _stay(lambda: list_user_groups_local(session)), # old
-        "groups csv": lambda: _stay(export_user_groups_csv_local),
+def cmd_stop(argv):
+    from .commands import StopRequested
 
-        # ---- enrollment codes ----
-        "codes create": lambda: _stay(lambda: make_enrollment_codes_local(session)),
-        "mk codes": lambda: _stay(lambda: make_enrollment_codes_local(session)),  # old
-        "mk code": lambda: _stay(lambda: make_enrollment_codes_local(session)),   # old
-        "mk c": lambda: _stay(lambda: make_enrollment_codes_local(session)),      # old
+    raise StopRequested()
 
-        "codes list": lambda: _stay(lambda: list_enrollment_codes_local(session)),
-        "show c": lambda: _stay(lambda: list_enrollment_codes_local(session)),    # old
 
-        "codes delete": lambda: _stay(lambda: remove_enrollment_code_local(session)),
-        "rm codes": lambda: _stay(lambda: remove_enrollment_code_local(session)), # old
-        "rm code": lambda: _stay(lambda: remove_enrollment_code_local(session)),  # old
-        "rm c": lambda: _stay(lambda: remove_enrollment_code_local(session)),     # old
-        
-        # ---- host tunnel ----
-        "hosts status": lambda: _stay(_cmd_hosts_status),
-        "host status": lambda: _stay(_cmd_hosts_status),
+def cmd_restart(argv):
+    from .commands import RestartRequested
 
-        "devices status": lambda: _stay(_cmd_devices_status),
-        "tunnel devices": lambda: _stay(_cmd_devices_status),
-        
-        "codes csv": lambda: _stay(export_enrollment_codes_csv_local),
-    }
+    raise RestartRequested()
 
-    fn = DISPATCH.get(cmd)
-    if fn is None:
-        # allow: "hosts wipe" and "hosts wipe -y"
-        if cmd.startswith("hosts wipe"):
-            yes = ("-y" in cmd.split()) or ("--yes" in cmd.split())
-            _cmd_hosts_wipe(yes=yes)
-            return True
-
-        printf("Unknown command: ", Sty.RED, f"{inpu}", Sty.DEFAULT)
-        printf("Type ", Sty.DEFAULT, "help", Sty.MAGENTA, " to see commands.", Sty.DEFAULT)
-        return True
-
-    return fn()
 
 def main() -> int:
+    from . import console
+
     runtime = start_server_runtime()
     welcome()
     try:
-        while server_input(
-            session.prompt(stylize("server@remoterf: ", Sty.BOLD))
-        ):
-            pass
-    except (EOFError, KeyboardInterrupt):
-        pass
+        while True:
+            try:
+                if not server_input(session.prompt(stylize("serverrf> ", Sty.BOLD))):
+                    break
+            except (EOFError, KeyboardInterrupt):
+                if not console.attached():
+                    break
+                # In the console, Ctrl-C leaves; only `quit` stops the server.
+                printf("Server keeps running. Type ", Sty.GRAY, "quit", Sty.MAGENTA,
+                       " to stop it; ", Sty.GRAY, "serverrf -s", Sty.MAGENTA, " to come back.", Sty.GRAY)
+                console.detach()
     finally:
         runtime.stop()
+    if _exit_action == "restart":
+        _reexec()
+    printf("Stopped the RemoteRF server background process.", Sty.GRAY)
     return 0
 
 
@@ -1179,6 +1299,9 @@ def headless_main() -> int:
         pass
     finally:
         runtime.stop()
+    if _exit_action == "restart":
+        _reexec()
+    printf("Stopped the RemoteRF server background process.", Sty.GRAY)
     return 0
 
 

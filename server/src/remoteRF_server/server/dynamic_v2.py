@@ -55,6 +55,7 @@ from .device_manager import (
 from .v2_errors import (
     RemoteRFNativeUHDError,
     RemoteRFOverloadError,
+    RemoteRFPolicyError,
     RemoteRFProtocolError,
     RemoteRFReservationError,
     RemoteRFServerOverloadedError,
@@ -521,6 +522,17 @@ class DeviceSession:
     created_monotonic: float = field(default_factory=time.monotonic)
 
 
+def _refuse_partner_token(token: str) -> None:
+    """A HOME-minted token for a partner lab's device has no v2 channel here:
+    say so as a protocol error, so the Client takes the v1 device plane the
+    HOME does federate, instead of reading it as a dead reservation."""
+    from .reservation import reservation_handler
+
+    plane = getattr(reservation_handler, "federation_devices", None)
+    if plane is not None and plane.resolve_token(token) is not None:
+        raise RemoteRFProtocolError("partner devices use the v1 device plane")
+
+
 class SessionManager:
     def __init__(self):
         self._lock = threading.RLock()
@@ -560,6 +572,7 @@ class SessionManager:
         }
 
     def schema_for_token(self, token: str) -> dict:
+        _refuse_partner_token(token)
         gid = resolve_gid_for_token(token)
         if gid is None:
             raise RemoteRFReservationError("invalid token or inactive reservation")
@@ -577,6 +590,7 @@ class SessionManager:
         return factory()
 
     def open(self, token: str, requested_schema_hash: str = "") -> DeviceSession:
+        _refuse_partner_token(token)
         gid = resolve_gid_for_token(token)
         if gid is None:
             raise RemoteRFReservationError("invalid token or inactive reservation")
@@ -1267,6 +1281,7 @@ class DynamicControlV2Servicer(grpc_pb2_grpc.DynamicControlV2Servicer):
                         f"duplicate invoke keywords: {sorted(overlap)}"
                     )
                 args.update(extra_kwargs)
+
             result, mutations = session_manager.invoke(
                 request.session_id,
                 request.handle,

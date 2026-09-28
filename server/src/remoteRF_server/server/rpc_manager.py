@@ -15,7 +15,9 @@
 
 # from ..drivers.adalm_pluto.pluto_remote_server import PlutoServer
 # from .reservation import reservation_handler
-# from ..common.utils import *
+# import numpy as np
+
+from ..common.utils import *
 # from .device_manager import acquire_device, VirtualDevice
 # from ..host import host_tunnel_server as hts  
 
@@ -67,15 +69,34 @@
 
 import json
 
+import numpy as np
+
 from .reservation import reservation_handler
 from ..common.utils import *
 from ..common.grpc import grpc_pb2 as generic_pb2
-from .device_manager import acquire_device, VirtualDevice, get_device_schema, find_device_id_by_name, get_device_by_id, resolve_gid_for_token
+from .device_manager import acquire_device, acquire_device_by_gid, VirtualDevice, get_device_schema, find_device_id_by_name, get_device_by_id, resolve_gid_for_token
 from ..host import host_tunnel_server as hts
 
 
 def _normalize_device_rpc_type(value: str) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _wire(result, args: dict):
+    """map_arg, in the sample encoding the caller asked for (Gate I slice 3).
+
+    ``wire`` is opt-in per call: ``c64`` halves complex128 samples, ``i16``
+    quarters them when they are integer-valued IQ (a 12-bit ADC's are) and
+    otherwise falls back to c64. Anything else, or no flag, is as before.
+    """
+    from ..common.utils.process_arg import fits_iq16, map_iq16
+
+    wire = unmap_arg(args["wire"]) if "wire" in args else None
+    if wire in ("c64", "i16") and isinstance(result, np.ndarray) and np.iscomplexobj(result):
+        if wire == "i16" and fits_iq16(result):
+            return map_iq16(result)
+        return map_arg(result.astype(np.complex64))
+    return map_arg(result)
 
 
 class RpcManager:
@@ -111,30 +132,96 @@ class RpcManager:
 
         api_token = unmap_arg(args['a'])
 
+        federated = self._federated_route(token=api_token)
+        if federated is not None:
+            return self._federated_rpc(federated, function_name=function_name, args=args)
+
         try:
             with acquire_device(api_token) as (gid, dev):
-                self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
-
-                if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
-                    return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
-
-                if isinstance(dev, VirtualDevice):
-                    fwd_args = dict(args)
-                    fwd_args.pop('a', None)
-                    fwd_args['g'] = map_arg(int(gid))
-                    return hts.handle_host_device(
-                        hts.get_tunnel_registry(create=False),
-                        host_id=dev.host_id,
-                        device_id=dev.device_id,
-                        function_name=function_name,
-                        args=fwd_args,
-                        timeout_sec=10.0,
-                    )
-
-                return self._dispatch_local_schema(function_name=function_name, args=args, gid=gid, dev=dev)
+                return self._dispatch_acquired(
+                    function_name=function_name, args=args, gid=gid, dev=dev
+                )
 
         except Exception as e:
             return {'a': map_arg(str(e))}
+
+    # ── HOME device plane: a partner's device behind a HOME-minted token ──
+
+    def _federated_route(self, *, token=None, device_id=None):
+        """(local_account_id, alias row) when the call targets a partner device."""
+        plane = getattr(reservation_handler, "federation_devices", None)
+        if plane is None:
+            return None
+        if token is not None:
+            route = plane.resolve_token(token)
+            if route is not None:
+                return int(route["local_account_id"]), route
+        if device_id is not None:
+            alias = plane.alias(device_id)
+            if alias is not None:
+                # No account on a by-id schema lookup: borrow the HOME account
+                # that last reserved this alias; the owner still gates it on
+                # that proxy's visibility.
+                account = plane.account_for_alias(alias["alias_id"])
+                if account is not None:
+                    return account, alias
+        return None
+
+    def _federated_rpc(self, federated, *, function_name: str, args: dict) -> dict:
+        local_account_id, alias = federated
+        try:
+            results = reservation_handler.federation_devices.rpc(
+                local_account_id=local_account_id, alias=alias,
+                function_name=function_name, args=args,
+            )
+            if function_name.startswith("IDL:"):
+                # The Client learns here that this token drives a partner's
+                # device, and opens its direct path to that lab (Gate I).
+                results["federated"] = map_arg(alias["owner_deployment_id"])
+            return results
+        except Exception as e:
+            key = 'error' if function_name.startswith("IDL:") else 'a'
+            return {key: map_arg(str(e))}
+
+    def run_device_rpc_for_gid(self, *, gid: int, function_name: str, args: dict) -> dict:
+        """Run an ordinary device RPC against an already-authorized device.
+
+        The federated device path uses this: the destination has already
+        verified a one-time grant and a current reservation for this exact
+        principal and device, so there is no bearer token to resolve. The
+        driver dispatch below is the same one a native token-bearing call
+        takes, so hardware behaviour and locking are identical.
+        """
+
+        if not self._looks_like_device_rpc(function_name):
+            raise ValueError(f"not a device RPC: {function_name!r}")
+        with acquire_device_by_gid(int(gid)) as (resolved, dev):
+            return self._dispatch_acquired(
+                function_name=function_name, args=args, gid=resolved, dev=dev
+            )
+
+    def _dispatch_acquired(
+        self, *, function_name: str, args: dict, gid: int, dev: object
+    ) -> dict:
+        self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
+
+        if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
+            return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
+
+        if isinstance(dev, VirtualDevice):
+            fwd_args = dict(args)
+            fwd_args.pop('a', None)
+            fwd_args['g'] = map_arg(int(gid))
+            return hts.handle_host_device(
+                hts.get_tunnel_registry(create=False),
+                host_id=dev.host_id,
+                device_id=dev.device_id,
+                function_name=function_name,
+                args=fwd_args,
+                timeout_sec=10.0,
+            )
+
+        return self._dispatch_local_schema(function_name=function_name, args=args, gid=gid, dev=dev)
 
     def _validate_device_rpc_type(self, *, function_name: str, gid: int, dev: object) -> None:
         requested_type = function_name.split(':', 1)[0]
@@ -195,7 +282,7 @@ class RpcManager:
 
         if verb == "CALL0":
             result = dev.dispatch(f"call_{prop}", {})
-            return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
+            return {prop: _wire(result, args)} if result is not None else {prop: map_arg('None')}
 
         if verb == "CALL1":
             if 'arg1' not in args:
@@ -205,7 +292,7 @@ class RpcManager:
             return {prop: map_arg(result)} if result is not None else {prop: map_arg('None')}
 
         if verb == "CALLN":
-            reserved = {"a", "g", "token", "device_id", "device_name"}
+            reserved = {"a", "g", "token", "device_id", "device_name", "wire"}
             call_args = {
                 str(key): unmap_arg(value)
                 for key, value in dict(args).items()
@@ -296,6 +383,12 @@ class RpcManager:
             device_type     str   e.g. "pluto"
         """
         if sub == "get_drivers":
+            federated = self._federated_route(
+                token=unmap_arg(args['token']) if 'token' in args else None,
+                device_id=unmap_arg(args['device_id']) if 'device_id' in args else None,
+            )
+            if federated is not None:
+                return self._federated_rpc(federated, function_name="IDL:get_drivers", args=args)
             gid, err = self._resolve_idl_target(args)
             if err is not None or gid is None:
                 return {'error': map_arg(err or 'Unable to resolve device')}

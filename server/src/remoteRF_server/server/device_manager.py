@@ -533,7 +533,11 @@ def _seed_default_driver(
             _driver_sha256(source) + "\n",
             encoding="utf-8",
         )
-        print(f"Created default driver config at {target}")
+        # Routine first-run bookkeeping: present, but it should not compete
+        # with the operator's own prompts on a first start.
+        from ..common.utils.ansi_codes import Sty, printf
+
+        printf(f"Created default driver config at {target}", Sty.GRAY)
     except OSError as e:
         print(f"Warning: could not create default driver config {target}: {e}")
 
@@ -639,6 +643,14 @@ def _load_all_drivers() -> None:
             print(f"Driver load {fname}: {status}")
 
 
+def reload_devices() -> None:
+    """Re-read devices.yml and reconnect: `devices add/remove` on a running server."""
+    # ponytail: reconnects every local device, not just the changed one;
+    # diff against the current table if a reload mid-session ever hurts.
+    close_local_devices()
+    _init_from_env()
+
+
 _load_all_drivers()
 _init_from_env()
 _super_token_path()
@@ -682,6 +694,38 @@ def get_all_devices() -> Dict[int, Tuple[object, str, str]]:
             if _is_connected(st):
                 out[gid] = (st.dev, st.salt, st.hsh)  # dev may be VirtualDevice for host
         return out
+
+def get_registered_devices() -> Dict[int, Tuple[object, str, str]]:
+    """Devices known to this deployment's inventory (local devices.yml entries
+    and host devices known to the tunnel directory), regardless of whether
+    they are currently connected.
+
+    This defines reservation ELIGIBILITY: a registered device may be reserved
+    for a future interval even while it is offline right now, because live
+    connectivity is operational state, not scheduling eligibility. Use
+    get_all_devices() instead when live connected state is what matters, e.g.
+    granting a client active I/O access to a device.
+    """
+    _sync_host_devices()
+
+    with _state_lock:
+        return {
+            gid: (st.dev, st.salt, st.hsh) for gid, st in _devices.items()
+        }
+
+def describe_devices(ids) -> list[dict]:
+    """Name, type and live state for the given ids (unknown ids are skipped)."""
+    _sync_host_devices()
+    out = []
+    with _state_lock:
+        for gid in ids:
+            st = _devices.get(int(gid))
+            if st is None:
+                continue
+            out.append({"id": int(gid), "name": (st.name or f"device-{gid}").strip(),
+                        "type": st.dtype or "", "online": _is_connected(st)})
+    return out
+
 
 def get_all_devices_str() -> Dict[int, str]:
     _sync_host_devices()
@@ -1032,6 +1076,56 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
         yield int(gid), dev
     finally:
         lock.release()
+
+@contextmanager
+def acquire_device_by_gid(gid: int) -> Iterator[Tuple[int, object]]:
+    """Acquire an already-authorized device by its local id.
+
+    This performs NO authorization: the caller must already have established
+    that the principal may drive this device (a verified federation grant plus
+    a current reservation, for example). It exists so an authorized caller
+    need not be handed the device's bearer API token just to take the same
+    per-device I/O lock that acquire_device() takes.
+    """
+
+    _sync_host_devices()
+
+    with _state_lock:
+        st = _devices.get(int(gid))
+        if not st or not _is_connected(st) or st.dev is None:
+            raise RuntimeError("device disappeared / not connected")
+        lock = st.io_lock
+        dev = st.dev
+
+    lock.acquire()
+    try:
+        yield int(gid), dev
+    finally:
+        lock.release()
+
+
+def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
+    """Structured inventory for federated discovery.
+
+    Unlike get_all_devices_str(), which returns one pre-formatted display
+    string, this keeps name, type, and connectivity separate so a federation
+    peer can present them itself. It reports registered devices (Policy B),
+    marking current connectivity rather than hiding offline hardware.
+    """
+
+    _sync_host_devices()
+
+    with _state_lock:
+        return {
+            gid: {
+                "name": st.name or f"device {gid}",
+                "device_type": st.dtype or None,
+                "online": _is_connected(st),
+                "origin": st.origin,
+            }
+            for gid, st in _devices.items()
+        }
+
 
 # Optional: reload device definitions (atomic swap)
 

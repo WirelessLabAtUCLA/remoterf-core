@@ -231,6 +231,43 @@ class PlutoCompatTests(unittest.TestCase):
         self.assertEqual(ident, "104473f6")
         self.assertEqual(dtype, "adalm_pluto")
 
+    def test_pluto_mimo_connects_serialless_board_by_usb_address(self) -> None:
+        from remoteRF_server.drivers.adalm_pluto import pluto_mimo_schema
+
+        device = FakePluto()
+        with (
+            patch.object(
+                pluto_mimo_schema.adi,
+                "ad9361",
+                return_value=device,
+                create=True,
+            ) as ctor,
+            patch.object(pluto_mimo_schema.subprocess, "check_output") as scan,
+        ):
+            connected = pluto_mimo_schema.connect_pluto_mimo(
+                usb="1.27.5",
+                rx_enabled_channels=[0, 1],
+                tx_enabled_channels=[0, 1],
+            )
+
+        self.assertIs(connected, device)
+        ctor.assert_called_once_with("usb:1.27.5")
+        scan.assert_not_called()
+        self.assertEqual(device.rx_enabled_channels, [0, 1])
+        self.assertEqual(device.tx_enabled_channels, [0, 1])
+
+    def test_pluto_mimo_schema_forwards_usb_inventory_selector(self) -> None:
+        from remoteRF_server.drivers.adalm_pluto import pluto_mimo_schema
+
+        with patch.object(pluto_mimo_schema, "connect_pluto_mimo") as connect:
+            pluto_mimo_schema.PlutoMIMOSchema.make_device(
+                usb="1.27.5",
+                rx_enabled_channels=[0, 1],
+                tx_enabled_channels=[0, 1],
+            )
+
+        self.assertEqual(connect.call_args.kwargs["usb"], "1.27.5")
+
     def test_legacy_builtin_pluto_schema_is_registered_for_auto_upgrade(self) -> None:
         expected_hash = (
             "a3697eeef55827e0db7705685f8fe64b615468dd26057211de8b5805b9ecf583"
