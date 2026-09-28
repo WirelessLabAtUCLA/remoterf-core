@@ -256,6 +256,36 @@ class PlutoCompatTests(unittest.TestCase):
         self.assertEqual(device.rx_enabled_channels, [0, 1])
         self.assertEqual(device.tx_enabled_channels, [0, 1])
 
+    def test_pluto_mimo_finds_serialless_board_by_usb_port_after_reenumeration(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from remoteRF_server.drivers.adalm_pluto import pluto_mimo_schema
+
+        with tempfile.TemporaryDirectory() as sysfs:
+            port = Path(sysfs) / "1-2.3"
+            port.mkdir()
+            (port / "busnum").write_text("1\n")
+            (port / "devnum").write_text("42\n")
+            listing = (
+                "Available contexts:\n"
+                "\t0: 0456:b673 (Analog Devices Inc. PlutoSDR (ADALM-PLUTO)), serial=1044 [usb:1.9.5]\n"
+                "\t1: 0456:b673 (Analog Devices Inc. PlutoSDR (ADALM-PLUTO)), serial= [usb:1.42.5]\n"
+            )
+            device = FakePluto()
+            real_path = pluto_mimo_schema.Path
+            with (
+                patch.object(pluto_mimo_schema, "Path", lambda p: Path(sysfs) if p == "/sys/bus/usb/devices" else real_path(p)),
+                patch.object(pluto_mimo_schema.subprocess, "check_output", return_value=listing),
+                patch.object(pluto_mimo_schema.adi, "ad9361", return_value=device, create=True) as ctor,
+            ):
+                connected = pluto_mimo_schema.connect_pluto_mimo(usb_port="1-2.3")
+                missing = pluto_mimo_schema.connect_pluto_mimo(usb_port="1-9")
+
+        self.assertIs(connected, device)
+        ctor.assert_called_once_with("usb:1.42.5")
+        self.assertIsNone(missing)
+
     def test_pluto_mimo_schema_forwards_usb_inventory_selector(self) -> None:
         from remoteRF_server.drivers.adalm_pluto import pluto_mimo_schema
 

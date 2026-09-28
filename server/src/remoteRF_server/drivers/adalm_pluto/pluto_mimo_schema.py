@@ -21,6 +21,8 @@ from remoteRF_server.common.idl.pluto_schema import PlutoSchema
 
 import subprocess
 import re
+from pathlib import Path
+
 import adi
 
 
@@ -66,21 +68,46 @@ def _apply_initial_settings(device, settings):
 
 # == PLUTO MIMO Connection Logic ==
 
+def _usb_address_for_port(port):
+    """The libiio usb address (bus.address.interface) now behind a physical
+    USB port path such as "1-2.3" (Linux sysfs)."""
+    base = Path("/sys/bus/usb/devices") / port
+    try:
+        prefix = f"{int((base / 'busnum').read_text())}.{int((base / 'devnum').read_text())}."
+    except (OSError, ValueError):
+        return ""
+    out = subprocess.check_output(["iio_info", "-s"], text=True, stderr=subprocess.STDOUT)
+    for address in re.findall(r"\[usb:([^\]]+)\]", out):
+        if address.startswith(prefix):
+            return address.strip()
+    return ""
+
+
 def connect_pluto_mimo(
     *,
     serial="",
     usb="",
+    usb_port="",
     rx_enabled_channels=None,
     tx_enabled_channels=None,
     initial_settings=None,
 ):
     serial = (serial or "").strip()
     usb = (usb or "").strip()
-    if not serial and not usb:
-        print("An adalm_pluto_mimo serial or usb bus address must be provided")
+    usb_port = (usb_port or "").strip()
+    if not serial and not usb and not usb_port:
+        print("An adalm_pluto_mimo serial, usb bus address or usb_port must be provided")
         return None
 
     try:
+        if usb_port:
+            # A board without a serial keeps its port across re-enumeration;
+            # its bus address does not.
+            usb = _usb_address_for_port(usb_port)
+            if not usb:
+                print(f"No adalm_pluto_mimo device found on USB port {usb_port}")
+                return None
+
         if not usb:
             out = subprocess.check_output(
                 ["iio_info", "-s"],
@@ -129,6 +156,7 @@ class PlutoMIMOSchema(PlutoSchema):
         return connect_pluto_mimo(
             serial=kwargs.get("serial"),
             usb=kwargs.get("usb"),
+            usb_port=kwargs.get("usb_port"),
             rx_enabled_channels=kwargs.get("rx_enabled_channels"),
             tx_enabled_channels=kwargs.get("tx_enabled_channels"),
             initial_settings=kwargs,
