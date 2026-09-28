@@ -10,6 +10,12 @@ a HOME user per worker, and the real Client library end to end.
   the owner close the path and the client re-punch.
 - `soak_run.py fwd|rev --workers N --minutes M` — N workers at once, one summary
   line each; edit the hosts, register code and cluster codes at the top.
+- `real_sdr.py` — a real cabled-loopback Pluto: reserve (partner with `--owner`,
+  else the HOME's own), TX a tone, verify peak and SNR on RX for three tones,
+  then `rx()` for `--minutes`. Run from `~/soak` next to `soak_client.py`.
+- `real_ota.py --tx <alias> --rx <alias>[,<alias>]` — over the air between real
+  radios (Pluto or USRP either side): two tones per LO, each RX must see the
+  exact tone step. Aliases as listed to the user (partner devices 1000000+id).
 - `native_punch.py` — the native Gate I punch from this machine to a HOME reached
   over its relay: tells a network that cannot punch from a partner-path bug.
 
