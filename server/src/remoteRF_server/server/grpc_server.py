@@ -338,7 +338,11 @@ def start_server_runtime(
 
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 100 * 1024 * 1024)
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+        # Clients ping every 20 s while a call is open, to notice a dead
+        # network; a long device call that sends no data must not be struck
+        # for it (gRPC's default allowance is one ping per 5 minutes).
+        ('grpc.http2.min_ping_interval_without_data_ms', 10_000),
     ]
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=100), options=options)
