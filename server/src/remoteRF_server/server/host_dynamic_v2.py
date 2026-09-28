@@ -171,6 +171,9 @@ class HostDynamicV2Proxy:
                 self._sessions[response.session_id] = route
         return response
 
+    def session_gid(self, session_id: str) -> int:
+        return self._route(session_id).gid
+
     def invoke(self, request):
         return self._forward(
             self._route(request.session_id),

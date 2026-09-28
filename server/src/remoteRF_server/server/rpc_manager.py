@@ -193,6 +193,11 @@ class RpcManager:
         takes, so hardware behaviour and locking are identical.
         """
 
+        if function_name.startswith("DynamicV2:"):
+            # Dynamic v2 keeps its own session locking, as it does natively.
+            from .dynamic_v2_bridge import run_bridge
+
+            return run_bridge(operation=function_name.split(":")[1], args=args, gid=int(gid))
         if not self._looks_like_device_rpc(function_name):
             raise ValueError(f"not a device RPC: {function_name!r}")
         with acquire_device_by_gid(int(gid)) as (resolved, dev):
@@ -388,9 +393,6 @@ class RpcManager:
                 device_id=unmap_arg(args['device_id']) if 'device_id' in args else None,
             )
             if federated is not None:
-                # Partner devices use the v1 device plane: never ask the owner
-                # for a v2 schema whose driver could not drive them.
-                args = {k: v for k, v in args.items() if k != "schema_versions"}
                 return self._federated_rpc(federated, function_name="IDL:get_drivers", args=args)
             gid, err = self._resolve_idl_target(args)
             if err is not None or gid is None:

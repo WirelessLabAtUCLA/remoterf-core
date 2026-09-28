@@ -270,8 +270,9 @@ def test_cluster_code_enrols_a_student_into_the_partners_attached_groups(home, t
         assert any(int(k) >= ALIAS_BASE for k in devices)
 
 
-def test_a_partner_schema_by_id_never_asks_the_owner_for_v2(home):
-    """The Client asks by id for v2 first; a v2 driver cannot drive a partner device."""
+def test_a_partner_schema_by_id_asks_the_owner_for_v2_too(home):
+    """The Client asks by id for v2 first; Dynamic v2 reaches partner devices
+    over the device plane, so the owner may answer with it."""
     plane, account_id = home["plane"], home["account_id"]
     plane.record_enrollment(local_account_id=account_id, destination_deployment_id=DEST)
     alias = next(int(k) for k in _acc(home, "get_dev") if int(k) >= ALIAS_BASE)
@@ -286,12 +287,13 @@ def test_a_partner_schema_by_id_never_asks_the_owner_for_v2(home):
             args={"device_id": map_arg(alias), "schema_versions": map_arg(["2.0"])},
         )
     assert "federated" in schema and unmap_arg(schema["device_type"]) == "test"
-    assert "schema_versions" not in forwarded.call_args.kwargs["args"]
+    assert unmap_arg(forwarded.call_args.kwargs["args"]["schema_versions"]) == ["2.0"]
 
 
-def test_the_v2_schema_service_sends_a_partner_token_to_the_v1_plane(home):
-    """The Client tries Dynamic v2 first; for a partner device the HOME must
-    answer with a protocol error (fall back), never a reservation error."""
+def test_the_v2_schema_service_names_the_owner_of_a_partner_token(home):
+    """The Client tries its HOME's Dynamic v2 service first; for a partner
+    device the HOME answers with a protocol error naming the owner, so the
+    Client carries v2 over the device plane, never a reservation error."""
     from remoteRF_server.server import dynamic_v2
 
     plane, account_id = home["plane"], home["account_id"]
@@ -300,9 +302,30 @@ def test_the_v2_schema_service_sends_a_partner_token_to_the_v1_plane(home):
     start, end = _window()
     token = _acc(home, "reserve_device", dd=alias, st=int(start.timestamp()), et=int(end.timestamp()))["Token"]
     with patch("remoteRF_server.server.reservation.reservation_handler", home["reservations"]):
-        with pytest.raises(dynamic_v2.RemoteRFProtocolError, match="v1 device plane"):
+        with pytest.raises(dynamic_v2.RemoteRFProtocolError, match="over the device plane") as refused:
             dynamic_v2.session_manager.schema_for_token(token)
+        assert refused.value.details["federated"] == DEST
         with pytest.raises(dynamic_v2.RemoteRFProtocolError):
             dynamic_v2.session_manager.open(token)
         with pytest.raises(dynamic_v2.RemoteRFReservationError):
             dynamic_v2.session_manager.schema_for_token("not-a-token")  # a native miss is still a miss
+
+
+def test_the_home_relays_dynamic_v2_for_a_partner_token_to_the_owner(home):
+    """DynamicV2:<Operation>:WIRE is a device RPC like any other on the HOME:
+    the owner gets the request bytes, never the HOME's token."""
+    plane, account_id = home["plane"], home["account_id"]
+    plane.record_enrollment(local_account_id=account_id, destination_deployment_id=DEST)
+    alias = next(int(k) for k in _acc(home, "get_dev") if int(k) >= ALIAS_BASE)
+    start, end = _window()
+    token = _acc(home, "reserve_device", dd=alias, st=int(start.timestamp()), et=int(end.timestamp()))["Token"]
+    from remoteRF_server.server import rpc_manager as rpc_module
+
+    with patch.object(rpc_module, "reservation_handler", home["reservations"]):
+        result = rpc_module.RpcManager().run_rpc(
+            function_name="DynamicV2:Negotiate:WIRE", args={"a": map_arg(token), "wire": map_arg(b"\x01")},
+        )
+    assert unmap_arg(result["value"]) == 42
+    gid, function_name, args = home["rpc"].device_calls[-1]
+    assert (gid, function_name) == (home["allowed"], "DynamicV2:Negotiate:WIRE")
+    assert "a" not in args and unmap_arg(args["wire"]) == b"\x01"

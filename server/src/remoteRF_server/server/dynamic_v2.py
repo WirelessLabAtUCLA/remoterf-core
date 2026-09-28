@@ -523,14 +523,19 @@ class DeviceSession:
 
 
 def _refuse_partner_token(token: str) -> None:
-    """A HOME-minted token for a partner lab's device has no v2 channel here:
-    say so as a protocol error, so the Client takes the v1 device plane the
-    HOME does federate, instead of reading it as a dead reservation."""
+    """A HOME-minted token for a partner lab's device has no v2 session here:
+    the Client carries Dynamic v2 to the owner over the device plane
+    (``DynamicV2:<Operation>:WIRE``), which the HOME does federate. Say so as a
+    protocol error naming the owner, not as a dead reservation."""
     from .reservation import reservation_handler
 
     plane = getattr(reservation_handler, "federation_devices", None)
-    if plane is not None and plane.resolve_token(token) is not None:
-        raise RemoteRFProtocolError("partner devices use the v1 device plane")
+    route = plane.resolve_token(token) if plane is not None else None
+    if route is not None:
+        raise RemoteRFProtocolError(
+            "partner devices take Dynamic v2 over the device plane",
+            details={"federated": str(route["owner_deployment_id"])},
+        )
 
 
 class SessionManager:

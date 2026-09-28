@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shutil
 import hashlib
 import time
@@ -35,6 +36,8 @@ from ..host import host_tunnel_server as hts
 
 _state_lock = threading.RLock()
 _reservation_end_callbacks: list = []
+# token -> (gid, salt, hsh): see reservation_bridge_token()
+_bridge_tokens: Dict[str, Tuple[int, str, str]] = {}
 
 @dataclass(frozen=True)
 class VirtualDevice:
@@ -772,6 +775,8 @@ def set_device(device_id: int, salt: str, hash: str):
         notify_end = any(previous) and previous != (st.salt, st.hsh)
         if notify_end:
             st.reset_pending = True
+            for token in [t for t, bound in _bridge_tokens.items() if bound[0] == int(device_id)]:
+                del _bridge_tokens[token]
 
     if notify_end:
         for callback in tuple(_reservation_end_callbacks):
@@ -804,6 +809,29 @@ def _reset_if_pending(device_id: int) -> None:
     if st is not None:
         with st.io_lock:
             _reset_locked(st)
+
+
+def reservation_bridge_token(device_id: int) -> str:
+    """A process-internal stand-in for the device's current reservation token.
+
+    A federated caller is authorized per call by the federation plane and never
+    holds this deployment's bearer token, but Dynamic v2 keys its sessions to a
+    token. This one never leaves the process and dies with the reservation:
+    resolve_gid_for_token() honours it only while the device still carries the
+    reservation it was minted under.
+    """
+    did = int(device_id)
+    with _state_lock:
+        st = _devices.get(did)
+        if st is None or not (st.salt and st.hsh):
+            raise RuntimeError("the device has no active reservation")
+        bound = (did, st.salt, st.hsh)
+        for token, entry in _bridge_tokens.items():
+            if entry == bound:
+                return token
+        token = f"bridge-{did}-{secrets.token_urlsafe(32)}"
+        _bridge_tokens[token] = bound
+        return token
 
 
 def register_reservation_end_callback(callback) -> None:
@@ -957,6 +985,12 @@ def resolve_gid_for_token(api_token: str) -> Optional[int]:
         return None
 
     _sync_host_devices()
+    with _state_lock:
+        bound = _bridge_tokens.get(api_token)
+        if bound is not None:
+            st = _devices.get(bound[0])
+            live = st is not None and _is_connected(st) and (st.salt, st.hsh) == bound[1:]
+            return bound[0] if live else None
     configured_token = _get_master_token()
 
     # Parsed master-token: resolves any device directly by gid (local or host).
