@@ -18,6 +18,7 @@
 
 
 from remoteRF_server.common.idl import DeviceSchema, idl_register, idl_expose
+from remoteRF_server.drivers.adalm_pluto.poe import PoePluto, is_poe, poe_pluto_from_init
 
 import subprocess
 import re
@@ -87,10 +88,13 @@ class PlutoSchema(DeviceSchema):
 
     device_type = "adalm_pluto"
     client_class = "Pluto"
-    driver_version = "0.0.2"
+    driver_version = "0.0.3"
 
     @staticmethod
     def make_device(**kwargs):
+        # init.poe: true -> the Pluto is powered from a PoE switch port and starts off.
+        if is_poe(kwargs):
+            return poe_pluto_from_init(kwargs)
         serial = kwargs.get("serial")
         return connect_pluto(serial=serial)
 
@@ -213,9 +217,11 @@ class PlutoSchema(DeviceSchema):
         self.device.tx_destroy_buffer()
 
     def reset_for_next_holder(self):
-        """A reservation ended: stop its cyclic transmission, and drop its RX
-        buffer so the next holder's rx_buffer_size takes effect."""
-        if self.device is not None:
+        """A reservation ended: a PoE Pluto powers off. Otherwise stop its cyclic
+        transmission, and drop its RX buffer so the next holder's rx_buffer_size takes effect."""
+        if isinstance(self.device, PoePluto):
+            self.device.power_down()
+        elif self.device is not None:
             self.device.tx_destroy_buffer()
             self.device.rx_destroy_buffer()
 
@@ -223,6 +229,28 @@ class PlutoSchema(DeviceSchema):
     def call_disable_dds(self):
         """Disable the internal DDS tone generator."""
         self.device.disable_dds()
+
+    # region power (PoE Plutos; a no-op on any other Pluto)
+
+    @idl_expose(kind="call")
+    def call_power_up(self):
+        """PoE Plutos: power on and wait for boot (any command does this when needed). No-op on other Plutos."""
+        if isinstance(self.device, PoePluto):
+            self.device.power_up()
+
+    @idl_expose(kind="call")
+    def call_power_down(self):
+        """PoE Plutos: cut power; the next command powers it back up. No-op on other Plutos."""
+        if isinstance(self.device, PoePluto):
+            self.device.power_down()
+
+    @idl_expose(kind="call")
+    def call_power_cycle(self):
+        """PoE Plutos: power off, then on, and wait for boot. No-op on other Plutos."""
+        if isinstance(self.device, PoePluto):
+            self.device.power_cycle()
+
+    # endregion
 
     # region DDS
 
