@@ -168,6 +168,7 @@ def _table() -> list[Command]:
         Command(("db export",), "Archive DBs, devices, keys, certs to ~/Downloads [dir]", _shell("cmd_db_export"), "Database"),
         Command(("stats purge",), "Delete the activity log (reservation stats) [-y]", _daemon("cmd_stats_purge"), "Database", where=D),
         Command(("db purge",), "Remove all database entries", _daemon("cmd_db_purge"), "Database", where=D),
+        Command(("wipe",), "Factory reset: delete all config and data [-y]", _shell("cmd_wipe"), "Database"),
     ]
 
 

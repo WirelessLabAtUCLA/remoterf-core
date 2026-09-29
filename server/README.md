@@ -901,6 +901,7 @@ After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. 
 ### Database
 
 * `db purge` — Remove all database entries
+* `wipe` — Factory reset: delete the whole config dir (devices, drivers, databases, certs) and the Global identity keys; the next `serverrf -s` runs first-time setup *(server must be stopped; prompts for confirmation, `-y` skips)*
 
 
 ## Adding Hosts

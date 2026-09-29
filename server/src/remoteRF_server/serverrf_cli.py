@@ -1784,6 +1784,42 @@ def cmd_db_export(argv: List[str]) -> int:
     return 0
 
 
+def cmd_wipe(argv: List[str]) -> int:
+    """Factory reset: delete the config root, certs and the deployment identity."""
+    from remoteRF_server.server import control, global_onboarding
+
+    if control.running():
+        print("ERROR: the server is running. Stop it first: serverrf stop", file=sys.stderr)
+        return 1
+
+    roots = list(dict.fromkeys((_cfg_dir(), _certs_dir(), global_onboarding.identity_dir())))
+    targets = [p for p in roots if p.exists() and not any(p != q and p.is_relative_to(q) for q in roots)]
+    if not targets:
+        print("Nothing to wipe.")
+        return 0
+
+    print("This deletes all RemoteRF server config and data (devices, drivers, databases, certs, keys):")
+    for p in targets:
+        print(f"  {p}")
+    if not _yes(argv):
+        try:
+            if input("Type 'wipe' to confirm: ").strip().lower() != "wipe":
+                print("Wipe aborted.")
+                return 1
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 1
+
+    # Release the Global name while the key that signs the request still exists.
+    if global_onboarding.participating() and global_onboarding.state() not in ("unregistered", *global_onboarding.TERMINAL_STATES):
+        global_onboarding.cmd_leave()
+
+    for p in targets:
+        shutil.rmtree(p)
+    print("Wiped. The next `serverrf -s` runs first-time setup.")
+    return 0
+
+
 def cmd_certs_wipe(argv: List[str]) -> int:
     return _wipe_certs(yes=_yes(argv))
 
