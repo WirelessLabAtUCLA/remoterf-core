@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import sys
+import tempfile
 import time
 import threading
 from pathlib import Path
@@ -73,6 +76,21 @@ def _load_gist_env() -> Optional[Tuple[str, str, str]]:
     return (gist_id, token, filename)
 
 
+PUSH_PERIOD_SEC = 300
+DEFAULT_PUSH_KEY = "/etc/remoterf/status_key"
+DEFAULT_PUSH_FILE = "status.json"
+
+
+def _load_push_env() -> Optional[Tuple[str, str, str]]:
+    kv = _read_env_kv(_cfg_dir() / "status_push.env")
+    host = kv.get("STATUS_PUSH_HOST", "").strip()
+    if not host:
+        return None
+    key = kv.get("STATUS_PUSH_KEY", "").strip() or DEFAULT_PUSH_KEY
+    remote = kv.get("STATUS_PUSH_FILE", "").strip() or DEFAULT_PUSH_FILE
+    return (host, key, remote)
+
+
 def build_status() -> dict:
     payload = {
         "updated_unix": int(time.time()),
@@ -105,23 +123,63 @@ def push_gist(*, gist_id: str, gh_token: str, filename: str, payload: dict) -> N
     r.raise_for_status()
 
 
-def _publisher_loop(period_sec: int) -> None:
-    cfg = _load_gist_env()
-    if cfg is None:
-        return
-    gist_id, gh_token, filename = cfg
-
+def push_status(*, host: str, key: str, remote: str, payload: dict) -> bool:
+    """Write status.json atomically, rsync it to the VPS. Never raises; False on failure."""
     try:
-        push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
-        _note("[gist_status] initial publish ok")
+        path = _cfg_dir() / "status.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".status.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({**payload, "generated_at": int(time.time())}, f, separators=(",", ":"), sort_keys=True)
+                f.write("\n")
+            # mkstemp is 0600 and rsync carries that to a new remote file; nginx must read it.
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        ssh = f"ssh -i {shlex.quote(key)} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+        subprocess.run(
+            ["rsync", "-e", ssh, str(path), f"statuspush@{host}:/{remote}"],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        _note(f"[status_push] rsync failed ({e.returncode}): {(e.stderr or '').strip()}")
     except Exception as e:
-        _note(f"[gist_status] initial publish failed: {e}")
+        _note(f"[status_push] publish failed: {e}")
+    return False
+
+
+def _publisher_loop(period_sec: int) -> None:
+    gist = _load_gist_env()
+    push = _load_push_env()
+    last_push = float("-inf")
+
+    if gist is not None:
+        try:
+            push_gist(gist_id=gist[0], gh_token=gist[1], filename=gist[2], payload=build_status())
+            _note("[gist_status] initial publish ok")
+        except Exception as e:
+            _note(f"[gist_status] initial publish failed: {e}")
 
     while True:
-        try:
-            push_gist(gist_id=gist_id, gh_token=gh_token, filename=filename, payload=build_status())
-        except Exception as e:
-            _note(f"[gist_status] publish failed: {e}")
+        # Only a successful push resets the clock, so a failed one retries next tick.
+        push_due = push is not None and time.monotonic() - last_push >= PUSH_PERIOD_SEC
+        if gist is not None or push_due:
+            try:
+                payload = build_status()
+            except Exception as e:
+                _note(f"[gist_status] publish failed: {e}")
+                payload = None
+            if payload is not None and gist is not None:
+                try:
+                    push_gist(gist_id=gist[0], gh_token=gist[1], filename=gist[2], payload=payload)
+                except Exception as e:
+                    _note(f"[gist_status] publish failed: {e}")
+            if payload is not None and push_due and push_status(host=push[0], key=push[1], remote=push[2], payload=payload):
+                last_push = time.monotonic()
         time.sleep(period_sec)
 
 
@@ -135,7 +193,8 @@ def start_status_publisher() -> None:
         if _publisher_thread is not None and _publisher_thread.is_alive():
             return
 
-        if _load_gist_env() is None:
+        gist, push = _load_gist_env(), _load_push_env()
+        if gist is None and push is None:
             # _note("[gist_status] off (not configured; see README gist docs)")
             return
 
@@ -147,7 +206,10 @@ def start_status_publisher() -> None:
         )
         t.start()
         _publisher_thread = t
-        _note(f"[gist_status] started (period={120}s)")
+        if gist is not None:
+            _note(f"[gist_status] started (period={120}s)")
+        if push is not None:
+            _note(f"[status_push] started (statuspush@{push[0]}:/{push[2]}, period={PUSH_PERIOD_SEC}s)")
 
 
 # if __name__ == "__main__":

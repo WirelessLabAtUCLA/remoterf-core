@@ -179,6 +179,9 @@ def _gist_env_path() -> Path:
     # Stored alongside server.env/devices.yml under ~/.config/remoterf by default
     return _cfg_dir() / "gist.env"
 
+def _status_push_env_path() -> Path:
+    return _cfg_dir() / "status_push.env"
+
 def _tos_ack_path() -> Path:
     # Stored alongside server.env/devices.yml under ~/.config/remoterf by default
     return _cfg_dir() / "tos.env"
@@ -554,6 +557,63 @@ def _gist_wipe(*, yes: bool) -> int:
 
     p.unlink()
     print("Wiped gist config (gist.env).")
+    return 0
+
+
+def _status_push_show() -> int:
+    from remoteRF_server.common.utils.panel import marker, print_panel
+
+    p = _status_push_env_path()
+    if not p.exists():
+        print(f"No status push config found (missing {p}).")
+        return 0
+
+    rows = [f"{marker()} {p}", ""] + [f"{k}={v}" for k, v in _read_env_kv(p).items()]
+    print()
+    print_panel("Status push", rows, literal=True)
+    print()
+    return 0
+
+
+def _status_push_set(*, host: str, key: Optional[str], remote: Optional[str]) -> int:
+    host = (host or "").strip()
+    if not host:
+        print("ERROR: missing --vps <host>", file=sys.stderr)
+        return 2
+
+    p = _status_push_env_path()
+    kv = _read_env_kv(p)
+    kv["STATUS_PUSH_HOST"] = host
+    if key:
+        kv["STATUS_PUSH_KEY"] = key
+    if remote:
+        kv["STATUS_PUSH_FILE"] = remote
+    _write_env_kv(p, kv)
+
+    print("Configured status push env:")
+    print(f"  {p}")
+    for k, v in kv.items():
+        print(f"  {k}={v}")
+    return 0
+
+
+def _status_push_wipe(*, yes: bool) -> int:
+    p = _status_push_env_path()
+    if not p.exists():
+        print(f"No status push config found at: {p}")
+        return 0
+
+    if not yes:
+        try:
+            if input("This will delete status_push.env (disables status push). Type 'wipe' to confirm: ").strip().lower() != "wipe":
+                print("Wipe aborted.")
+                return 1
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 1
+
+    p.unlink()
+    print("Wiped status push config (status_push.env).")
     return 0
 
 # -----------------------------
@@ -1889,6 +1949,13 @@ def _legacy_main(argv: List[str]) -> int:
     gist_token: Optional[str] = None
     gist_token_stdin = False
 
+    # status-push commands
+    push_mode = False
+    push_show = False
+    push_wipe = False
+    push_set = False
+    push_opts: Dict[str, str] = {}
+
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -2084,6 +2151,35 @@ def _legacy_main(argv: List[str]) -> int:
             i += 1
             continue
 
+        # enter status-push mode
+        if tok in ("--status-push", "-status-push"):
+            push_mode = True
+            i += 1
+            continue
+
+        if push_mode and tok in ("--show", "-show", "-s"):
+            push_show = True
+            i += 1
+            continue
+
+        if push_mode and tok in ("--wipe", "-wipe", "-w"):
+            push_wipe = True
+            i += 1
+            continue
+
+        if push_mode and tok in ("--set", "-set"):
+            push_set = True
+            i += 1
+            continue
+
+        if push_mode and tok in ("--vps", "--key", "--file"):
+            if i + 1 >= len(argv):
+                print(f"ERROR: {tok} expects a value", file=sys.stderr)
+                return 2
+            push_opts[tok] = argv[i + 1].strip()
+            i += 2
+            continue
+
         # device verbs/options
         if device_mode and tok in ("--show", "-show", "-s"):
             device_show = True
@@ -2258,6 +2354,20 @@ def _legacy_main(argv: List[str]) -> int:
                 print("\nCancelled.")
                 return 1
             
+    if push_mode and (gist_mode or device_mode or config_mode or host_mode or show_certs or wipe_certs or (gen_ip is not None)):
+        print("ERROR: --status-push cannot be combined with other commands. Run them separately.", file=sys.stderr)
+        return 2
+
+    if push_mode:
+        if int(push_show) + int(push_wipe) + int(push_set) != 1:
+            print("ERROR: use exactly one of: --status-push --set | --show | --wipe", file=sys.stderr)
+            return 2
+        if push_show:
+            return int(_status_push_show())
+        if push_wipe:
+            return int(_status_push_wipe(yes=yes))
+        return int(_status_push_set(host=push_opts.get("--vps", ""), key=push_opts.get("--key"), remote=push_opts.get("--file")))
+
     if gist_mode and (device_mode or config_mode or host_mode or show_certs or wipe_certs or (gen_ip is not None)):
         print("ERROR: --gist cannot be combined with device/config/host/cert commands. Run them separately.", file=sys.stderr)
         return 2
