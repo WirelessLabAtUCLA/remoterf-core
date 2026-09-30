@@ -15,6 +15,7 @@
 
 import os
 import hashlib
+import hmac
 import base64
 import secrets
 from dotenv import load_dotenv, find_dotenv
@@ -34,3 +35,20 @@ def hash_token(token: str) -> tuple[str, str]:
     salt = os.urandom(16).hex()
     hashed = hashlib.sha256(bytes.fromhex(salt) + token.encode()).hexdigest()
     return salt, hashed
+
+# Passwords get a real KDF; tokens stay on hash_token (random, high entropy).
+PASSWORD_HASH_PREFIX = "pbkdf2$"
+_PBKDF2_ROUNDS = 210_000
+
+def hash_password(password: str) -> tuple[str, str]:
+    salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), _PBKDF2_ROUNDS)
+    return salt, f"{PASSWORD_HASH_PREFIX}{_PBKDF2_ROUNDS}${digest.hex()}"
+
+def verify_password(salt, hash, password) -> tuple[bool, bool]:
+    """Returns (matches, needs_rehash). Accepts legacy hash_token() hashes."""
+    if not hash.startswith(PASSWORD_HASH_PREFIX):
+        return validate_token(salt, hash, password), True
+    _, rounds, digest = hash.split('$', 2)
+    computed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), int(rounds))
+    return hmac.compare_digest(computed.hex(), digest), False

@@ -1099,6 +1099,7 @@ def _cmd_status() -> None:
                 ("hostname", g.hostname() or "-"),
                 ("tunnel", g.tunnel_state()),
                 ("last report", (kv.get("GLOBAL_LAST_REPORT_AT") or "-").split(".")[0]),
+                ("last seen", (kv.get("GLOBAL_LAST_SEEN_AT") or "-").split(".")[0]),
             ]
         else:
             fields += [("", ""), ("global", "not participating (serverrf global join)")]

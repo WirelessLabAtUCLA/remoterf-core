@@ -106,7 +106,7 @@ class PlutoCompatTests(unittest.TestCase):
             "Pluto:tx:CALL1",
             {"a": map_arg("token"), "arg1": map_arg(samples)},
         )
-        self.assertEqual(unmap_arg(response["tx"]), "None")
+        self.assertIsNone(unmap_arg(response["tx"]))
         np.testing.assert_allclose(self.device.tx_samples, samples)
 
     def test_schema_dispatch_preserves_pluto_get_set_call0_and_call1(self) -> None:

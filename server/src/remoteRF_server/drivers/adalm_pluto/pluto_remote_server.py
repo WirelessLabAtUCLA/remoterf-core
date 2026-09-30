@@ -90,8 +90,7 @@ class PlutoServer:
         if result is not None:
             return {function_name: map_arg(result)}
         else:
-            # If there's no return value, return some placeholder
-            return {function_name: map_arg('None')}
+            return {function_name: map_arg(None)}
             
     @staticmethod
     def get(*, function_name, token):

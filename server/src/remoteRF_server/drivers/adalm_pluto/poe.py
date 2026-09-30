@@ -26,9 +26,11 @@ import threading
 import time
 
 from remoteRF_server.common.utils import get_remoterf_root
+from remoteRF_server.common.utils.ansi_codes import Sty, printf
 
 IIOD_PORT = 30431
-BOOT_TIMEOUT_S = 120
+BOOT_TIMEOUT_S = 45
+LINK_CHECK_S = 30  # no IIOD by then: ask the switch whether the port even has a link
 OFF_S = 3  # long enough for the Pluto to lose power before it is switched back on
 
 
@@ -90,6 +92,19 @@ def set_poe(*, switch, user, password, port, on):
         ros.close()
 
 
+def port_running(*, switch, user, password, port):
+    """Whether the switch port has an Ethernet link (RouterOS 'running')."""
+    ros = RouterOS(switch, user, password)
+    try:
+        replies = ros.cmd("/interface/ethernet/print", f"?name={port}", "=.proplist=name,running")
+    finally:
+        ros.close()
+    for sentence in replies:
+        if sentence[0] == "!re":
+            return "=running=true" in sentence
+    raise RuntimeError(f"switch has no interface {port}")
+
+
 def _iiod_up(ip):
     try:
         socket.create_connection((ip, IIOD_PORT), timeout=1).close()
@@ -110,6 +125,7 @@ class PoePluto:
             _serial=str(serial or "").strip(),
             _switch={"switch": switch, "user": user, "password": password},
             _pluto=None,
+            fault=None,  # message of the last failed boot; None once a boot succeeds
             _lock=threading.RLock(),
         )
 
@@ -119,28 +135,58 @@ class PoePluto:
     def _poe(self, on):
         set_poe(port=self._port, on=on, **self._switch)
 
+    @property
+    def power_state(self):
+        if self.fault:
+            return "fault"
+        return "on" if self._pluto is not None else "standby"
+
     def power_up(self):
         with self._lock:
             if self._pluto is not None:
                 return
-            self._poe(True)
-            deadline = time.monotonic() + BOOT_TIMEOUT_S
-            while not _iiod_up(self._ip):
-                if time.monotonic() > deadline:
-                    self._poe(False)
-                    raise RuntimeError(f"PoE Pluto {self.uri} did not boot within {BOOT_TIMEOUT_S} s on {self._port}")
-                time.sleep(1)
-            import adi
+            try:
+                self._boot()
+            except Exception as e:
+                vars(self)["fault"] = str(e)
+                printf(f"{time.strftime('%H:%M:%S')} {e}", Sty.GRAY)
+                raise
+            vars(self)["fault"] = None
 
-            pluto = adi.Pluto(self.uri)
-            found = str(pluto._ctx.attrs.get("hw_serial", "")).strip()
-            if self._serial and found.lower() != self._serial.lower():
-                del pluto
+    def _boot(self):
+        self._poe(True)
+        started = time.monotonic()
+        link_checked = False
+        while not _iiod_up(self._ip):
+            waited = time.monotonic() - started
+            if waited > BOOT_TIMEOUT_S:
                 self._poe(False)
-                raise RuntimeError(f"{self.uri} on {self._port} is Pluto {found}, expected {self._serial}")
-            vars(self)["_pluto"] = pluto
+                raise RuntimeError(f"PoE Pluto {self.uri} did not boot within {BOOT_TIMEOUT_S} s on {self._port}")
+            if waited > LINK_CHECK_S and not link_checked:
+                link_checked = True
+                try:
+                    running = port_running(port=self._port, **self._switch)
+                except Exception:
+                    running = True  # switch unreachable: keep waiting for IIOD
+                if not running:
+                    self._poe(False)
+                    raise RuntimeError(
+                        f"Pluto {self.uri}: PoE on {self._port} but no Ethernet link after {LINK_CHECK_S} s (cable/port/board fault)"
+                    )
+            time.sleep(1)
+        import adi
+
+        pluto = adi.Pluto(self.uri)
+        found = str(pluto._ctx.attrs.get("hw_serial", "")).strip()
+        if self._serial and found.lower() != self._serial.lower():
+            del pluto
+            self._poe(False)
+            raise RuntimeError(f"{self.uri} on {self._port} is Pluto {found}, expected {self._serial}")
+        vars(self)["_pluto"] = pluto
 
     def power_down(self):
+        """Cut power. The Pluto boots with default settings: sample rate, LOs,
+        gains and rx_buffer_size are all reset by the next power_up()."""
         with self._lock:
             # Drop the handle while the Pluto can still answer its buffer teardown.
             vars(self)["_pluto"] = None

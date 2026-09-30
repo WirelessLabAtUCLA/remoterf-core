@@ -18,12 +18,15 @@ from datetime import datetime
 import time
 import sys
 import threading
+import traceback
 import json
+from collections import deque
 from datetime import datetime, timedelta
 import re
 from uuid import UUID, uuid4, uuid5
 
 from ..common.utils import *
+from ..common.utils.api_token import hash_password, verify_password
 from remoterf_federation_core import (
     canonical_uuid,
     federated_identity,
@@ -64,6 +67,43 @@ def _parse_reservation_datetime(value) -> datetime:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
+
+
+# Brute-force limiter. Keyed on username (or a global bucket for enrollment
+# codes), never on IP: relayed clients all arrive as 127.0.0.1.
+_LIMIT_WINDOW_SEC = 300
+_LOGIN_LIMIT = 10
+_ENROLL_LIMIT = 60
+_failures: dict[str, deque] = {}
+_failures_lock = threading.Lock()
+
+
+def _limited(key: str, limit: int) -> bool:
+    now = time.monotonic()
+    with _failures_lock:
+        q = _failures.get(key)
+        if q is None:
+            return False
+        while q and q[0] <= now - _LIMIT_WINDOW_SEC:
+            q.popleft()
+        if not q:
+            del _failures[key]
+            return False
+        return len(q) >= limit
+
+
+def _record_failure(key: str) -> None:
+    now = time.monotonic()
+    with _failures_lock:
+        if len(_failures) > 1000:  # a username spray must not grow this forever
+            for k in [k for k, q in _failures.items() if q[-1] <= now - _LIMIT_WINDOW_SEC]:
+                del _failures[k]
+        _failures.setdefault(key, deque()).append(now)
+
+
+def _clear_failures(key: str) -> None:
+    with _failures_lock:
+        _failures.pop(key, None)
 
 
 class ReservationHandler:
@@ -300,6 +340,8 @@ class ReservationHandler:
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     code_name = unmap_arg(args['ec'])
                     acc_id = self.get_uid(username)
+                    if _limited("enroll", _ENROLL_LIMIT):
+                        return {"UE": map_arg(f"Failed to enroll {username}. Invalid or expired code.")}
                     if code_name.startswith("rrf2."):
                         if self.federation_enroller is None:
                             return {"ace": map_arg("Federated enrollment is unavailable.")}
@@ -326,6 +368,7 @@ class ReservationHandler:
                                 "federation_provenance": map_arg("transport"),
                             }
                         except FederationError:
+                            _record_failure("enroll")
                             return {"UE": map_arg("Invalid federation invitation.")}
                         if self.federation_devices is not None:
                             self.federation_devices.record_enrollment(
@@ -341,6 +384,7 @@ class ReservationHandler:
 
                         joined = cluster_module.redeem_code(acc_id, code_name)
                         if joined is None:
+                            _record_failure("enroll")
                             return {"UE": map_arg(f"Failed to enroll {username}. Invalid or expired code.")}
                         try:
                             cluster_module.enroll_students(self, only_account=acc_id)
@@ -352,12 +396,15 @@ class ReservationHandler:
                     if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
                         return {'UC': map_arg(f'Enrolled {username}.')}
                     else:
+                        _record_failure("enroll")
                         return {'UE': map_arg(f'Failed to enroll {username}. Invalid or expired code.')}
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
             return {"ace": map_arg(f"No matching server function to call: {function_name}")}
-        except Exception as e:
-            return {"RPC Acc Error", map_arg(f'{e}')}
+        except Exception:
+            print(f"ACC:{function_name} failed:", file=sys.stderr)
+            traceback.print_exc()
+            return {"ace": map_arg("Internal server error; please try again or contact your instructor.")}
         
     # ── HOME device plane (Server-to-Server federation) ────────────────
     # A partner's device is an alias id >= ALIAS_BASE; the owner decides.
@@ -421,16 +468,20 @@ class ReservationHandler:
         if '@' not in em:
             return {"UE": map_arg("Invalid email address.")}
         
+        if _limited("enroll", _ENROLL_LIMIT):
+            return {"UE": map_arg("Invalid or expired enrollment code.")}
         try:
             if RELAYED.get() and user_group_handler.code_is_lan_only(code_name=ec):
                 return {"UE": map_arg(lan_only_hint("This enrollment code"))}
             if not user_group_handler.validate_enrollment_code(code_name=ec):
+                _record_failure("enroll")
                 return {"UE": map_arg("Invalid or expired enrollment code.")}
         except Exception:
+            _record_failure("enroll")
             return {"UE": map_arg("Invalid or expired enrollment code.")}
-        
+
         try:
-            passwords = hash_token(pw)
+            passwords = hash_password(pw)
             self.cursor.execute('''
             INSERT INTO Accounts
             (username, email, pass_salt, pass_hash, created_at, auth_type)
@@ -455,8 +506,15 @@ class ReservationHandler:
                 user_group_handler.enroll_user_with_code(uid=uid, code_name=ec)
             perms.set_user(un) # set perms
             return {"UC": map_arg(f'{un}')}
-        except Exception as e:
-            return {"UE": map_arg(f'{e}')}
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            _record_failure("enroll")
+            return {"UE": map_arg("That username or email is already registered.")}
+        except Exception:
+            self.db.rollback()
+            print(f"create_user {un!r} failed:", file=sys.stderr)
+            traceback.print_exc()
+            return {"UE": map_arg("Registration failed; please contact your instructor.")}
     
     @db_connection
     def remove_user(self, *, username):
@@ -515,6 +573,7 @@ class ReservationHandler:
     
     @db_connection
     def login_user(self, username, password):
+        limiter_key = f"login:{username}"
         self.cursor.execute(
             "SELECT acc_id, username, pass_salt, pass_hash, auth_type "
             "FROM Accounts WHERE username = ?",
@@ -523,16 +582,30 @@ class ReservationHandler:
         account = self.cursor.fetchone()
 
         if account is None:
+            _record_failure(limiter_key)
             return {"UE": map_arg("Invalid login details.")}
 
         state = self._account_security_state_locked(username)
         if account[4] != "local_password" or state != "native":
+            _record_failure(limiter_key)
             return {"UE": map_arg("Invalid login details.")}
 
-        if not validate_token(account[2], account[3], password) and not self._session_matches(
-            username, password
-        ):
-            return {"UE": map_arg("Invalid login details.")}
+        # Session tokens first: a cheap lookup, so a remembered client never
+        # pays for the password KDF, and a guessing attack on the password
+        # cannot lock that client out.
+        if not self._session_matches(username, password):
+            if _limited(limiter_key, _LOGIN_LIMIT):
+                return {"UE": map_arg("Invalid login details.")}
+            matches, needs_rehash = verify_password(account[2], account[3], password)
+            if not matches:
+                _record_failure(limiter_key)
+                return {"UE": map_arg("Invalid login details.")}
+            if needs_rehash:
+                self.cursor.execute(
+                    "UPDATE Accounts SET pass_salt = ?, pass_hash = ? WHERE acc_id = ?",
+                    (*hash_password(password), int(account[0])),
+                )
+        _clear_failures(limiter_key)
         if RELAYED.get() and user_group_handler.user_is_lan_only(uid=int(account[0])):
             return {"UE": map_arg(lan_only_hint("This account"))}
         return {"UC": map_arg(f"{username}")}
@@ -923,16 +996,25 @@ class ReservationHandler:
         reservations = self.cursor.fetchall()
         perm = perms.get_perms(username)[0]
         result = {}
+
+        def masked(res):
+            # Other users' rows keep their slot but not their name; same
+            # field layout as before (username,device_id,start,end).
+            fields = list(res[1:-2])
+            if fields[0] != username:
+                fields[0] = "reserved"
+            return map_arg(','.join(map(str, fields)))
+
         if perm[0] == 'Admin':
             for i, res in enumerate(reservations, start=1):
                 result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
-        
+
         # elif perm[0] == 'Normal User':
         #     normalperms = perms.userperms.devices_allowed
         #     for i, res in enumerate(reservations, start=1):
         #         if res[2] in normalperms:
         #             result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
-        
+
         elif perm[0] == 'Normal User':
             self.cursor.execute("SELECT acc_id FROM Accounts WHERE username = ? LIMIT 1", (username,))
             row = self.cursor.fetchone()
@@ -941,14 +1023,14 @@ class ReservationHandler:
 
             for i, res in enumerate(reservations, start=1):
                 if int(res[2]) in allowed:
-                    result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
+                    result[f'{res[0]}'] = masked(res)
 
-                    
+
         elif perm[0] == 'Power User':
             for i, res in enumerate(reservations, start=1):
                 if res[2] in str_to_list(perm[5]):
-                    result[f'{res[0]}'] = map_arg(','.join(map(str, res[1:-2])))
-            
+                    result[f'{res[0]}'] = masked(res)
+
         return result
     
     def grab_all_devices(self, username:str):

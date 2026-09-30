@@ -466,7 +466,9 @@ class LegacyAuthTypeReadinessTests(unittest.TestCase):
                 row = conn.execute(
                     "SELECT acc_id,pass_salt,pass_hash,auth_type FROM Accounts"
                 ).fetchone()
-            self.assertEqual(row, (77, salt, hashed, "local_password"))
+            # A legacy sha256 row is rehashed with the password KDF on login.
+            self.assertEqual((row[0], row[3]), (77, "local_password"))
+            self.assertTrue(row[2].startswith("pbkdf2$"), row[2])
             self.assertEqual(subject, str(uuid5(UUID(DEPLOYMENT), "account:77")))
 
     def test_remoterf_global_and_unknown_rows_block_runtime_migration(self):

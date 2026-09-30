@@ -547,6 +547,92 @@ class StatusReportTests(TunnelTests):
         self.assertIn("GLOBAL_LAST_REPORT_AT", g.load())
 
 
+class UnknownDeploymentTests(TunnelTests):
+    """Global forgot the deployment (a wiped DB): stop, say so once, allow a re-join."""
+
+    def refuse(self, code="unknown_deployment"):
+        return mock.patch.object(
+            g, "call", side_effect=g.GlobalError(code, "Broker request authentication failed")
+        )
+
+    def test_unknown_deployment_is_terminal_and_rejoinable(self):
+        import threading
+
+        self.activate()
+        tunnel = mock.Mock()
+        warnings = []
+        with self.refuse(), mock.patch.object(g, "_warn", side_effect=warnings.append), \
+             mock.patch.object(g, "TICK_SECONDS", 0):
+            g.run_agent(threading.Event(), tunnel)  # returns once the state is terminal
+            self.assertEqual(g.state(), "unknown")
+            self.assertTrue(tunnel.stop.called)
+            with self.assertRaises(g.GlobalError):
+                g.fetch_me()  # a repeat is not a second warning
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("unknown", g._STATE_SUMMARY)
+        with mock.patch.object(g, "configure", return_value=True) as configure:
+            self.assertEqual(g.cmd_join(), 0)
+        configure.assert_called_once()
+
+    def test_status_names_the_refusal_code(self):
+        self.activate()
+        with self.refuse("deployment_suspended"), \
+             mock.patch("remoteRF_server.common.utils.panel.print_panel") as panel:
+            g.cmd_status()
+        self.assertIn("(refused by RemoteRF Global (deployment_suspended))", panel.call_args[0][1])
+
+    def test_a_refused_report_forces_a_poll_next_tick(self):
+        self.activate()
+        last = {"poll": 0.0}
+        with mock.patch("time.monotonic", return_value=1.0), \
+             mock.patch.object(g, "fetch_me", side_effect=AssertionError("polled")), \
+             mock.patch.object(g, "send_liveness", side_effect=g.GlobalError("unknown_deployment")):
+            with self.assertRaises(g.GlobalError):
+                g._tick(last)
+        self.assertNotIn("poll", last)
+        with mock.patch("time.monotonic", return_value=2.0), \
+             mock.patch.object(g, "fetch_me") as me, \
+             mock.patch.object(g, "send_liveness"), mock.patch.object(g, "send_status"):
+            g._tick(last)
+        me.assert_called_once()
+
+    def test_failed_polls_back_off_and_reset_on_success(self):
+        self.activate()
+        last = {}
+        now = 0.0
+        gaps = []
+        me = mock.patch.object(g, "fetch_me", side_effect=ConnectionError("down"))
+        with me as fetch, mock.patch.object(g, "send_liveness"), mock.patch.object(g, "send_status"):
+            for _ in range(6):
+                with mock.patch("time.monotonic", return_value=now), self.assertRaises(ConnectionError):
+                    g._tick(last)
+                due = last["poll"] + g.POLL_ACTIVE_SECONDS
+                gaps.append(due - now)
+                calls = fetch.call_count
+                with mock.patch("time.monotonic", return_value=due - 1):
+                    g._tick(last)  # still inside the backoff: no poll
+                self.assertEqual(fetch.call_count, calls)
+                now = due
+        self.assertEqual(gaps, [120, 240, 480, 900, 900, 900])
+        with mock.patch("time.monotonic", return_value=now), mock.patch.object(g, "fetch_me"), \
+             mock.patch.object(g, "send_liveness"), mock.patch.object(g, "send_status"):
+            g._tick(last)
+        self.assertEqual(last["poll"], now)
+        self.assertNotIn("backoff", last)
+        with me, mock.patch("time.monotonic", return_value=now + g.POLL_ACTIVE_SECONDS), \
+             self.assertRaises(ConnectionError):
+            g._tick(last)
+        self.assertEqual(last["poll"] + g.POLL_ACTIVE_SECONDS - (now + g.POLL_ACTIVE_SECONDS), 120)
+
+    def test_liveness_stamps_last_seen(self):
+        self.activate()
+        _, patched = self.capture({})
+        with patched:
+            g.send_liveness()
+        self.assertIn("GLOBAL_LAST_SEEN_AT", g.load())
+        self.assertNotIn("GLOBAL_LAST_REPORT_AT", g.load())
+
+
 class DisplayNameTests(ConsentTests):
     def test_display_name_defaults_to_the_slug(self):
         with mock.patch.object(g, "name_available", return_value=True):

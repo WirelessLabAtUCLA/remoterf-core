@@ -87,15 +87,25 @@ def _wire(result, args: dict):
 
     ``wire`` is opt-in per call: ``c64`` halves complex128 samples, ``i16``
     quarters them when they are integer-valued IQ (a 12-bit ADC's are) and
-    otherwise falls back to c64. Anything else, or no flag, is as before.
+    otherwise sends them unchanged (lossless or nothing). A multi-channel
+    result (list of per-channel arrays) is stacked first, as map_arg would.
+    Anything else, or no flag, is as before.
     """
     from ..common.utils.process_arg import fits_iq16, map_iq16
 
     wire = unmap_arg(args["wire"]) if "wire" in args else None
-    if wire in ("c64", "i16") and isinstance(result, np.ndarray) and np.iscomplexobj(result):
-        if wire == "i16" and fits_iq16(result):
+    if wire not in ("c64", "i16"):
+        return map_arg(result)
+    if isinstance(result, (list, tuple)):
+        try:
+            result = np.asarray(result)
+        except Exception:
+            pass
+    if isinstance(result, np.ndarray) and np.iscomplexobj(result):
+        if wire == "c64":
+            return map_arg(result.astype(np.complex64))
+        if fits_iq16(result):
             return map_iq16(result)
-        return map_arg(result.astype(np.complex64))
     return map_arg(result)
 
 

@@ -202,6 +202,9 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="set")
     def set_rx_buffer_size(self, value):
+        # pyadi reads rx_buffer_size only when it (re)creates the RX buffer.
+        if value != self.device.rx_buffer_size:
+            self.device.rx_destroy_buffer()
         self.device.rx_buffer_size = value
 
     @idl_expose(kind="call")

@@ -25,7 +25,7 @@ State lives in ``<config dir>/global.env``:
   GLOBAL_NAME       requested slug
   GLOBAL_EMAIL      contact address for a human admin
   GLOBAL_STATE      unregistered | requested | active | rejected
-                    | suspended | left | expired
+                    | suspended | left | expired | unknown
 """
 
 from __future__ import annotations
@@ -609,7 +609,17 @@ def verify_contact(code: str) -> dict:
 
 
 def fetch_me() -> dict:
-    result = call("GET", ME_PATH)
+    try:
+        result = call("GET", ME_PATH)
+    except GlobalError as exc:
+        # Global lost (or never had) this deployment: polling again cannot
+        # fix it, only a re-join can. The identity is kept so the re-request
+        # is keyed by the same issuer UUID.
+        if exc.code == "unknown_deployment" and state() != "unknown":
+            update(GLOBAL_STATE="unknown")
+            _warn("  RemoteRF Global has no record of this deployment; "
+                  "the relay stops. Run `serverrf global join` to re-register.")
+        raise
     _apply_me(result)
     return result
 
@@ -779,7 +789,10 @@ def status_payload() -> dict:
 
 
 def send_liveness() -> None:
+    from datetime import datetime, timezone
+
     call("POST", REPORT_PATH, {"kind": "liveness"})
+    update(GLOBAL_LAST_SEEN_AT=datetime.now(timezone.utc).isoformat())
 
 
 def send_status() -> None:
@@ -931,10 +944,11 @@ POLL_ACTIVE_SECONDS = 3600
 LIVENESS_SECONDS = 300
 STATUS_SECONDS = 3600
 TICK_SECONDS = 60
+POLL_BACKOFF_MAX_SECONDS = 900
 
 # States the agent will never leave on its own: the operator or a Global admin
 # has to act first, so the loop stops instead of retrying forever.
-TERMINAL_STATES = {"left", "rejected", "expired"}
+TERMINAL_STATES = {"left", "rejected", "expired", "unknown"}
 
 
 def _tick(last: dict, tunnel=None) -> None:
@@ -949,7 +963,15 @@ def _tick(last: dict, tunnel=None) -> None:
         return
     interval = POLL_ACTIVE_SECONDS if current == "active" else POLL_PENDING_SECONDS
     if now - last.get("poll", -interval) >= interval:
-        fetch_me()
+        try:
+            fetch_me()
+        except Exception:
+            # Stamp the poll so the next attempt waits out the backoff.
+            backoff = min(2 * last.get("backoff", TICK_SECONDS), POLL_BACKOFF_MAX_SECONDS)
+            last["backoff"] = backoff
+            last["poll"] = now - interval + backoff
+            raise
+        last.pop("backoff", None)
         last["poll"] = now
     if tunnel is not None:
         tunnel.supervise(now)
@@ -960,7 +982,12 @@ def _tick(last: dict, tunnel=None) -> None:
         ("status", STATUS_SECONDS, send_status),
     ):
         if now - last.get(key, -interval) >= interval:
-            send()
+            try:
+                send()
+            except GlobalError as exc:
+                if exc.code == "unknown_deployment":
+                    last.pop("poll", None)  # confirm with /me next tick, not in an hour
+                raise
             last[key] = now
     _cluster_tick()
 
@@ -1004,7 +1031,10 @@ def run_agent(stop=None, tunnel=None) -> None:
                 return
             _tick(last, tunnel)
         except Exception as exc:  # noqa: BLE001 - never take the server down
-            logger.warning("global agent tick failed: %s", exc)
+            logger.warning(
+                "global agent tick failed: %s (%s)",
+                exc, getattr(exc, "code", type(exc).__name__),
+            )
         if stop is not None:
             if stop.wait(TICK_SECONDS):
                 tunnel.stop()
@@ -1076,6 +1106,7 @@ _STATE_SUMMARY = {
     "suspended": "suspended by a RemoteRF admin",
     "left": "left RemoteRF Global",
     "expired": "request expired",
+    "unknown": "RemoteRF Global has no record of this deployment -- run: serverrf global join",
 }
 
 
@@ -1106,10 +1137,12 @@ def cmd_status(refresh: bool = True) -> int:
 
     # Ask Global rather than reporting a stale local answer: the operator runs
     # this precisely because they are waiting to hear about their request.
-    unreachable = None
+    unreachable = refused = None
     if refresh and state() not in TERMINAL_STATES:
         try:
             fetch_me()
+        except GlobalError as exc:
+            refused = exc.code
         except Exception as exc:  # noqa: BLE001 - offline is not an error here
             unreachable = str(exc)
         kv = load()
@@ -1126,6 +1159,7 @@ def cmd_status(refresh: bool = True) -> int:
         ("email", kv.get("GLOBAL_EMAIL", "-")),
         ("tunnel", tunnel_state()),
         ("last report", kv.get("GLOBAL_LAST_REPORT_AT", "-")),
+        ("last seen", kv.get("GLOBAL_LAST_SEEN_AT", "-")),
     ]
     if kv.get("GLOBAL_REASON"):
         fields.append(("reason", kv["GLOBAL_REASON"]))
@@ -1134,6 +1168,8 @@ def cmd_status(refresh: bool = True) -> int:
 
     if current == "unverified":
         rows += ["", "    serverrf global verify <code>"]
+    if refused:
+        rows += ["", f"(refused by RemoteRF Global ({refused}))"]
     if unreachable:
         rows += ["", f"(could not reach RemoteRF Global just now: {unreachable})"]
 

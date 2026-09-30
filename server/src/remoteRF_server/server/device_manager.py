@@ -77,6 +77,10 @@ def _is_connected(st: _DeviceState) -> bool:
     # host
     return bool(st.online)
 
+def _poe_fault(st: _DeviceState):
+    """Last boot failure of a local PoE Pluto (None otherwise; see drivers/adalm_pluto/poe.py)."""
+    return getattr(getattr(st.dev, "device", None), "fault", None)
+
 # Host device pulling/grabbing
 
 def _get_host_registry():
@@ -187,6 +191,12 @@ def _local_devices_str_snapshot() -> Dict[int, str]:
             name = (st.name or f"device-{gid}").strip()
 
             status = "online" if _is_connected(st) else "offline"
+            fault = _poe_fault(st)
+            power = getattr(getattr(st.dev, "device", None), "power_state", None)
+            if fault:
+                status = f"offline: {fault}"
+            elif power:
+                status = f"{status}, {power}"
             if st.salt or st.hsh:
                 status = f"{status}, reserved"
 
@@ -728,7 +738,7 @@ def describe_devices(ids) -> list[dict]:
             if st is None:
                 continue
             out.append({"id": int(gid), "name": (st.name or f"device-{gid}").strip(),
-                        "type": st.dtype or "", "online": _is_connected(st)})
+                        "type": st.dtype or "", "online": _is_connected(st) and not _poe_fault(st)})
     return out
 
 
@@ -1187,7 +1197,7 @@ def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
             gid: {
                 "name": st.name or f"device {gid}",
                 "device_type": st.dtype or None,
-                "online": _is_connected(st),
+                "online": _is_connected(st) and not _poe_fault(st),
                 "origin": st.origin,
             }
             for gid, st in _devices.items()

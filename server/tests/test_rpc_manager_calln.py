@@ -75,13 +75,21 @@ class RpcManagerCallNTests(unittest.TestCase):
         # No flag: exactly as before.
         arg = rx(integer_iq)
         self.assertEqual(arg.ndarray_value.dtype, "<c16")
-        # c64 halves; i16 quarters integer IQ and falls back to c64 for anything else.
+        # c64 halves; i16 quarters integer IQ and sends anything else unchanged (lossless or nothing).
         self.assertEqual(rx(integer_iq, "c64").ndarray_value.dtype, "<c8")
         arg = rx(integer_iq, "i16")
         self.assertEqual(arg.ndarray_value.dtype, "ci16")
         np.testing.assert_array_equal(unmap_arg(arg), integer_iq.astype(np.complex64))
-        self.assertEqual(rx(fractional, "i16").ndarray_value.dtype, "<c8")
-        np.testing.assert_array_equal(unmap_arg(rx(fractional, "i16")), fractional.astype(np.complex64))
+        self.assertEqual(rx(fractional, "i16").ndarray_value.dtype, "<c16")
+        np.testing.assert_array_equal(unmap_arg(rx(fractional, "i16")), fractional)
+        # Multi-channel rx returns a list of per-channel arrays: stacked to 2-D, shape kept.
+        two_ch = [integer_iq, integer_iq * 2]
+        arg = rx(two_ch, "i16")
+        self.assertEqual(arg.ndarray_value.dtype, "ci16")
+        np.testing.assert_array_equal(unmap_arg(arg), np.asarray(two_ch).astype(np.complex64))
+        self.assertEqual(rx([fractional, fractional], "i16").ndarray_value.dtype, "<c16")
+        self.assertEqual(rx(two_ch, "c64").ndarray_value.dtype, "<c8")
+        self.assertEqual(list(rx(two_ch, "c64").ndarray_value.shape), [2, 2])
         # Unknown flags and non-complex results are left alone; CALLN never sees the flag.
         self.assertEqual(rx(integer_iq, "bogus").ndarray_value.dtype, "<c16")
         self.assertEqual(rx(np.array([1, 2], dtype=np.int16), "i16").ndarray_value.dtype, "<i2")
