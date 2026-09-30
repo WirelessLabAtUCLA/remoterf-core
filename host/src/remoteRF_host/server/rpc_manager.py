@@ -17,12 +17,41 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
+
 from ..common.utils import map_arg, unmap_arg
 from .device_manager import find_device_id_by_name, get_device, get_device_schema
 
 
 def _normalize_device_rpc_type(value: str) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _wire(result, args: dict):
+    """map_arg, in the sample encoding the caller asked for (Gate I slice 3).
+
+    ``wire`` is opt-in per call: ``c64`` halves complex128 samples, ``i16``
+    quarters them when they are integer-valued IQ (a 12-bit ADC's are) and
+    otherwise sends them unchanged (lossless or nothing). A multi-channel
+    result (list of per-channel arrays) is stacked first, as map_arg would.
+    Anything else, or no flag, is as before.
+    """
+    from ..common.utils.process_arg import fits_iq16, map_iq16
+
+    wire = unmap_arg(args["wire"]) if "wire" in args else None
+    if wire not in ("c64", "i16"):
+        return map_arg(result)
+    if isinstance(result, (list, tuple)):
+        try:
+            result = np.asarray(result)
+        except Exception:
+            pass
+    if isinstance(result, np.ndarray) and np.iscomplexobj(result):
+        if wire == "c64":
+            return map_arg(result.astype(np.complex64))
+        if fits_iq16(result):
+            return map_iq16(result)
+    return map_arg(result)
 
 
 class RpcManager:
@@ -116,7 +145,7 @@ class RpcManager:
 
             if verb == "CALL0":
                 result = schema.dispatch(f"call_{prop}", {})
-                return {prop: self._safe_map(result)}
+                return {prop: _wire(result, args) if result is not None else self._safe_map(result)}
 
             if verb == "CALL1":
                 if "arg1" not in args:
@@ -126,7 +155,7 @@ class RpcManager:
                 return {prop: self._safe_map(result)}
 
             if verb == "CALLN":
-                reserved = {"a", "g", "token", "device_id", "device_name"}
+                reserved = {"a", "g", "token", "device_id", "device_name", "wire"}
                 call_args = {
                     str(key): unmap_arg(value)
                     for key, value in dict(args).items()
