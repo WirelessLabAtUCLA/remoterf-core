@@ -24,7 +24,6 @@ State lives in ``<config dir>/global.env``:
   GLOBAL_CONSENT    yes | no          answered once at first run
   GLOBAL_NAME       requested slug
   GLOBAL_EMAIL      contact address for a human admin
-  GLOBAL_SHARE_LAN  yes | no
   GLOBAL_STATE      unregistered | requested | active | rejected
                     | suspended | left | expired
 """
@@ -316,15 +315,11 @@ def configure() -> bool:
         return False
     display_name = _prompt_display_name(name)
     email = _prompt_email()
-    share = _confirm("Share LAN address?")
-    if share is None:
-        return False
     update(
         GLOBAL_CONSENT="yes",
         GLOBAL_NAME=name,
         GLOBAL_DISPLAY_NAME=display_name,
         GLOBAL_EMAIL=email,
-        GLOBAL_SHARE_LAN="yes" if share else "no",
         GLOBAL_STATE="unregistered",
     )
     ensure_identity()
@@ -530,13 +525,6 @@ def lan_endpoint() -> Optional[str]:
     return f"{host}:{port}" if host else None
 
 
-def lan_address() -> Optional[str]:
-    """host:port a client on the LAN should dial, when the operator shares it."""
-    if load().get("GLOBAL_SHARE_LAN", "yes").lower() != "yes":
-        return None
-    return lan_endpoint()
-
-
 # -----------------------------
 # Where a call came from
 # -----------------------------
@@ -605,7 +593,7 @@ def submit_request() -> dict:
         "email": kv["GLOBAL_EMAIL"],
         "public_key": _public_key_b64(),
         "ssh_public_key": relay_public_key(),
-        "lan_address": lan_address(),
+        "lan_address": lan_endpoint(),
         "server_version": server_version(),
     }
     result = call("POST", REQUEST_PATH, payload)
@@ -783,7 +771,7 @@ def status_payload() -> dict:
             "SELECT COUNT(*) FROM Reservations WHERE start_time <= ? AND end_time > ?",
             (now, now),
         ),
-        "lan_address": lan_address(),
+        "lan_address": lan_endpoint(),
         "cert_sha256": cert_sha256(),
     }
     assert set(payload) == STATUS_FIELDS  # the consent text is the contract
@@ -1136,7 +1124,6 @@ def cmd_status(refresh: bool = True) -> int:
         ("display", kv.get("GLOBAL_DISPLAY_NAME", "-")),
         ("hostname", hostname() or "-"),
         ("email", kv.get("GLOBAL_EMAIL", "-")),
-        ("share LAN", kv.get("GLOBAL_SHARE_LAN", "no")),
         ("tunnel", tunnel_state()),
         ("last report", kv.get("GLOBAL_LAST_REPORT_AT", "-")),
     ]

@@ -106,7 +106,7 @@ def _table() -> list[Command]:
         # ---- devices ----
         Command(("devices list",), "Configured devices", _shell("cmd_devices_list"), "Devices"),
         Command(("devices status",), "Live device online/last_seen/route", _daemon("cmd_devices_status"), "Devices", where=D),
-        Command(("devices add",), "Add a device (asks type, name, serial)", _shell("cmd_devices_add"), "Devices", after="reload_devices"),
+        Command(("devices add",), "Add a device (asks type, name, serial)", _shell("cmd_devices_add"), "Devices", after="reload_devices", hidden=True),
         Command(("devices remove",), "Remove a device by id", _shell("cmd_devices_remove"), "Devices", after="reload_devices"),
         Command(("devices rename",), "Rename a device: devices rename <id> <name>", _shell("cmd_devices_rename"), "Devices", after="reload_devices"),
         Command(("devices wipe",), "Remove ALL devices [-y]", _shell("cmd_devices_wipe"), "Devices", after="reload_devices"),
@@ -264,10 +264,6 @@ def cmd_help(argv: list[str]) -> int:
             return 2
         rows = [c for c in _visible(_IN_DAEMON) if c.section == section]
         lines = [_SECTION_BLURB.get(section, ""), ""] + _columns([(prefix + c.names[0], c.help) for c in rows])
-        if section == "Devices":
-            lines += ["", "Types for `devices add`:",
-                      "  pluto, pluto-mimo, rtl-sdr, hackrf, ti-mmwave,",
-                      "  usrp-2901, usrp-b205-mini, usrp-n210, usrp-profile"]
         print_panel(section, lines, literal=True)
         return 0
     lines: list[str] = []

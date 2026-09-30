@@ -63,14 +63,13 @@ class ConsentTests(unittest.TestCase):
 
     def test_joining_writes_configuration_and_identity(self):
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "UCLA", "UCLA Wireless Lab", "lab@ucla.edu", "y"):
+            with self.answer("y", "UCLA", "UCLA Wireless Lab", "lab@ucla.edu"):
                 self.assertTrue(g.ensure_consent())
         kv = g.load()
         self.assertEqual(kv["GLOBAL_CONSENT"], "yes")
         self.assertEqual(kv["GLOBAL_NAME"], "ucla")
         self.assertEqual(kv["GLOBAL_DISPLAY_NAME"], "UCLA Wireless Lab")
         self.assertEqual(kv["GLOBAL_EMAIL"], "lab@ucla.edu")
-        self.assertEqual(kv["GLOBAL_SHARE_LAN"], "yes")
         self.assertEqual(kv["GLOBAL_STATE"], "unregistered")
         self.assertEqual(g.hostname(), "ucla.global.remoterf.net")
         self.assertTrue(g.relay_key_path().exists())
@@ -79,27 +78,26 @@ class ConsentTests(unittest.TestCase):
 
     def test_taken_name_is_reprompted(self):
         with mock.patch.object(g, "name_available", side_effect=[False, True]):
-            with self.answer("y", "ucla", "ucla2", "", "lab@ucla.edu", "n"):
+            with self.answer("y", "ucla", "ucla2", "", "lab@ucla.edu"):
                 self.assertTrue(g.ensure_consent())
         self.assertEqual(g.load()["GLOBAL_NAME"], "ucla2")
-        self.assertEqual(g.load()["GLOBAL_SHARE_LAN"], "no")
 
     def test_unreachable_global_accepts_the_name_provisionally(self):
         with mock.patch.object(g, "name_available", return_value=None):
-            with self.answer("y", "ucla", "", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "", "lab@ucla.edu"):
                 self.assertTrue(g.ensure_consent())
         self.assertEqual(g.load()["GLOBAL_NAME"], "ucla")
 
     def test_invalid_slug_and_email_are_rejected(self):
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "-bad-", "ok", "ucla", "", "nope", "lab@ucla.edu", "y"):
+            with self.answer("y", "-bad-", "ok", "ucla", "", "nope", "lab@ucla.edu"):
                 self.assertTrue(g.ensure_consent())
         self.assertEqual(g.load()["GLOBAL_NAME"], "ucla")
         self.assertEqual(g.load()["GLOBAL_EMAIL"], "lab@ucla.edu")
 
     def test_leave_is_local_and_immediate(self):
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "ucla", "", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "", "lab@ucla.edu"):
                 g.ensure_consent()
         self.assertEqual(g.main(["leave"]), 0)
         self.assertEqual(g.state(), "left")
@@ -117,7 +115,7 @@ class RequestTests(ConsentTests):
 
     def join(self, **overrides):
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu"):
                 g.ensure_consent()
         g.update(**overrides)
 
@@ -184,15 +182,6 @@ class RequestTests(ConsentTests):
             options={"verify_aud": False},
         )
         self.assertEqual(g.state(), "requested")
-
-    def test_no_lan_address_is_sent_when_the_operator_declined(self):
-        import json
-
-        self.join(GLOBAL_SHARE_LAN="no")
-        seen, patched = self.capture({"status": "requested", "name": None, "relay": None})
-        with patched:
-            g.submit_request()
-        self.assertIsNone(json.loads(seen["data"])["lan_address"])
 
     def test_the_final_name_comes_from_global_not_the_request(self):
         self.join()
@@ -503,7 +492,7 @@ class StatusReportTests(TunnelTests):
             sorted(entry["type"] for entry in payload["devices"]),
             ["adalm_pluto", "usrp_2901"],
         )
-        self.assertEqual(payload["lan_address"], g.lan_address())
+        self.assertEqual(payload["lan_address"], g.lan_endpoint())
         self.assertEqual(len(payload["cert_sha256"]), 64)
 
         # Every promised item is represented, and nothing forbidden leaks.
@@ -520,12 +509,6 @@ class StatusReportTests(TunnelTests):
         self.assertEqual(payload["users"], 0)
         self.assertEqual(payload["devices"], [])
         self.assertIsNone(payload["cert_sha256"])
-
-    def test_a_withheld_lan_address_is_absent_from_the_report(self):
-        self.activate()
-        self.seed()
-        g.update(GLOBAL_SHARE_LAN="no")
-        self.assertIsNone(g.status_payload()["lan_address"])
 
     def test_reports_only_flow_once_active(self):
         self.join()
@@ -567,13 +550,13 @@ class StatusReportTests(TunnelTests):
 class DisplayNameTests(ConsentTests):
     def test_display_name_defaults_to_the_slug(self):
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "ucla", "", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "", "lab@ucla.edu"):
                 g.ensure_consent()
         self.assertEqual(g.load()["GLOBAL_DISPLAY_NAME"], "ucla")
 
     def test_control_characters_fall_back_to_the_slug(self):
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "ucla", "UCLA\x1b[2J", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "UCLA\x1b[2J", "lab@ucla.edu"):
                 g.ensure_consent()
         self.assertEqual(g.load()["GLOBAL_DISPLAY_NAME"], "ucla")
 
@@ -588,7 +571,7 @@ class SubmitReportTests(RequestTests):
     def test_a_successful_request_is_acknowledged(self):
         printed = []
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu"):
                 _, patched = self.capture(
                     {"status": "requested", "name": None, "relay": None,
                      "deployment_id": "8a2e3f10-0000-4000-8000-000000000001"}
@@ -600,7 +583,7 @@ class SubmitReportTests(RequestTests):
     def test_an_unreachable_global_says_so_and_keeps_the_server_usable(self):
         """A lab with no route to Global still gets a working local server."""
         with mock.patch.object(g, "name_available", return_value=None):
-            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu", "y"):
+            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu"):
                 # No mock: the suite's origin is the discard port, so this is a
                 # real failed connection, not a stubbed one.
                 self.assertTrue(g.ensure_consent())
@@ -617,7 +600,7 @@ class SubmitReportTests(RequestTests):
                 raise g.GlobalError("name_taken", "taken")
 
         with mock.patch.object(g, "name_available", return_value=True):
-            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu", "y", "ucla2"):
+            with self.answer("y", "ucla", "UCLA Wireless Lab", "lab@ucla.edu", "ucla2"):
                 with mock.patch.object(g, "submit_request", side_effect=submit):
                     self.assertTrue(g.ensure_consent())
         self.assertEqual(calls, ["ucla", "ucla2"])
@@ -722,7 +705,6 @@ class FederationRuntimeTests(unittest.TestCase):
             GLOBAL_NAME="ucla",
             GLOBAL_DISPLAY_NAME="UCLA Wireless Lab",
             GLOBAL_EMAIL="lab@ucla.edu",
-            GLOBAL_SHARE_LAN="no",
             GLOBAL_STATE="unregistered",
         )
         g.ensure_identity()

@@ -1097,7 +1097,6 @@ def _cmd_status() -> None:
                 ("", ""),
                 ("global", f"{state} -- {g._STATE_SUMMARY.get(state, '')}".rstrip(" -")),
                 ("hostname", g.hostname() or "-"),
-                ("share LAN", kv.get("GLOBAL_SHARE_LAN", "no")),
                 ("tunnel", g.tunnel_state()),
                 ("last report", (kv.get("GLOBAL_LAST_REPORT_AT") or "-").split(".")[0]),
             ]

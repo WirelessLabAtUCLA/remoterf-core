@@ -91,7 +91,7 @@ class ClusterFlowTests(unittest.TestCase):
         with mock.patch.dict("os.environ", env, clear=True):
             if not g.participating():
                 g.update(GLOBAL_CONSENT="yes", GLOBAL_NAME=deployment_id[-1], GLOBAL_DISPLAY_NAME="Lab",
-                         GLOBAL_EMAIL="lab@example.edu", GLOBAL_SHARE_LAN="no", GLOBAL_STATE="unregistered")
+                         GLOBAL_EMAIL="lab@example.edu", GLOBAL_STATE="unregistered")
                 g.ensure_identity()
                 g._apply_me({"status": "active", "deployment_id": deployment_id, "name": deployment_id[-1], "relay": None})
             yield
