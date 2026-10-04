@@ -311,6 +311,8 @@ class ServerDeviceReserveHandler(_DeviceHandlerBase):
         now = int(self.clock())
         claims = action.claims
         payload = action.request.value["payload"]
+        from . import cluster as cluster_module
+
         principal_id, account_id = self._principal(tx, claims)
         outcome = self.reservations.federated_reserve(
             local_account_id=account_id,
@@ -322,6 +324,7 @@ class ServerDeviceReserveHandler(_DeviceHandlerBase):
             contract_id=claims["contract_id"],
             contract_version=claims["contract_version"],
             request_id=claims["request_id"],
+            lab_max_reservations=cluster_module.lab_cap(claims["iss"]),
         )
         if "error" in outcome:
             raise FederationBusinessError(outcome["error"])

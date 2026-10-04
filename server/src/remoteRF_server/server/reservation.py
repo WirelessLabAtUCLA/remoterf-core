@@ -1353,11 +1353,15 @@ class ReservationHandler:
         contract_id: str,
         contract_version: int,
         request_id: str,
+        lab_max_reservations: int | None = None,
     ) -> dict:
         """Create one reservation for a federated principal, idempotently.
 
         Returns the reservation, or {"error": <code>} for an ordinary local
         refusal (permission, quota, conflict, unknown device, bad interval).
+        `lab_max_reservations` bounds what the principal's whole home lab may
+        hold here at once: per-user quotas alone do not bound a lab that can
+        mint accounts.
         The plaintext device token is never returned: it stays inside this
         deployment and is materialized straight onto the device.
         """
@@ -1404,6 +1408,16 @@ class ReservationHandler:
         )
         if validation[0] is False:
             return {"error": "reservation_refused", "detail": str(validation[1])}
+
+        if lab_max_reservations is not None:
+            held = self.cursor.execute(
+                "SELECT COUNT(*) FROM FederatedReservations f "
+                "JOIN Reservations r ON r.res_id = f.res_id "
+                "WHERE f.issuer_deployment_id = ? AND r.end_time > ?",
+                (issuer, datetime.now()),
+            ).fetchone()[0]
+            if held >= int(lab_max_reservations):
+                return {"error": "lab_reservation_limit"}
 
         self.cursor.execute(
             "SELECT 1 FROM Reservations WHERE device_id = ? AND start_time < ? AND end_time > ?",

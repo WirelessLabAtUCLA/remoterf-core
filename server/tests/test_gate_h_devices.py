@@ -444,6 +444,35 @@ def test_reserve_is_idempotent_per_request_and_authorizes_device_rpc(world):
         ).fetchall() == [("authorized",), ("authorized",)]
 
 
+def test_a_lab_at_its_cap_is_refused_whatever_its_users_quotas_allow(world):
+    """Per-user quotas do not bound a lab that can mint accounts; the owner's
+    per-lab cap does, counting every reservation that lab still holds."""
+    from remoteRF_server.server.federation import cluster
+
+    world["enroll"](devices=[world["allowed"]])
+    with patch.object(cluster, "lab_cap", return_value=1):
+        start, end = _window(-5)
+        first, _ = world["call"]("device_reserve", local_device_id=str(world["allowed"]),
+                                 start_time=start, end_time=end)
+        assert first["status"] == "ok", first
+        later = _window(60)
+        second, _ = world["call"]("device_reserve", local_device_id=str(world["allowed"]),
+                                  start_time=later[0], end_time=later[1])
+        assert (second["status"], second["error_code"]) == ("error", "lab_reservation_limit")
+        # Cancelling frees the lab's one slot.
+        cancelled, _ = world["call"]("device_cancel", reservation_id=first["payload"]["reservation"]["reservation_id"])
+        assert cancelled["status"] == "ok", cancelled
+        third, _ = world["call"]("device_reserve", local_device_id=str(world["allowed"]),
+                                 start_time=later[0], end_time=later[1])
+        assert third["status"] == "ok", third
+    # No cluster, no cap: a contract made by hand is bounded by user quotas alone.
+    with patch.object(cluster, "lab_cap", return_value=None):
+        more = _window(120)
+        fourth, _ = world["call"]("device_reserve", local_device_id=str(world["allowed"]),
+                                  start_time=more[0], end_time=more[1])
+        assert fourth["status"] == "ok", fourth
+
+
 def test_device_rpc_without_live_reservation_or_capability_is_refused(world):
     world["enroll"](devices=[world["allowed"]])
     no_reservation, _ = world["call"](

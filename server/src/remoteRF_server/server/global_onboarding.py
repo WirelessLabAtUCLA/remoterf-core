@@ -53,8 +53,10 @@ client still prefers the LAN, so nothing local gets slower.
 It is also how labs work together. Once you and another deployment sign
 an agreement, your users can reserve instruments there and theirs can
 reserve yours, whether that lab is down the hall or on another
-continent. Each partnership is arranged deliberately, one at a time --
-joining Global shares none of your hardware on its own.
+continent. Each partnership is arranged deliberately, one at a time,
+with one exception: instruments a lab has opened to everyone on Global
+reach your users as soon as you are in (`cluster remove` leaves such a
+cluster). Joining Global shares none of your hardware on its own.
 
 Once an hour it sends Global a short note: this deployment's name and
 ID, version, uptime, how many accounts, what devices it has, how many

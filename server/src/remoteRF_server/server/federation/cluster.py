@@ -22,6 +22,13 @@ secret's hash) can carry identities but never substitute one. From there the
 agent walks the ordinary contract lifecycle (propose, accept, activate) over
 the broker's evidence directory. Nothing here bypasses the local trust store
 or the contract state machine; it only drives them.
+
+A public cluster swaps the code for an open door (`cluster public <name> on`):
+any lab on Global walks in, and every account on a lab that is in can use what
+the cluster shares. There is no secret to check, so both sides pin the other's
+key on Global's word -- an admin approved each lab by hand, and that approval
+is the trust a public cluster runs on. What bounds a lab nobody chose is the
+per-lab cap, and `cluster kick`.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import secrets
 import sqlite3
 import string
 import time
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -53,6 +61,11 @@ CONTRACT_DAYS = 365
 CODE_PREFIX = "cluster."          # a student code minted here, redeemed here
 CLUSTER_CODE = "cluster"          # the `code_name` a cluster enrolment carries to a partner
 CODE_DAYS = 7
+PUBLIC_LAB_CAP = 4                # reservations one lab may hold here at a time, as a public cluster starts out
+# ponytail: the broker's roster holds 64 labs, so a cluster does too. A public
+# cluster that outgrows it needs a paged roster, or members that contract with
+# the owner alone instead of meshing with each other.
+MAX_MEMBERS = 64
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _STATE_FILE = "clusters.json"
 
@@ -282,7 +295,12 @@ def invite(name: str, *, auto: bool = True) -> str:
 
 
 def join(code: str) -> str:
-    invite_id, secret = decode_code(code)
+    try:
+        invite_id, secret = decode_code(code)
+    except ClusterError:
+        if _NAME.match(code or ""):
+            return join_public(code)  # not a code: the name of a public cluster
+        raise
     me = _pin_self()
     result = g.call("POST", "/v2/broker/invites/join", {
         "protocol_version": "2",
@@ -382,10 +400,150 @@ def remove(name: str) -> str:
             _publish(party)
         except g.GlobalError:
             outcome = "removed locally; could not reach Global to tell the other lab"
+    if cluster.get("public"):
+        try:
+            if cluster["role"] == "owner":
+                _public_note(name, "gone")
+            elif cluster.get("state") != "revoked":
+                # Remembered on Global, so the next tick does not walk back in.
+                _public_note(name, "left", owner=cluster["peer"])
+        except g.GlobalError:
+            outcome = "removed locally; could not reach Global to tell the other lab"
     _forget_accounts(name, cluster)
     del clusters[name]
     save(clusters)
     return outcome
+
+
+# -----------------------------
+# Public clusters, and the two things that bound them
+# -----------------------------
+
+def _public_note(name: str, state: str, owner: str | None = None) -> None:
+    me = _pin_self()
+    g.call("POST", "/v2/broker/clusters/roster", {"protocol_version": "2", "public": {
+        "cluster_name": name, "owner": owner or me["deployment_id"], "identity": me, "state": state}})
+
+
+def set_public(name: str, on: bool) -> None:
+    """Owner: open the cluster to every lab on Global, or shut the door again.
+    Shutting it admits nobody new; the labs already in stay (`kick` is for
+    those)."""
+    clusters = load()
+    cluster = _find(clusters, name)
+    if cluster["role"] != "owner":
+        raise ClusterError(f"{name} is owned by another deployment; only the owner opens or closes it")
+    if not on and not cluster.get("public"):
+        raise ClusterError(f"{name} is not public")
+    _public_note(name, "open" if on else "closed")
+    if on:
+        cluster.setdefault("lab_cap", PUBLIC_LAB_CAP)
+    cluster["public"] = "open" if on else "closed"
+    save(clusters)
+
+
+def public_pools() -> list[dict]:
+    """The public clusters other labs hold open, each with our own state in it."""
+    return g.call("GET", "/v2/broker/clusters/roster").get("pools", [])
+
+
+def join_public(name: str, pool: dict | None = None) -> str:
+    """Walk into a public cluster; the owner's key is pinned on Global's word."""
+    if pool is None:
+        pool = next((item for item in public_pools() if item["cluster_name"] == name), None)
+        if pool is None:
+            raise ClusterError(f"no public cluster named {name}")
+    clusters = load()
+    # ponytail: one local name per cluster, so a second lab's public cluster
+    # of the same name cannot be joined until the first is removed. Key
+    # clusters by (owner, name) if that ever bites.
+    if name in clusters:
+        raise ClusterError(f"{name} is already a cluster here")
+    owner = pool["owner"]
+    peer = owner["identity"]["deployment_id"]
+    _pin(owner["identity"], source="cluster_invite")
+    _public_note(name, "joined", owner=peer)
+    clusters[name] = {"role": "member", "state": "joined", "public": True, "lab_cap": PUBLIC_LAB_CAP,
+                      "peer": peer, "peer_name": owner.get("display_name"), "created_at": int(time.time())}
+    save(clusters)
+    return name
+
+
+def _member(cluster: dict, lab: str) -> str:
+    """A member lab by deployment id, the id prefix `cluster list` shows, or display name."""
+    lab = (lab or "").strip().rstrip("…")
+    hits = [peer for peer, member in cluster["members"].items()
+            if peer == lab or (len(lab) >= 8 and peer.startswith(lab))
+            or (member.get("display_name") or "").lower() == lab.lower()]
+    if len(hits) != 1:
+        raise ClusterError(f"{lab or 'that'} is not one lab in this cluster; `cluster list` shows them")
+    return hits[0]
+
+
+def kick(name: str, lab: str) -> str:
+    """Owner: put one lab out and keep the rest. Its contract is revoked, its
+    visitors lose the cluster's groups and the reservations they hold here,
+    and the public door stays shut to it -- a fresh invite code is the way
+    back in. Returns the lab's name."""
+    clusters = load()
+    cluster = _find(clusters, name)
+    if cluster["role"] != "owner":
+        raise ClusterError(f"{name} is owned by another deployment; only the owner puts a lab out")
+    peer = _member(cluster, lab)
+    member = cluster["members"].pop(peer)
+    _revoke(member.get("contract_id"))
+    try:
+        _publish(member)
+    except g.GlobalError:
+        pass  # revoked here regardless; that lab finds out when its next grant is refused
+    if peer not in cluster.setdefault("banned", []):
+        cluster["banned"].append(peer)
+    _forget_lab(name, peer, member.get("contract_id"))
+    save(clusters)
+    return member.get("display_name") or peer
+
+
+def _forget_lab(name: str, peer: str, contract_id: str | None) -> None:
+    """Take one lab's visitors out of the cluster and cancel what they hold
+    here under its contract."""
+    with _usergroups() as conn:
+        accounts = [row[0] for row in conn.execute(
+            "SELECT a.local_account_id FROM ClusterAccounts a "
+            "JOIN FederatedPrincipals p ON p.local_account_id=a.local_account_id "
+            "WHERE a.cluster_name=? AND a.kind='proxy' AND p.issuer_deployment_id=?", (name, peer)).fetchall()]
+        for account in accounts:
+            _take_back(conn, name, account=account)
+            conn.execute("DELETE FROM ClusterAccounts WHERE cluster_name=? AND local_account_id=?", (name, account))
+    path = _db_path().with_name("reservations.db")
+    if not contract_id or not path.exists():
+        return
+    with closing(sqlite3.connect(path, timeout=10.0)) as conn, conn:
+        try:
+            conn.execute("DELETE FROM Reservations WHERE res_id IN "
+                         "(SELECT res_id FROM FederatedReservations WHERE contract_id=?)", (contract_id,))
+            conn.execute("DELETE FROM FederatedReservations WHERE contract_id=?", (contract_id,))
+        except sqlite3.OperationalError:
+            pass  # no federated reservations table: nothing was ever reserved from outside
+
+
+def set_cap(name: str, cap: int) -> None:
+    """How many reservations any one other lab in the cluster may hold on this
+    server's devices at a time; 0 lifts the cap."""
+    clusters = load()
+    cluster = _find(clusters, name)
+    if cap < 0:
+        raise ClusterError("the cap is a number of reservations: 0 (no cap) or more")
+    cluster["lab_cap"] = int(cap)
+    save(clusters)
+
+
+def lab_cap(deployment_id: str) -> int | None:
+    """Reservations one partner lab may hold here at a time: the most generous
+    cap among the clusters shared with it. None when any of those has no cap,
+    or the lab is in no cluster (a contract made by hand is not capped)."""
+    caps = [cluster.get("lab_cap") or 0 for cluster in load().values()
+            if deployment_id in dict(_parties(cluster))]
+    return max(caps) if caps and all(caps) else None
 
 
 def list_clusters() -> list[dict]:
@@ -393,7 +551,9 @@ def list_clusters() -> list[dict]:
     store = None
     out = []
     for name, cluster in sorted(load().items()):
-        item = {"name": name, "role": cluster["role"], "created_at": cluster.get("created_at")}
+        item = {"name": name, "role": cluster["role"], "created_at": cluster.get("created_at"),
+                "public": cluster.get("public"), "lab_cap": cluster.get("lab_cap") or 0,
+                "kept_out": len(cluster.get("banned", []))}
         if cluster["role"] == "owner":
             members = []
             for peer, member in sorted(cluster["members"].items()):
@@ -509,10 +669,13 @@ def _grant(conn, name: str, account: int, group_id: int) -> None:
                      "VALUES (?,?,?)", (name, int(account), int(group_id)))
 
 
-def _take_back(conn, name: str, group_id: int | None = None) -> None:
-    """Remove exactly the memberships this cluster granted (one group, or all)."""
-    where = "cluster_name=?" + ("" if group_id is None else " AND group_id=?")
-    args = (name,) if group_id is None else (name, int(group_id))
+def _take_back(conn, name: str, group_id: int | None = None, account: int | None = None) -> None:
+    """Remove exactly the memberships this cluster granted (one group, one account, or all)."""
+    where, args = "cluster_name=?", (name,)
+    if group_id is not None:
+        where, args = where + " AND group_id=?", args + (int(group_id),)
+    if account is not None:
+        where, args = where + " AND local_account_id=?", args + (int(account),)
     conn.execute(
         f"DELETE FROM UsersLookup WHERE (user_id,group_id) IN "
         f"(SELECT local_account_id,group_id FROM ClusterMemberships WHERE {where})", args)
@@ -547,6 +710,27 @@ def join_account(conn, name: str, cluster: dict, local_account_id: int, *, kind:
     )
     for group_id in cluster.get("groups", []):
         _grant(conn, name, local_account_id, group_id)
+
+
+def _admit_everyone(clusters: dict) -> None:
+    """A public cluster needs no code: every native account here is in it."""
+    public = [(name, cluster) for name, cluster in clusters.items() if cluster.get("public")]
+    path = _db_path().with_name("reservations.db")
+    if not public or not path.exists():
+        return
+    with closing(sqlite3.connect(path, timeout=10.0)) as conn:
+        try:
+            accounts = [int(row[0]) for row in conn.execute(
+                "SELECT acc_id FROM Accounts WHERE auth_type='local_password'").fetchall()]
+        except sqlite3.OperationalError:
+            return  # no accounts table yet
+    with _usergroups() as conn:
+        for name, cluster in public:
+            have = {row[0] for row in conn.execute(
+                "SELECT local_account_id FROM ClusterAccounts WHERE cluster_name=?", (name,)).fetchall()}
+            for account in accounts:
+                if account not in have:
+                    join_account(conn, name, cluster, account, kind="local")
 
 
 def mint_codes(name: str, *, count: int = 1, uses: int = 1, duration_sec: int = CODE_DAYS * 86400) -> list[str]:
@@ -630,6 +814,8 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
         for peer, party in _parties(cluster):
             if party.get("state") != "active" or not party.get("contract_id") or peer in enrolled:
                 continue
+            if cluster.get("public") and not (party.get("sharing") or {}).get("devices"):
+                continue  # a lab nobody chose gets our accounts only once it shares a device
             try:
                 enroller.outbound.execute(
                     local_account_id=account, destination_deployment_id=peer,
@@ -869,6 +1055,8 @@ def _collect_joins(name: str, cluster: dict, broker_invites: list[dict], notify)
             del cluster["invites"][invite_id]
             continue
         peer = joiner["identity"]["deployment_id"]
+        if peer in cluster.get("banned", []):
+            cluster["banned"].remove(peer)  # a code handed to a lab that was kicked is its way back in
         member = cluster["members"].setdefault(peer, {"published": [], "joined_at": int(time.time())})
         member.update(display_name=joiner.get("display_name"), joiner=joiner["identity"], state="pending")
         del cluster["invites"][invite_id]
@@ -878,16 +1066,75 @@ def _collect_joins(name: str, cluster: dict, broker_invites: list[dict], notify)
             notify(f"[cluster] {peer} wants to join {name}: run `cluster accept {name}`")
 
 
+def _collect_public_joins(name: str, cluster: dict, joins: list[dict], notify) -> None:
+    """Owner of an open cluster: every lab Global lists as having walked in
+    becomes a member -- Global's approval of that lab stands in for the invite
+    secret. A lab that was kicked stays out; one that left may come back."""
+    for item in joins:
+        if item.get("cluster_name") != name:
+            continue
+        identity = item["identity"]
+        peer = identity["deployment_id"]
+        member = cluster["members"].get(peer)
+        if peer in cluster.get("banned", []) or (member is not None and member.get("state") != "revoked"):
+            continue
+        if sum(m.get("state") != "revoked" for m in cluster["members"].values()) >= MAX_MEMBERS:
+            _once(f"full:{name}", f"[cluster] {name} is full ({MAX_MEMBERS} labs); more are waiting at the door",
+                  notify)
+            break
+        member = cluster["members"][peer] = {
+            "display_name": item.get("display_name"), "joiner": identity, "state": "pending",
+            "published": [], "joined_at": int(time.time())}
+        try:
+            _propose(cluster, member, peer)
+        except (ContractError, g.GlobalError) as exc:
+            # Left pending: `cluster accept` retries it, `cluster kick` refuses it.
+            if member.get("state") == "pending":
+                member["joiner"] = identity
+            notify(f"[cluster] {name}: could not admit {item.get('display_name') or peer}: "
+                   f"{getattr(exc, 'code', exc)}")
+
+
+_said: set[str] = set()
+
+
+def _once(key: str, text: str, notify) -> None:
+    """A standing condition is worth one console line, not one per tick."""
+    if key not in _said:
+        _said.add(key)
+        notify(text)
+
+
+def _walk_in(pools: list[dict], notify) -> None:
+    """Join every public cluster this lab has never been in. One it left, or
+    was put out of, has a state on Global and is left alone."""
+    for pool in pools:
+        name = pool.get("cluster_name")
+        if pool.get("state") is not None or name in load():
+            continue
+        lab = (pool.get("owner") or {}).get("display_name") or "another lab"
+        try:
+            join_public(name, pool)
+        except (ClusterError, ContractError, g.GlobalError, KeyError, TypeError) as exc:
+            _once(f"join:{name}", f"[cluster] could not join public cluster {name} from {lab}: "
+                                  f"{getattr(exc, 'code', exc)}", notify)
+            continue
+        notify(f"[cluster] joined public cluster {name} from {lab}: every account here can reserve what it "
+               f"shares. `cluster remove {name}` leaves it.")
+
+
 def tick(notify=None, home=None) -> None:
     """One agent pass: move every cluster and member one step closer to active,
     then (given the HOME runtime) enrol students wherever they are missing."""
     notify = notify or (lambda text: None)
+    # Rosters, status notes and the public clusters: one GET for the whole pass.
+    board = g.call("GET", "/v2/broker/clusters/roster")
+    _walk_in(board.get("pools", []), notify)
     clusters = load()
     if not clusters:
         return
     directory = None
     broker_invites = None
-    board = None  # rosters and status notes, one GET for all clusters
     for name, cluster in clusters.items():
         if cluster["role"] == "owner":
             if cluster["invites"]:
@@ -895,7 +1142,12 @@ def tick(notify=None, home=None) -> None:
                     broker_invites = g.call("GET", "/v2/broker/invites")["invites"]
                 _collect_joins(name, cluster, broker_invites, notify)
                 save(clusters)
-            if not cluster["members"]:
+            if cluster.get("public") == "open":
+                _collect_public_joins(name, cluster, board.get("joins", []), notify)
+                save(clusters)
+            # An empty cluster has nothing to drive, bar withdrawing a roster
+            # that still names a lab that has since been kicked.
+            if not cluster["members"] and not cluster.get("roster"):
                 continue
             if directory is None:
                 directory = g.call("GET", "/v2/broker/contracts")["contracts"]
@@ -910,8 +1162,6 @@ def tick(notify=None, home=None) -> None:
             if directory is None:
                 directory = g.call("GET", "/v2/broker/contracts")["contracts"]
             _advance(cluster, cluster["peer"], directory, label=name, notify=notify, is_member=True)
-        if board is None:
-            board = g.call("GET", "/v2/broker/clusters/roster")
         if cluster["role"] != "owner":
             _mesh(name, cluster, board["rosters"], directory, notify)
         try:
@@ -920,5 +1170,6 @@ def tick(notify=None, home=None) -> None:
             notify(f"[cluster] {name}: could not publish what we share: {exc}")
         _take_statuses(name, cluster, board.get("statuses", []))
         save(clusters)
+    _admit_everyone(clusters)
     if home is not None:
         enroll_students(home, notify)

@@ -26,6 +26,7 @@ reloads or restarts itself.
 from __future__ import annotations
 
 import sys
+import textwrap
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
@@ -152,8 +153,11 @@ def _table() -> list[Command]:
         Command(("cluster info",), "Every lab, shared group and device in a cluster", _federation("info"), "Clusters"),
         Command(("cluster create",), "Start a cluster: cluster create <name>", _federation("create"), "Clusters"),
         Command(("cluster invite",), "Invite code for a lab: cluster invite <name>", _federation("invite"), "Clusters"),
-        Command(("cluster join",), "Join with a code: cluster join <code>", _federation("join"), "Clusters"),
+        Command(("cluster join",), "Join with a code, or a public cluster by name: cluster join <code|name>", _federation("join"), "Clusters"),
         Command(("cluster remove",), "Leave or disband: cluster remove <name>", _federation("remove"), "Clusters"),
+        Command(("cluster public",), "Open a cluster to every lab on Global: cluster public <name> on|off (alone: list them)", _federation("public"), "Clusters"),
+        Command(("cluster kick",), "Put one lab out of your cluster: cluster kick <name> <lab>", _federation("kick"), "Clusters"),
+        Command(("cluster cap",), "Reservations one lab may hold here at a time: cluster cap <name> <n> (0 = no cap)", _federation("cap"), "Clusters"),
         Command(("cluster groups",), "Choose which of your groups a cluster shares (interactive)", _federation("groups"), "Clusters"),
         Command(("cluster codes create",), "Codes for your users to join a cluster (interactive)", _federation("codes create"), "Clusters"),
         Command(("cluster codes list",), "List cluster codes", _federation("codes list"), "Clusters"),
@@ -249,8 +253,17 @@ DEVICE_TYPES = "pluto, pluto-mimo, rtl-sdr, hackrf, ti-mmwave, usrp-2901, usrp-b
 
 
 def _columns(rows: list[tuple[str, str]], indent: str = "  ") -> list[str]:
+    from ..common.utils.panel import MAX_CONTENT_WIDTH, _terminal_columns
+
     width = max(len(left) for left, _ in rows)
-    return [f"{indent}{left:<{width}}  {right}" for left, right in rows]
+    # Wrap under the right column: a literal panel clips, and the usage sits at the end.
+    room = max(20, min(MAX_CONTENT_WIDTH, _terminal_columns() - 4) - len(indent) - width - 2)
+    out = []
+    for left, right in rows:
+        first, *rest = textwrap.wrap(right, room) or [""]
+        out.append(f"{indent}{left:<{width}}  {first}")
+        out += [f"{indent}{'':<{width}}  {piece}" for piece in rest]
+    return out
 
 
 def cmd_help(argv: list[str]) -> int:
