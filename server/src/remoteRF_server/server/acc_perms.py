@@ -16,7 +16,7 @@
 import sqlite3
 import threading
 from typing import Tuple 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..common.utils import *
 from .device_manager import get_registered_devices
@@ -166,6 +166,10 @@ class perms_db:
             # check if user has reached max reservation time
             if reservation_duration > max_time:
                 return False, f'Max Reservation Duration allowed is {max_time/60} minutes.'
+
+            _allowed_h, horizon = user_group_handler.get_users_max_horizon(uid=uid, device_id=device_id)
+            if horizon > 0 and start_time > datetime.now() + timedelta(seconds=horizon):
+                return False, f'Reservations may start at most {horizon / 86400:g} days ahead.'
 
             # # check if user has reached max reservations
             # max_reservation_info = user_group_handler.get_users_max_reservations(uid=uid, device_id=device_id)

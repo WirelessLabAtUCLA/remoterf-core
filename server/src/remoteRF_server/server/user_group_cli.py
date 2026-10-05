@@ -167,6 +167,10 @@ def make_user_group_local(session) -> None:
     if lifetime_sec is None:
         return
 
+    horizon_days = _prompt_int("Max days ahead a reservation may start [7] (0=no limit) (c to cancel): ", default=7, min_v=0)
+    if horizon_days is None:
+        return
+
     # Off the LAN means through the Global relay: codes for a LAN-only group
     # cannot be redeemed there and its members cannot log in there.
     lan_only = not _prompt_yes_no("Reachable from outside your network (via Global)? (Y/n): ", default_no=False)
@@ -179,6 +183,7 @@ def make_user_group_local(session) -> None:
     print(f"  max_reservation_time_sec : {max_reservation_time_sec}")
     print(f"  max_reservations         : {max_reservations}")
     print(f"  lifetime_sec             : {lifetime_sec}")
+    print(f"  max_days_ahead           : {horizon_days or 'no limit'}")
     print(f"  lan_only                 : {'yes' if lan_only else 'no'}")
 
     if not _prompt_yes_no("Proceed? (y/n): ", default_no=True):
@@ -192,6 +197,7 @@ def make_user_group_local(session) -> None:
         max_reservations=max_reservations,
         lifetime_sec=lifetime_sec,
         lan_only=lan_only,
+        max_horizon_sec=horizon_days * 86400,
     )
 
     if group_id is not None:
@@ -250,7 +256,7 @@ def list_user_groups_local(session) -> None:
         group["devices_whitelist"] = group.get("devices_whitelist") or "all"
     columns = [
         "group_id", "group_name", "devices_whitelist", "max_reservation_time_sec",
-        "max_reservations", "lifetime_sec", "lan_only", "created_at",
+        "max_reservations", "lifetime_sec", "max_horizon_sec", "lan_only", "created_at",
     ] + (["users"] if include_users else [])
     print_table("User groups", groups, columns, empty="No user groups found.")
 
@@ -356,6 +362,12 @@ def edit_user_group_local(session) -> None:
     if lifetime_sec == "":
         lifetime_sec = None
 
+    horizon_days = _prompt_int_optional("New max days ahead a reservation may start (0=no limit) (Enter unchanged, c cancel): ", min_v=0)
+    if horizon_days is None:
+        return
+    if horizon_days == "":
+        horizon_days = None
+
     lan_only_raw = _prompt_raw("LAN only? (y/n | Enter unchanged, c cancel): ")
     if lan_only_raw is None:
         return
@@ -368,6 +380,7 @@ def edit_user_group_local(session) -> None:
         and max_res_time is None
         and max_reservations is None
         and lifetime_sec is None
+        and horizon_days is None
         and lan_only is None
     ):
         print("No changes specified. Nothing to do.")
@@ -386,6 +399,7 @@ def edit_user_group_local(session) -> None:
     print(f"  max_reservation_time_sec: {max_res_time if max_res_time is not None else '(unchanged)'}")
     print(f"  max_reservations        : {max_reservations if max_reservations is not None else '(unchanged)'}")
     print(f"  lifetime_sec            : {lifetime_sec if lifetime_sec is not None else '(unchanged)'}")
+    print(f"  max_days_ahead          : {(horizon_days or 'no limit') if horizon_days is not None else '(unchanged)'}")
     print(f"  lan_only                : {('yes' if lan_only else 'no') if lan_only is not None else '(unchanged)'}")
 
     if not _prompt_yes_no("Proceed? (y/n): "):
@@ -399,6 +413,7 @@ def edit_user_group_local(session) -> None:
         max_reservations=max_reservations,      # type: ignore[arg-type]
         lifetime_sec=lifetime_sec,              # type: ignore[arg-type]
         lan_only=lan_only,
+        max_horizon_sec=None if horizon_days is None else horizon_days * 86400,
     )
 
     if ok:
@@ -446,19 +461,22 @@ def make_enrollment_codes_local(session) -> None:
         return
 
     groups = {int(g["group_id"]): g for g in user_group_handler.get_all_user_groups(include_users=False) or []}
+    group_id = -1  # account only: no local devices; a public cluster admits the account on its own
     if not groups:
-        print("No user groups yet. Create one first with `groups create`.")
-        return
-    print("Your groups:")
-    for gid, g in sorted(groups.items()):
-        print(f"  {gid:>3}  {g['group_name']}" + ("  (LAN only)" if g.get("lan_only") else ""))
-    while True:
-        group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
-        if group_id is None:
-            return
-        if group_id in groups:
-            break
-        print(f"No group with id {group_id}; pick one from the list.")
+        print("No user groups yet: skipping (codes create accounts only).")
+    elif _prompt_yes_no("Attach a user group? (Y/n): ", default_no=False):
+        print("Your groups:")
+        for gid, g in sorted(groups.items()):
+            print(f"  {gid:>3}  {g['group_name']}" + ("  (LAN only)" if g.get("lan_only") else ""))
+        while True:
+            group_id = _prompt_int("Group ID to attach codes to? (c to cancel): ", min_v=0)
+            if group_id is None:
+                return
+            if group_id in groups:
+                break
+            print(f"No group with id {group_id}; pick one from the list.")
+    else:
+        print("Account only: the account joins no group and sees no local devices; a public cluster admits it on its own.")
 
     char_count = _prompt_int("Characters per code name? [10] (c to cancel): ", default=10, min_v=4)
     if char_count is None:
@@ -497,7 +515,7 @@ def make_enrollment_codes_local(session) -> None:
         return
 
     print("\nAbout to create enrollment codes with:")
-    print(f"  group_id     : {group_id}")
+    print(f"  group_id     : {group_id if group_id >= 0 else 'none (account only)'}")
     print(f"  count        : {len(code_names)}")
     print(f"  uses         : {uses}")
     print(f"  duration_sec : {duration_sec}")
@@ -604,7 +622,8 @@ def list_enrollment_codes_local(session) -> None:
     ):
         group = groups.get(gid, {})
         head = " · ".join([
-            f"cluster {cluster_name}" if cluster_name else f"group {gid} {group.get('group_name', '?')}".rstrip(),
+            f"cluster {cluster_name}" if cluster_name else "account only" if gid < 0
+            else f"group {gid} {group.get('group_name', '?')}".rstrip(),
             f"{_plural(uses, 'use')} left",
             _fmt_duration(duration),
             _plural(len(items), "code"),
@@ -711,6 +730,7 @@ def export_user_groups_csv_local() -> Optional[Path]:
         "max_reservation_time_sec",
         "max_reservations",
         "lifetime_sec",
+        "max_horizon_sec",
         "created_at",
         "users",
     ]

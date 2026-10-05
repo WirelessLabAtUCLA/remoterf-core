@@ -126,7 +126,7 @@ def cmd_cluster_info(name: str) -> int:
     mine = {"groups": len(item["groups"]), "detail": [
         {"name": g["group_name"], "max_reservation_time_sec": g["max_reservation_time_sec"],
          "max_reservations": g["max_reservations"], "lifetime_sec": g["lifetime_sec"],
-         "devices": describe_devices(g["devices"])}
+         "max_horizon_sec": g["max_horizon_sec"], "devices": describe_devices(g["devices"])}
         for g in item["groups"]]}
     if item["role"] == "owner":
         labs = [(me, "admin", mine)] + [(m, "member", m.get("sharing")) for m in item["members"]]
@@ -150,7 +150,7 @@ def cmd_cluster_info(name: str) -> int:
                 f"up to {_fmt_duration(group['max_reservation_time_sec'])} per reservation",
                 f"{_n(group['max_reservations'], 'reservation')} at once",
                 "no expiry" if group["lifetime_sec"] <= 0 else f"expires after {_fmt_duration(group['lifetime_sec'])}",
-            ]))
+            ] + ([f"up to {_fmt_duration(group['max_horizon_sec'])} ahead"] if group.get("max_horizon_sec") else [])))
             width = max([len(d["name"]) for d in group["devices"]] + [4])
             for device in group["devices"]:
                 rows.append(f"        {device['id']:>6}  {device['name']:<{width}}  {device['type'] or '?':<12}  "
@@ -303,9 +303,13 @@ def _public_pools() -> int:
             if item.get("role") == "owner" and item.get("public") == "open"]
     if mine:
         rows += ([""] if rows else []) + ["Yours, open to every lab: " + ", ".join(mine)]
+    rows += ([""] if rows else ["None yet.", ""]) + [
+        "To open one of your clusters to every lab on Global, or close it again:",
+        "    cluster public <name> on",
+        "    cluster public <name> off",
+    ]
     print()
-    print_panel("Public clusters", rows or ["None yet. Open one of yours with `cluster public <name> on`."],
-                literal=True)
+    print_panel("Public clusters", rows, literal=True)
     print()
     return 0
 

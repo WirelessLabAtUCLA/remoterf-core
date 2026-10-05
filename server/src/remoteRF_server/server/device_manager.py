@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import importlib
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -609,6 +611,12 @@ def _seed_default_usrp_phaser_driver() -> None:
     _seed_default_driver("usrp_phaser_schema.py", "usrp_phaser")
 
 
+_LIBIIO_FIX = {
+    "Darwin": "brew install libiio",
+    "Linux": "sudo apt install libiio0  (or your distro's libiio package)",
+}.get(platform.system(), "install libiio from https://github.com/analogdevicesinc/libiio (on Windows, run the server in WSL)")
+
+
 def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
     _seed_default_usrp_driver()
@@ -617,45 +625,37 @@ def _load_all_drivers() -> None:
     _seed_default_ti_mmwave_driver()
     _seed_default_usrp_phaser_driver()
 
-    try:
-        from ..common.idl import pluto_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in pluto driver: {e}")
+    # The Pluto drivers need the native libiio behind pylibiio; without it
+    # every one of them fails the same way, which is worth one line, not four.
+    seen_libiio = False
 
-    try:
-        from ..common.idl import pluto_mimo_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in pluto mimo driver: {e}")
+    def _warn(line: str, error: str) -> None:
+        nonlocal seen_libiio
+        if "iio" in error:
+            if not seen_libiio:
+                seen_libiio = True
+                print(f"Warning: libiio is not installed, so this server cannot host a Pluto of its own. "
+                      f"Plutos shared by other labs still work for your users. To host one here: {_LIBIIO_FIX}")
+            return
+        print(line)
 
-    try:
-        from ..drivers.usrp import usrp_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in usrp driver: {e}")
+    for label, module in (
+        ("built-in pluto driver", "..common.idl.pluto_schema"),
+        ("built-in pluto mimo driver", "..common.idl.pluto_mimo_schema"),
+        ("built-in usrp driver", "..drivers.usrp.usrp_schema"),
+        ("built-in rtl_sdr driver", "..drivers.rtl_sdr.rtl_sdr_schema"),
+        ("built-in hackrf driver", "..drivers.hackrf.hackrf_schema"),
+        ("built-in TI mmWave driver", "..drivers.ti_mmwave.ti_mmwave_schema"),
+        ("built-in USRP Phaser driver", "..drivers.usrp_phaser.usrp_phaser_schema"),
+    ):
+        try:
+            importlib.import_module(module, __package__)
+        except Exception as e:
+            _warn(f"Warning: could not load {label}: {e}", str(e))
 
-    try:
-        from ..drivers.rtl_sdr import rtl_sdr_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in rtl_sdr driver: {e}")
-
-    try:
-        from ..drivers.hackrf import hackrf_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in hackrf driver: {e}")
-
-    try:
-        from ..drivers.ti_mmwave import ti_mmwave_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in TI mmWave driver: {e}")
-
-    try:
-        from ..drivers.usrp_phaser import usrp_phaser_schema as _  # noqa: F401
-    except Exception as e:
-        print(f"Warning: could not load built-in USRP Phaser driver: {e}")
-
-    results = load_drivers()
-    for fname, status in results.items():
+    for fname, status in load_drivers().items():
         if status != "ok":
-            print(f"Driver load {fname}: {status}")
+            _warn(f"Driver load {fname}: {status}", status)
 
 
 def reload_devices() -> None:

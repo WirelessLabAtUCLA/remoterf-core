@@ -170,6 +170,16 @@ def test_offline_but_registered_permitted_device_reservation_succeeds(test_user,
     assert "Token" in result, {k: unmap_arg(v) for k, v in result.items()}
 
 
+def test_reservation_beyond_the_groups_horizon_is_rejected(test_user, fake_devices):
+    """A group's max_horizon_sec (default 7 days) bounds how far ahead a start may be."""
+    start, end = _slot(6 * 24)
+    result = reservation_handler.reserve_device(test_user["username"], fake_devices["connected"], start, end)
+    assert "Token" in result, {k: unmap_arg(v) for k, v in result.items()}
+    start, end = _slot(8 * 24)
+    result = reservation_handler.reserve_device(test_user["username"], fake_devices["connected"], start, end)
+    assert "Token" not in result and "7 days ahead" in str({k: unmap_arg(v) for k, v in result.items()})
+
+
 def test_nonexistent_device_reservation_rejected(test_user, fake_devices):
     start, end = _slot(3)
     result = reservation_handler.reserve_device(test_user["username"], fake_devices["missing"], start, end)

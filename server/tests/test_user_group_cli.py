@@ -32,6 +32,7 @@ class EditUserGroupCliTests(unittest.TestCase):
             "",        # max reservation time unchanged
             "",        # max reservations unchanged
             "",        # lifetime unchanged
+            "",        # days ahead unchanged
             "",        # LAN only unchanged
             "n",       # do not persist the edit
         ])
@@ -42,11 +43,35 @@ class EditUserGroupCliTests(unittest.TestCase):
         self.assertIn("devices_whitelist       : 0,1", output.getvalue())
 
     def test_enter_leaves_the_whitelist_unchanged(self) -> None:
-        session = _Session(["1", "renamed", "", "", "", "", "", "n"])
+        session = _Session(["1", "renamed", "", "", "", "", "", "", "n"])
         output = io.StringIO()
         with redirect_stdout(output):
             edit_user_group_local(session)
         self.assertIn("devices_whitelist       : (unchanged)", output.getvalue())
+
+
+class MakeEnrollmentCodesCliTests(unittest.TestCase):
+    def test_declining_a_group_makes_account_only_codes(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from remoteRF_server.server import user_group_handler as m
+        from remoteRF_server.server.user_group_cli import make_enrollment_codes_local
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.object(m, "get_db_dir", return_value=Path(tmp.name)):
+            h = m.UserGroupHandler()
+            h.create_user_group(group_name="dev", devices_whitelist=[1], max_reservation_time_sec=600,
+                                max_reservations=1, lifetime_sec=0)
+            session = _Session(["1", "n", "", "y", "", "", "y"])  # count, no group, chars, use them, uses, duration, go
+            output = io.StringIO()
+            with mock.patch("remoteRF_server.server.user_group_cli.user_group_handler", h), redirect_stdout(output):
+                make_enrollment_codes_local(session)
+            (code,) = h.get_all_enrollment_codes()
+        self.assertIn("none (account only)", output.getvalue())
+        self.assertEqual((code["group_id"], code["cluster_name"]), (-1, None))
 
 
 class WhitelistSemanticsTests(unittest.TestCase):
@@ -74,6 +99,36 @@ class WhitelistSemanticsTests(unittest.TestCase):
             code_names=["T1"], group_id=self.gid, uses=1, duration_sec=0
         )
         self.assertTrue(self.h.enroll_user_with_code(uid=7, code_name="T1"))
+
+    def test_no_horizon_limit_in_one_group_lifts_it(self) -> None:
+        self.assertEqual(self.h.get_users_max_horizon(uid=7, device_id=3), (True, 7 * 86400))
+        self.assertTrue(self.h.edit_user_group(group_id=self.gid, max_horizon_sec=2 * 86400))
+        self.assertEqual(self.h.get_users_max_horizon(uid=7, device_id=3), (True, 2 * 86400))
+        open_ended = int(self.h.create_user_group(
+            group_name="open", devices_whitelist=[3], max_reservation_time_sec=600,
+            max_reservations=1, lifetime_sec=0, max_horizon_sec=0,
+        ))
+        self.h.create_enrollment_codes(code_names=["T2"], group_id=open_ended, uses=1, duration_sec=0)
+        self.assertTrue(self.h.enroll_user_with_code(uid=7, code_name="T2"))
+        self.assertEqual(self.h.get_users_max_horizon(uid=7, device_id=3), (True, 0))
+        self.assertEqual(self.h.get_users_max_horizon(uid=7, device_id=4), (True, 2 * 86400))
+
+    def test_account_only_code_creates_an_account_in_no_group(self) -> None:
+        import sqlite3
+        self.assertEqual(self.h.create_enrollment_codes(code_names=["ACC1"], group_id=-1, uses=1, duration_sec=0),
+                         "Created 1/1 enrollment codes.")
+        self.assertTrue(self.h.validate_enrollment_code(code_name="ACC1"))
+        self.assertTrue(self.h.code_is_account_only(code_name="ACC1"))
+        self.assertFalse(self.h.code_is_account_only(code_name="T1"))
+        self.assertTrue(self.h.enroll_user_with_code(uid=9, code_name="ACC1"))
+        self.assertEqual(self.h.get_groups_user_in(uid=9), [])
+        self.assertFalse(self.h.validate_enrollment_code(code_name="ACC1"))  # single use, consumed
+        # A cluster code is group -1 too, but it is redeemed by the cluster module, never here.
+        with sqlite3.connect(self.h.filepath) as conn:
+            conn.execute("INSERT INTO EnrollmentCodes(code_name,group_id,uses,duration_sec,created_at,cluster_name) "
+                         "VALUES ('cluster.X',-1,1,0,'2026-01-01 00:00:00','lab')")
+        self.assertFalse(self.h.enroll_user_with_code(uid=9, code_name="cluster.X"))
+        self.assertFalse(self.h.code_is_account_only(code_name="cluster.X"))
 
     def test_empty_whitelist_is_unrestricted(self) -> None:
         from unittest import mock

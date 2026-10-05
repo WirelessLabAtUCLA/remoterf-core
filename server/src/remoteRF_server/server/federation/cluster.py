@@ -61,7 +61,7 @@ CONTRACT_DAYS = 365
 CODE_PREFIX = "cluster."          # a student code minted here, redeemed here
 CLUSTER_CODE = "cluster"          # the `code_name` a cluster enrolment carries to a partner
 CODE_DAYS = 7
-PUBLIC_LAB_CAP = 4                # reservations one lab may hold here at a time, as a public cluster starts out
+PUBLIC_LAB_CAP = 30               # reservations one lab may hold here at a time, as a public cluster starts out
 # ponytail: the broker's roster holds 64 labs, so a cluster does too. A public
 # cluster that outgrows it needs a paged roster, or members that contract with
 # the owner alone instead of meshing with each other.
@@ -610,7 +610,7 @@ def groups(name: str) -> list[dict]:
     with _usergroups() as conn:
         for group_id in cluster.get("groups", []):
             row = conn.execute(
-                "SELECT group_name,devices_whitelist,max_reservation_time_sec,max_reservations,lifetime_sec "
+                "SELECT group_name,devices_whitelist,max_reservation_time_sec,max_reservations,lifetime_sec,max_horizon_sec "
                 "FROM UserGroups WHERE group_id=?", (group_id,)).fetchone()
             if row is not None:
                 try:
@@ -619,7 +619,7 @@ def groups(name: str) -> list[dict]:
                     devices = set()
                 out.append({"group_id": group_id, "group_name": row[0], "devices": sorted(devices),
                             "max_reservation_time_sec": int(row[2]), "max_reservations": int(row[3]),
-                            "lifetime_sec": int(row[4])})
+                            "lifetime_sec": int(row[4]), "max_horizon_sec": int(row[5])})
     return out
 
 
@@ -632,7 +632,7 @@ def _sharing(name: str) -> dict:
     detail = [{
         "name": g["group_name"], "max_reservation_time_sec": g["max_reservation_time_sec"],
         "max_reservations": g["max_reservations"], "lifetime_sec": g["lifetime_sec"],
-        "devices": describe_devices(g["devices"]),
+        "max_horizon_sec": g["max_horizon_sec"], "devices": describe_devices(g["devices"]),
     } for g in shared]
     return {"groups": len(shared), "devices": len({d for g in shared for d in g["devices"]}), "detail": detail}
 

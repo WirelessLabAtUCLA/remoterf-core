@@ -27,6 +27,8 @@ from ..common.utils import *
 from .federation.migrations import migrate_gate_f_usergroups_schema
 from .global_onboarding import RELAYED
 
+DEFAULT_HORIZON_SEC = 7 * 86400  # how far ahead a reservation may start; 0 = no limit
+
 import os
 import sys
 
@@ -111,6 +113,7 @@ class UserGroupHandler:
         max_reservations: int,
         lifetime_sec: int,
         lan_only: bool = False,
+        max_horizon_sec: int = DEFAULT_HORIZON_SEC,
     ) -> Optional[int]:
         try:
             if not isinstance(group_name, str) or not group_name.strip():
@@ -130,6 +133,7 @@ class UserGroupHandler:
                 max_reservation_time_sec = int(max_reservation_time_sec)
                 max_reservations = int(max_reservations)
                 lifetime_sec = int(lifetime_sec)
+                max_horizon_sec = int(max_horizon_sec)
             except Exception:
                 return None
 
@@ -137,7 +141,7 @@ class UserGroupHandler:
                 return None
             if max_reservations < 0:
                 return None
-            if lifetime_sec < 0:
+            if lifetime_sec < 0 or max_horizon_sec < 0:
                 return None
 
             devices_json = json.dumps(devices_whitelist)
@@ -146,8 +150,8 @@ class UserGroupHandler:
             self.cursor.execute(
                 """
                 INSERT INTO UserGroups
-                (group_name, devices_whitelist, max_reservation_time_sec, max_reservations, lifetime_sec, created_at, lan_only)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (group_name, devices_whitelist, max_reservation_time_sec, max_reservations, lifetime_sec, created_at, lan_only, max_horizon_sec)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     group_name.strip(),
@@ -157,6 +161,7 @@ class UserGroupHandler:
                     lifetime_sec,
                     datetime.now(),
                     int(bool(lan_only)),
+                    max_horizon_sec,
                 ),
             )
             group_id = self.cursor.lastrowid
@@ -188,6 +193,14 @@ class UserGroupHandler:
         )
         total, open_groups = self.cursor.fetchone() or (0, 0)
         return int(total or 0) > 0 and int(open_groups or 0) == 0
+
+    @db_connection
+    def code_is_account_only(self, *, code_name: str) -> bool:
+        self.cursor.execute(
+            "SELECT 1 FROM EnrollmentCodes WHERE code_name = ? AND group_id = -1 AND cluster_name IS NULL LIMIT 1",
+            (str(code_name).strip(),),
+        )
+        return self.cursor.fetchone() is not None
 
     @db_connection
     def code_is_lan_only(self, *, code_name: str) -> bool:
@@ -300,6 +313,7 @@ class UserGroupHandler:
         max_reservations: int = None,
         lifetime_sec: int = None,
         lan_only: bool = None,
+        max_horizon_sec: int = None,
     ) -> bool:
         try:
             try:
@@ -367,6 +381,16 @@ class UserGroupHandler:
                 sets.append("lan_only = ?")
                 params.append(int(bool(lan_only)))
 
+            if max_horizon_sec is not None:
+                try:
+                    v = int(max_horizon_sec)
+                except Exception:
+                    return False
+                if v < 0:
+                    return False
+                sets.append("max_horizon_sec = ?")
+                params.append(v)
+
             if not sets:
                 return False
 
@@ -391,7 +415,8 @@ class UserGroupHandler:
                     max_reservations,
                     lifetime_sec,
                     created_at,
-                    lan_only
+                    lan_only,
+                    max_horizon_sec
                 FROM UserGroups
                 ORDER BY group_id ASC
             """)
@@ -444,6 +469,7 @@ class UserGroupHandler:
                     "max_reservations": max_r,
                     "lifetime_sec": life,
                     "lan_only": bool(r[7]),
+                    "max_horizon_sec": int(r[8]),
                     "created_at": str(created_at) if created_at is not None else None,
                 }
                 if include_users:
@@ -472,13 +498,15 @@ class UserGroupHandler:
             uses = int(uses)
             duration_sec = int(duration_sec)
 
-            if group_id < 0 or uses <= 0 or duration_sec < 0:
+            if group_id < -1 or uses <= 0 or duration_sec < 0:
                 return ""
 
-            # Ensure group exists
-            self.cursor.execute("SELECT 1 FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
-            if self.cursor.fetchone() is None:
-                return ""
+            # -1 is an account-only code: the account joins no group, for a
+            # lab whose devices come from clusters.
+            if group_id >= 0:
+                self.cursor.execute("SELECT 1 FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
+                if self.cursor.fetchone() is None:
+                    return ""
 
             # Clean + de-dupe (preserve order)
             cleaned: list[str] = []
@@ -681,9 +709,11 @@ class UserGroupHandler:
                 return False
 
             # look up code + ensure it exists and has remaining uses
+            # Federated and cluster codes are redeemed elsewhere: any of the
+            # trailing columns set means this is not a plain code.
             self.cursor.execute(
                 "SELECT group_id, uses, federation_contract_id, "
-                "federation_contract_version, allowed_issuer_deployment_id "
+                "federation_contract_version, allowed_issuer_deployment_id, cluster_name "
                 "FROM EnrollmentCodes WHERE code_name = ? LIMIT 1",
                 (code_name,),
             )
@@ -694,28 +724,30 @@ class UserGroupHandler:
             group_id = int(row[0])
             uses_left = int(row[1])
             if (
-                group_id < 0
+                group_id < -1
                 or uses_left <= 0
                 or any(value is not None for value in row[2:])
             ):
                 return False
 
-            # ensure group exists, and is reachable from where this call came from
-            self.cursor.execute("SELECT lan_only FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
-            group = self.cursor.fetchone()
-            if group is None or (RELAYED.get() and group[0]):
-                return False
+            if group_id >= 0:
+                # ensure group exists, and is reachable from where this call came from
+                self.cursor.execute("SELECT lan_only FROM UserGroups WHERE group_id = ? LIMIT 1", (group_id,))
+                group = self.cursor.fetchone()
+                if group is None or (RELAYED.get() and group[0]):
+                    return False
 
-            # insert enrollment
-            self.cursor.execute(
-                "SELECT 1 FROM UsersLookup WHERE user_id = ? AND group_id = ? LIMIT 1",
-                (uid, group_id),
-            )
-            if self.cursor.fetchone() is None:
+                # insert enrollment
                 self.cursor.execute(
-                    "INSERT INTO UsersLookup (user_id, group_id) VALUES (?, ?)",
+                    "SELECT 1 FROM UsersLookup WHERE user_id = ? AND group_id = ? LIMIT 1",
                     (uid, group_id),
                 )
+                if self.cursor.fetchone() is None:
+                    self.cursor.execute(
+                        "INSERT INTO UsersLookup (user_id, group_id) VALUES (?, ?)",
+                        (uid, group_id),
+                    )
+            # an account-only code (-1) joins nothing; it is just consumed
 
             # decrement uses (guard again in SQL)
             self.cursor.execute(
@@ -858,6 +890,31 @@ class UserGroupHandler:
                         best = t
 
             return (allowed, best if allowed else 0)
+        except Exception:
+            return (False, 0)
+
+    @db_connection
+    def get_users_max_horizon(self, *, uid: int, device_id: int) -> tuple[bool, int]:
+        """(allowed, seconds ahead a reservation may start). Like the other
+        limits the most generous group wins, so one with no limit (0) lifts it."""
+        try:
+            group_ids = self._user_group_ids(int(uid))
+            if int(uid) < 0 or int(device_id) < 0 or not group_ids:
+                return (False, 0)
+            self.cursor.execute(
+                f"SELECT devices_whitelist, max_horizon_sec FROM UserGroups WHERE group_id IN ({','.join('?' * len(group_ids))})",
+                tuple(group_ids),
+            )
+            best = None
+            for wl_str, horizon in self.cursor.fetchall():
+                try:
+                    whitelist = [int(x) for x in json.loads(wl_str or "[]")]
+                except Exception:
+                    whitelist = []
+                if whitelist_allows(whitelist, int(device_id)):
+                    horizon = int(horizon or 0)
+                    best = horizon if best is None or horizon == 0 or (best and horizon > best) else best
+            return (best is not None, best or 0)
         except Exception:
             return (False, 0)
 

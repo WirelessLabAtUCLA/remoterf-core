@@ -295,9 +295,11 @@ class ReservationHandler:
                         for d in devs:
                             _allowed_t, max_t = user_group_handler.get_users_max_reservation_time(uid=uid, device_id=d)
                             _allowed_r, max_r = user_group_handler.get_users_max_reservations(uid=uid, device_id=d)
+                            _allowed_h, max_h = user_group_handler.get_users_max_horizon(uid=uid, device_id=d)
                             caps[str(d)] = {
                                 "max_reservation_time_sec": int(max_t),
                                 "max_reservations": int(max_r),
+                                "max_horizon_sec": int(max_h),
                             }
 
                         groups_raw = user_group_handler.get_groups_user_in(uid=uid) or []
@@ -393,6 +395,8 @@ class ReservationHandler:
                         return {"UC": map_arg(f"Enrolled {username} in cluster {joined}.")}
                     if RELAYED.get() and user_group_handler.code_is_lan_only(code_name=code_name):
                         return {"UE": map_arg(lan_only_hint("This enrollment code"))}
+                    if user_group_handler.code_is_account_only(code_name=code_name):
+                        return {"UE": map_arg("This code only creates new accounts; it adds nothing to an existing one.")}
                     if user_group_handler.enroll_user_with_code(uid=acc_id, code_name=code_name):
                         return {'UC': map_arg(f'Enrolled {username}.')}
                     else:
