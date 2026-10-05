@@ -768,6 +768,14 @@ class UserGroupHandler:
             return False
 
     @db_connection
+    def forget_user(self, *, uid: int | None = None) -> None:
+        """Drop an account's group memberships; None drops everyone's (a purge)."""
+        if uid is None:
+            self.cursor.execute("DELETE FROM UsersLookup")
+        else:
+            self.cursor.execute("DELETE FROM UsersLookup WHERE user_id = ?", (int(uid),))
+
+    @db_connection
     def group_exists(self, *, group_name: str) -> bool:
         self.cursor.execute(
             "SELECT 1 FROM UserGroups WHERE group_name = ? LIMIT 1",

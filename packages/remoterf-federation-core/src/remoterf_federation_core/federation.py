@@ -112,6 +112,9 @@ ENROLL_PAYLOAD_FIELDS = frozenset(
     }
 )
 PERMISSIONS_PAYLOAD_FIELDS = ENROLL_PAYLOAD_FIELDS - {"code_name"}
+# Who is enrolling, for a lab that will list them by name (a class roster);
+# optional, so a home that shares nothing about its users still enrols.
+ENROLLEE_FIELDS = frozenset({"display_name", "email"})
 GRANT_FIELDS = frozenset(
     {
         "token_type",
@@ -342,7 +345,8 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
             if action == "federated_enroll"
             else PERMISSIONS_PAYLOAD_FIELDS
         )
-    if type(payload) is not dict or set(payload) != expected:
+    optional = ENROLLEE_FIELDS if action == "federated_enroll" else frozenset()
+    if type(payload) is not dict or set(payload) - optional != expected:
         raise FederationError("invalid_payload_fields")
     clean = {
         "request_id": canonical_uuid(payload["request_id"]),
@@ -361,6 +365,9 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
         clean["code_name"] = _printable(
             payload["code_name"], "invalid_code_name", 256
         )
+        for field, limit in (("display_name", 128), ("email", 254)):
+            if field in payload:
+                clean[field] = _printable(payload[field], "invalid_enrollee", limit)
     elif is_device_action(action):
         try:
             clean.update(validate_device_payload(action, payload))
@@ -401,6 +408,7 @@ def build_action_request(
     terms_sha256: str,
     code_name: str | None = None,
     device_payload: Mapping | None = None,
+    enrollee: Mapping | None = None,
 ) -> CanonicalActionRequest:
     payload = {
         "request_id": request_id,
@@ -411,7 +419,10 @@ def build_action_request(
     }
     if action == "federated_enroll":
         payload["code_name"] = code_name
-    elif code_name is not None:
+        for field in sorted(ENROLLEE_FIELDS):
+            if enrollee and enrollee.get(field):
+                payload[field] = enrollee[field]
+    elif code_name is not None or enrollee is not None:
         raise FederationError("invalid_payload_fields")
     if is_device_action(action):
         payload.update(dict(device_payload or {}))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import time
@@ -32,6 +33,34 @@ from .principals import PreparedFederatedAccount, prepare_federated_account
 
 def _code_hash(code_name: str) -> str:
     return hashlib.sha256(code_name.encode("utf-8")).hexdigest()
+
+
+def _plain_code(contract_id, contract_version, issuer) -> bool:
+    """A group code with no federation restrictions: the lab's ordinary invite."""
+    return contract_id is None and contract_version is None and issuer is None
+
+
+def _plain_code_expired(created_at, duration_sec, now: int) -> bool:
+    """Plain codes age like local ones: `duration_sec` from creation, 0 = never."""
+    if not duration_sec:
+        return False
+    try:
+        created = datetime.fromisoformat(str(created_at)).timestamp()
+    except ValueError:
+        return True
+    return now >= int(created) + int(duration_sec)
+
+
+def _code_admits(code, claims, now: int) -> bool:
+    if _plain_code(code["federation_contract_id"], code["federation_contract_version"],
+                   code["allowed_issuer_deployment_id"]):
+        return not _plain_code_expired(code["created_at"], code["duration_sec"], now)
+    return (
+        code["federation_contract_id"] == claims["contract_id"]
+        and code["federation_contract_version"] == claims["contract_version"]
+        and code["allowed_issuer_deployment_id"] == claims["iss"]
+        and (code["federation_expires_at"] is None or now < code["federation_expires_at"])
+    )
 
 
 def _legacy_created_epoch(value) -> int:
@@ -321,21 +350,11 @@ class ServerFederatedEnrollHandler:
             code = conn.execute(
                 "SELECT code_id,group_id,uses,federation_contract_id,"
                 "federation_contract_version,allowed_issuer_deployment_id,"
-                "federation_expires_at FROM EnrollmentCodes WHERE code_name=?",
+                "federation_expires_at,duration_sec,created_at FROM EnrollmentCodes WHERE code_name=?",
                 (payload["code_name"],),
             ).fetchone()
             now = int(self.clock())
-            if (
-                code is None
-                or code["uses"] <= 0
-                or code["federation_contract_id"] != claims["contract_id"]
-                or code["federation_contract_version"] != claims["contract_version"]
-                or code["allowed_issuer_deployment_id"] != claims["iss"]
-                or (
-                    code["federation_expires_at"] is not None
-                    and now >= code["federation_expires_at"]
-                )
-            ):
+            if code is None or code["uses"] <= 0 or not _code_admits(code, claims, now):
                 return None
         return self.account_preparer(
             self.reservations_path,
@@ -474,10 +493,14 @@ class ServerFederatedEnrollHandler:
         ).fetchone()
         if code is None:
             raise FederationBusinessError("code_invalid")
-        if any(code[index] is None for index in (6, 7, 8)):
-            raise FederationBusinessError("code_restriction_mismatch")
-        if (
-            code[6] != claims["contract_id"]
+        if _plain_code(code[6], code[7], code[8]):
+            # The lab's ordinary invite, handed to a user whose HOME is another
+            # deployment (Global, say): the code itself is the authorization.
+            if _plain_code_expired(code[5], code[4], now):
+                raise FederationBusinessError("code_expired")
+        elif (
+            any(code[index] is None for index in (6, 7, 8))
+            or code[6] != claims["contract_id"]
             or int(code[7]) != claims["contract_version"]
             or code[8] != claims["iss"]
         ):
@@ -505,6 +528,14 @@ class ServerFederatedEnrollHandler:
             prepared=prepared,
             now=now,
         )
+        enrollee = {k: payload[k] for k in ("display_name", "email") if payload.get(k)}
+        if enrollee:
+            # The user chose this lab (a class roster needs a name); a
+            # cluster walk-in stays anonymous.
+            tx.execute(
+                "UPDATE FederatedPrincipals SET display_metadata_json=? WHERE id=?",
+                (json.dumps({**enrollee, "home": claims["iss"]}, sort_keys=True), principal[0]),
+            )
         membership_added = add_membership_tx(
             tx, prepared.local_account_id, int(code[2])
         )

@@ -14,6 +14,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 import time
 import sys
@@ -498,9 +499,9 @@ class ReservationHandler:
                 "VALUES (?, ?, 'active', ?)",
                 (uid, str(uuid4()), int(time.time())),
             )
-            if ec.startswith("cluster."):
-                from .federation import cluster as cluster_module
+            from .federation import cluster as cluster_module
 
+            if ec.startswith("cluster."):
                 if cluster_module.redeem_code(uid, ec) is not None:
                     try:
                         cluster_module.enroll_students(self, only_account=uid)
@@ -508,6 +509,10 @@ class ReservationHandler:
                         pass
             else:
                 user_group_handler.enroll_user_with_code(uid=uid, code_name=ec)
+                try:
+                    cluster_module.admit_account(self, uid)  # public clusters: in now, not next tick
+                except Exception:  # noqa: BLE001 - the tick does it on its next pass
+                    pass
             perms.set_user(un) # set perms
             return {"UC": map_arg(f'{un}')}
         except sqlite3.IntegrityError:
@@ -535,10 +540,27 @@ class ReservationHandler:
             self.cursor.execute(
                 "DELETE FROM Reservations WHERE username = ?", (username,)
             )
+        self.cursor.execute('SELECT acc_id FROM Accounts WHERE username = ?', (username,))
+        row = self.cursor.fetchone()
         self.cursor.execute('DELETE FROM ClientSessions WHERE username = ?', (username,))
         self.cursor.execute('DELETE FROM Accounts WHERE username = ?', (username,))
+        self._forget_account_rows(int(row[0]) if row else None)
         perms.delete_user_from_reservation_handler(username)
         return {"UC": map_arg(f'Removed {username}')}
+
+    def _forget_account_rows(self, uid: int | None) -> None:
+        """Everything else keyed by the account (None: by any account), so a
+        deleted account is not a ghost the cluster tick keeps enrolling."""
+        from .federation import cluster as cluster_module
+
+        where, args = ("WHERE local_account_id = ?", (uid,)) if uid is not None else ("", ())
+        for table in ("LocalAccountSubjects", "FederatedEnrollments"):
+            try:
+                self.cursor.execute(f"DELETE FROM {table} {where}", args)
+            except sqlite3.OperationalError:
+                pass  # table not present on this deployment
+        user_group_handler.forget_user(uid=uid)
+        cluster_module.forget_account(uid)
     
     @db_connection
     def validate_cancel_reservation(self, res_id:int, username:str) -> bool:
@@ -568,6 +590,7 @@ class ReservationHandler:
     def remove_all_users(self):
         self.cursor.execute('DELETE FROM ClientSessions')
         self.cursor.execute('DELETE FROM Accounts')
+        self._forget_account_rows(None)
         print("All accounts removed.")
         
     @db_connection 
@@ -1080,19 +1103,32 @@ class ReservationHandler:
         from ..common.utils.panel import print_table
 
         cursor = self.db.cursor()
-        cursor.execute("SELECT username, email, created_at, auth_type FROM Accounts")
+        cursor.execute("SELECT acc_id, username, email, created_at, auth_type FROM Accounts")
+        names = self._federated_names()
         rows = []
-        for username, email, created_at, auth_type in cursor.fetchall() or []:
+        for acc_id, username, email, created_at, auth_type in cursor.fetchall() or []:
             role = perms.get_perms(username)
+            meta = names.get(int(acc_id), {})
             rows.append({
                 "username": username,
+                "name": meta.get("display_name", ""),
                 "role": role[0][0] if role else "",
-                "email": email,
+                "email": email or meta.get("email", ""),
                 "auth": auth_type,
                 "created_at": created_at,
             })
         cursor.close()
-        print_table("Accounts", rows, ["username", "role", "email", "auth", "created_at"], empty="No accounts found.")
+        print_table("Accounts", rows, ["username", "name", "role", "email", "auth", "created_at"], empty="No accounts found.")
+
+    @staticmethod
+    def _federated_names() -> dict:
+        """What a visiting user's HOME told us about them, by local account id."""
+        try:
+            with closing(sqlite3.connect(user_group_handler.filepath, timeout=10.0)) as conn:
+                rows = conn.execute("SELECT local_account_id, display_metadata_json FROM FederatedPrincipals").fetchall()
+            return {int(acc): json.loads(meta or "{}") for acc, meta in rows}
+        except (sqlite3.Error, ValueError):
+            return {}
             
     @db_connection
     def get_obfuscated_device_reservations_grouped_past_days(self, days: int) -> dict[str, dict[str, int]]:
@@ -1685,12 +1721,20 @@ LOG_PATH = get_db_dir() / "activity_logs.npy"
 log_lock = threading.Lock()
 
 def _load_logs():
+    """An empty or truncated log file (a crash mid-write) counts as no entries:
+    the next append rewrites it, instead of every append failing forever."""
     if LOG_PATH.exists():
-        return np.load(LOG_PATH, allow_pickle=True).tolist()
+        try:
+            return np.load(LOG_PATH, allow_pickle=True).tolist()
+        except Exception:  # noqa: BLE001 - EOFError, pickle errors, a 0-byte file
+            return []
     return []
 
 def _save_logs(logs):
-    np.save(LOG_PATH, logs, allow_pickle=True)
+    # Written beside and renamed over: a crash leaves the old log, not a truncated one.
+    tmp = LOG_PATH.with_suffix(".tmp.npy")  # keeps .npy, or np.save appends one
+    np.save(tmp, np.asarray(logs, dtype=object), allow_pickle=True)
+    tmp.replace(LOG_PATH)
 
 def _append_log(entry: dict):
     """Append a single log entry. Holds log_lock only during file I/O, not during the RPC call."""

@@ -23,12 +23,13 @@ agent walks the ordinary contract lifecycle (propose, accept, activate) over
 the broker's evidence directory. Nothing here bypasses the local trust store
 or the contract state machine; it only drives them.
 
-A public cluster swaps the code for an open door (`cluster public <name> on`):
-any lab on Global walks in, and every account on a lab that is in can use what
-the cluster shares. There is no secret to check, so both sides pin the other's
+One cluster swaps the code for an open door: `global`, owned by RemoteRF
+Global's account home. Every lab on Global walks in on its own, under the
+standing contract it already holds with the home (`global_home`), and every
+account on a lab that is in can use what the labs share into it -- the groups
+each marks public. There is no secret to check, so the labs pin each other's
 key on Global's word -- an admin approved each lab by hand, and that approval
-is the trust a public cluster runs on. What bounds a lab nobody chose is the
-per-lab cap, and `cluster kick`.
+is the trust it runs on. What bounds a lab nobody chose is the per-lab cap.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ import re
 import secrets
 import sqlite3
 import string
+import threading
 import time
 from contextlib import closing
 from datetime import datetime
@@ -61,6 +63,7 @@ CONTRACT_DAYS = 365
 CODE_PREFIX = "cluster."          # a student code minted here, redeemed here
 CLUSTER_CODE = "cluster"          # the `code_name` a cluster enrolment carries to a partner
 CODE_DAYS = 7
+GLOBAL = "global"                 # the one public cluster, owned by Global's account home
 PUBLIC_LAB_CAP = 30               # reservations one lab may hold here at a time, as a public cluster starts out
 # ponytail: the broker's roster holds 64 labs, so a cluster does too. A public
 # cluster that outgrows it needs a paged roster, or members that contract with
@@ -295,12 +298,7 @@ def invite(name: str, *, auto: bool = True) -> str:
 
 
 def join(code: str) -> str:
-    try:
-        invite_id, secret = decode_code(code)
-    except ClusterError:
-        if _NAME.match(code or ""):
-            return join_public(code)  # not a code: the name of a public cluster
-        raise
+    invite_id, secret = decode_code(code)
     me = _pin_self()
     result = g.call("POST", "/v2/broker/invites/join", {
         "protocol_version": "2",
@@ -393,20 +391,14 @@ def remove(name: str) -> str:
     cluster locally."""
     clusters = load()
     cluster = _find(clusters, name)
+    if name == GLOBAL:
+        # Its contract is the standing one with Global; stop sharing instead.
+        raise ClusterError(f"every lab is in {GLOBAL}; `groups public <group> off` stops sharing a group")
     outcome = "removed"
     for _, party in _parties(cluster):
         _revoke(party.get("contract_id"))
         try:
             _publish(party)
-        except g.GlobalError:
-            outcome = "removed locally; could not reach Global to tell the other lab"
-    if cluster.get("public"):
-        try:
-            if cluster["role"] == "owner":
-                _public_note(name, "gone")
-            elif cluster.get("state") != "revoked":
-                # Remembered on Global, so the next tick does not walk back in.
-                _public_note(name, "left", owner=cluster["peer"])
         except g.GlobalError:
             outcome = "removed locally; could not reach Global to tell the other lab"
     _forget_accounts(name, cluster)
@@ -425,48 +417,21 @@ def _public_note(name: str, state: str, owner: str | None = None) -> None:
         "cluster_name": name, "owner": owner or me["deployment_id"], "identity": me, "state": state}})
 
 
-def set_public(name: str, on: bool) -> None:
-    """Owner: open the cluster to every lab on Global, or shut the door again.
-    Shutting it admits nobody new; the labs already in stay (`kick` is for
-    those)."""
+def join_public(pool: dict, party: dict) -> str:
+    """Walk into Global's cluster under the standing contract with its home
+    (`party`, from `global_home`); the home's key is pinned on Global's word."""
     clusters = load()
-    cluster = _find(clusters, name)
-    if cluster["role"] != "owner":
-        raise ClusterError(f"{name} is owned by another deployment; only the owner opens or closes it")
-    if not on and not cluster.get("public"):
-        raise ClusterError(f"{name} is not public")
-    _public_note(name, "open" if on else "closed")
-    if on:
-        cluster.setdefault("lab_cap", PUBLIC_LAB_CAP)
-    cluster["public"] = "open" if on else "closed"
-    save(clusters)
-
-
-def public_pools() -> list[dict]:
-    """The public clusters other labs hold open, each with our own state in it."""
-    return g.call("GET", "/v2/broker/clusters/roster").get("pools", [])
-
-
-def join_public(name: str, pool: dict | None = None) -> str:
-    """Walk into a public cluster; the owner's key is pinned on Global's word."""
-    if pool is None:
-        pool = next((item for item in public_pools() if item["cluster_name"] == name), None)
-        if pool is None:
-            raise ClusterError(f"no public cluster named {name}")
-    clusters = load()
-    # ponytail: one local name per cluster, so a second lab's public cluster
-    # of the same name cannot be joined until the first is removed. Key
-    # clusters by (owner, name) if that ever bites.
-    if name in clusters:
-        raise ClusterError(f"{name} is already a cluster here")
+    if GLOBAL in clusters:
+        raise ClusterError(f"{GLOBAL} is already a cluster here")
     owner = pool["owner"]
     peer = owner["identity"]["deployment_id"]
     _pin(owner["identity"], source="cluster_invite")
-    _public_note(name, "joined", owner=peer)
-    clusters[name] = {"role": "member", "state": "joined", "public": True, "lab_cap": PUBLIC_LAB_CAP,
-                      "peer": peer, "peer_name": owner.get("display_name"), "created_at": int(time.time())}
+    _public_note(GLOBAL, "joined", owner=peer)
+    clusters[GLOBAL] = {"role": "member", "state": "active", "public": True, "lab_cap": PUBLIC_LAB_CAP,
+                        "peer": peer, "peer_name": owner.get("display_name"), "created_at": int(time.time()),
+                        "contract_id": party["contract_id"], "published": list(party.get("published", []))}
     save(clusters)
-    return name
+    return GLOBAL
 
 
 def _member(cluster: dict, lab: str) -> str:
@@ -695,6 +660,26 @@ def detach_group(name: str, ref: str) -> str:
     return group_name
 
 
+def shared_with(group_id: int) -> list[str]:
+    """The clusters a group is shared into."""
+    return sorted(name for name, cluster in load().items() if int(group_id) in cluster.get("groups", []))
+
+
+def share_group(ref: str, names: list[str]) -> tuple[list[str], list[str]]:
+    """Share a group into exactly these clusters; returns (added, removed)."""
+    clusters = load()
+    for name in names:
+        _find(clusters, name)
+    with _usergroups() as conn:
+        group_id, _ = _group(conn, ref)
+    current = set(shared_with(group_id))
+    for name in set(names) - current:
+        attach_group(name, str(group_id))
+    for name in current - set(names):
+        detach_group(name, str(group_id))
+    return sorted(set(names) - current), sorted(current - set(names))
+
+
 def _forget_accounts(name: str, cluster: dict) -> None:
     with _usergroups() as conn:
         _take_back(conn, name)
@@ -712,18 +697,51 @@ def join_account(conn, name: str, cluster: dict, local_account_id: int, *, kind:
         _grant(conn, name, local_account_id, group_id)
 
 
+def admit_account(home, local_account_id: int) -> None:
+    """A new native account walks into every public cluster now and is
+    enrolled at the labs sharing devices there, instead of on the next tick."""
+    clusters = load()
+    with _usergroups() as conn:
+        for name, cluster in clusters.items():
+            if cluster.get("public"):
+                join_account(conn, name, cluster, int(local_account_id), kind="local")
+    # Off the registration call: enrolling talks to the other labs.
+    threading.Thread(target=enroll_students, args=(home,), kwargs={"only_account": int(local_account_id)},
+                     daemon=True, name="remoterf-admit").start()
+
+
+def forget_account(local_account_id: int | None = None) -> None:
+    """A deleted account leaves every cluster, grants and all, so the tick
+    stops trying to enrol a ghost. None: every account (a purge)."""
+    where, args = ("local_account_id=? AND kind='local'", (int(local_account_id),)) if local_account_id is not None else ("1", ())
+    with _usergroups() as conn:
+        rows = conn.execute(f"SELECT DISTINCT cluster_name, local_account_id FROM ClusterAccounts WHERE {where}", args).fetchall()
+        for name, account in rows:
+            _take_back(conn, name, account=int(account))
+        conn.execute(f"DELETE FROM ClusterAccounts WHERE {where}", args)
+
+
 def _admit_everyone(clusters: dict) -> None:
-    """A public cluster needs no code: every native account here is in it."""
-    public = [(name, cluster) for name, cluster in clusters.items() if cluster.get("public")]
+    """A public cluster needs no code: every native account here is in it.
+    An account that no longer exists is in none."""
     path = _db_path().with_name("reservations.db")
-    if not public or not path.exists():
+    if not path.exists():
         return
     with closing(sqlite3.connect(path, timeout=10.0)) as conn:
         try:
-            accounts = [int(row[0]) for row in conn.execute(
-                "SELECT acc_id FROM Accounts WHERE auth_type='local_password'").fetchall()]
+            rows = conn.execute("SELECT acc_id, auth_type FROM Accounts").fetchall()
         except sqlite3.OperationalError:
             return  # no accounts table yet
+    existing = {int(acc) for acc, _ in rows}
+    accounts = [int(acc) for acc, kind in rows if kind == "local_password"]
+    with _usergroups() as conn:
+        ghosts = [int(row[0]) for row in conn.execute(
+            "SELECT DISTINCT local_account_id FROM ClusterAccounts WHERE kind='local'") if int(row[0]) not in existing]
+    for ghost in ghosts:
+        forget_account(ghost)
+    public = [(name, cluster) for name, cluster in clusters.items() if cluster.get("public")]
+    if not public:
+        return
     with _usergroups() as conn:
         for name, cluster in public:
             have = {row[0] for row in conn.execute(
@@ -1066,35 +1084,6 @@ def _collect_joins(name: str, cluster: dict, broker_invites: list[dict], notify)
             notify(f"[cluster] {peer} wants to join {name}: run `cluster accept {name}`")
 
 
-def _collect_public_joins(name: str, cluster: dict, joins: list[dict], notify) -> None:
-    """Owner of an open cluster: every lab Global lists as having walked in
-    becomes a member -- Global's approval of that lab stands in for the invite
-    secret. A lab that was kicked stays out; one that left may come back."""
-    for item in joins:
-        if item.get("cluster_name") != name:
-            continue
-        identity = item["identity"]
-        peer = identity["deployment_id"]
-        member = cluster["members"].get(peer)
-        if peer in cluster.get("banned", []) or (member is not None and member.get("state") != "revoked"):
-            continue
-        if sum(m.get("state") != "revoked" for m in cluster["members"].values()) >= MAX_MEMBERS:
-            _once(f"full:{name}", f"[cluster] {name} is full ({MAX_MEMBERS} labs); more are waiting at the door",
-                  notify)
-            break
-        member = cluster["members"][peer] = {
-            "display_name": item.get("display_name"), "joiner": identity, "state": "pending",
-            "published": [], "joined_at": int(time.time())}
-        try:
-            _propose(cluster, member, peer)
-        except (ContractError, g.GlobalError) as exc:
-            # Left pending: `cluster accept` retries it, `cluster kick` refuses it.
-            if member.get("state") == "pending":
-                member["joiner"] = identity
-            notify(f"[cluster] {name}: could not admit {item.get('display_name') or peer}: "
-                   f"{getattr(exc, 'code', exc)}")
-
-
 _said: set[str] = set()
 
 
@@ -1106,21 +1095,29 @@ def _once(key: str, text: str, notify) -> None:
 
 
 def _walk_in(pools: list[dict], notify) -> None:
-    """Join every public cluster this lab has never been in. One it left, or
-    was put out of, has a state on Global and is left alone."""
+    """Join Global's cluster once the standing contract with its home is
+    active. Any other open door (an older lab's own) is ignored."""
+    from . import global_home
+
+    if GLOBAL in load():
+        return
+    state = global_home.load()
+    home = (state.get("identity") or {}).get("deployment_id")
+    party = state.get("party") or {}
+    if not home or party.get("state") != "active":
+        return
     for pool in pools:
-        name = pool.get("cluster_name")
-        if pool.get("state") is not None or name in load():
+        owner = (pool.get("owner") or {}).get("identity") or {}
+        if pool.get("cluster_name") != GLOBAL or owner.get("deployment_id") != home:
             continue
-        lab = (pool.get("owner") or {}).get("display_name") or "another lab"
         try:
-            join_public(name, pool)
+            join_public(pool, party)
         except (ClusterError, ContractError, g.GlobalError, KeyError, TypeError) as exc:
-            _once(f"join:{name}", f"[cluster] could not join public cluster {name} from {lab}: "
-                                  f"{getattr(exc, 'code', exc)}", notify)
-            continue
-        notify(f"[cluster] joined public cluster {name} from {lab}: every account here can reserve what it "
-               f"shares. `cluster remove {name}` leaves it.")
+            _once(f"join:{GLOBAL}", f"[cluster] could not join {GLOBAL}: {getattr(exc, 'code', exc)}", notify)
+            return
+        notify(f"[cluster] joined {GLOBAL}: every account here can reserve what the labs on Global share. "
+               "`groups public <group> on` shares one of yours.")
+        return
 
 
 def tick(notify=None, home=None) -> None:
@@ -1141,9 +1138,6 @@ def tick(notify=None, home=None) -> None:
                 if broker_invites is None:
                     broker_invites = g.call("GET", "/v2/broker/invites")["invites"]
                 _collect_joins(name, cluster, broker_invites, notify)
-                save(clusters)
-            if cluster.get("public") == "open":
-                _collect_public_joins(name, cluster, board.get("joins", []), notify)
                 save(clusters)
             # An empty cluster has nothing to drive, bar withdrawing a roster
             # that still names a lab that has since been kicked.

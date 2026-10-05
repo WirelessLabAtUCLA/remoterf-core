@@ -1014,8 +1014,14 @@ def _cluster_tick() -> None:
         reservation_handler = None
     try:
         cluster.tick(notify, home=reservation_handler)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - never let a cluster failure cost the liveness report
         logging.getLogger("remoteRF_server.global").warning("cluster tick failed: %s", exc)
+    try:
+        from .federation import global_home
+
+        global_home.tick(notify)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("remoteRF_server.global").warning("Global home tick failed: %s", exc)
 
 
 def run_agent(stop=None, tunnel=None) -> None:

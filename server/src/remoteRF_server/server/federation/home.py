@@ -198,6 +198,7 @@ class ServerHomeGrantIssuer:
         request_id: str | None = None,
         code_name: str | None = None,
         device_payload: Mapping | None = None,
+        enrollee: Mapping | None = None,
     ) -> IssuedGrant:
         destination = canonical_uuid(destination_deployment_id)
         request_id = canonical_uuid(request_id or str(uuid4()))
@@ -274,6 +275,7 @@ class ServerHomeGrantIssuer:
                 terms_sha256=row["terms_sha256"],
                 code_name=code_name,
                 device_payload=device_payload,
+                enrollee=enrollee,
             )
             expires = min(now + 60, terms.valid_until)
             if home_key["valid_until"] is not None:

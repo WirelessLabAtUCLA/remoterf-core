@@ -74,6 +74,17 @@ from .user_group_handler import user_group_handler
 
 CANCEL = {"c", "e", "exit", "q", "quit"}
 
+
+def _clusters_here() -> List[str]:
+    """Clusters this lab is in; `global` is anyone on RemoteRF Global."""
+    from .federation import cluster
+
+    return sorted(cluster.load())
+
+
+def _names(raw: str) -> List[str]:
+    return [] if raw.lower() == "none" else [p for p in re.split(r"[\s,]+", raw) if p]
+
 def make_user_group_local(session) -> None:
     def _prompt_str(msg: str) -> Optional[str]:
         s = (session.prompt(msg) or "").strip()
@@ -175,6 +186,15 @@ def make_user_group_local(session) -> None:
     # cannot be redeemed there and its members cannot log in there.
     lan_only = not _prompt_yes_no("Reachable from outside your network (via Global)? (Y/n): ", default_no=False)
 
+    public = not lan_only and _prompt_yes_no("Public: open to anyone on RemoteRF Global? (y/N): ", default_no=True)
+    partners = [name for name in _clusters_here() if name != "global"] if not lan_only else []
+    if partners:
+        raw = _prompt_str(f"Also share with partner clusters ({', '.join(partners)}; comma-separated, "
+                          "Enter for none, c to cancel): ")
+        if raw is None:
+            return
+        partners = _names(raw or "none")
+
     # ---- Final confirmation ----
     wl_str = ",".join(map(str, devices_whitelist))
     print("\nAbout to create user group with:")
@@ -185,6 +205,9 @@ def make_user_group_local(session) -> None:
     print(f"  lifetime_sec             : {lifetime_sec}")
     print(f"  max_days_ahead           : {horizon_days or 'no limit'}")
     print(f"  lan_only                 : {'yes' if lan_only else 'no'}")
+    print(f"  public                   : {'yes' if public else 'no'}")
+    if partners:
+        print(f"  partner clusters         : {', '.join(partners)}")
 
     if not _prompt_yes_no("Proceed? (y/n): ", default_no=True):
         return
@@ -202,6 +225,13 @@ def make_user_group_local(session) -> None:
 
     if group_id is not None:
         print(f"User group created with group_id={group_id}.")
+        from .federation import cluster
+        for name in (["global"] if public else []) + partners:
+            try:
+                cluster.attach_group(name, str(group_id))
+                print(f"Shared with {name}; `groups share {group_name} {name} off` takes it back.")
+            except (cluster.ClusterError, RuntimeError, OSError) as exc:
+                print(f"Not shared with {name} ({exc}); `groups share {group_name} {name} on` once this lab is in it.")
     else:
         print("Failed to create user group.")
 
@@ -252,11 +282,14 @@ def list_user_groups_local(session) -> None:
     include_users = False
 
     groups: List[Dict[str, Any]] = user_group_handler.get_all_user_groups(include_users=include_users) or []
+    from .federation import cluster
+
     for group in groups:
         group["devices_whitelist"] = group.get("devices_whitelist") or "all"
+        group["shared_with"] = ", ".join(cluster.shared_with(group["group_id"])) or "-"
     columns = [
         "group_id", "group_name", "devices_whitelist", "max_reservation_time_sec",
-        "max_reservations", "lifetime_sec", "max_horizon_sec", "lan_only", "created_at",
+        "max_reservations", "lifetime_sec", "max_horizon_sec", "lan_only", "shared_with", "created_at",
     ] + (["users"] if include_users else [])
     print_table("User groups", groups, columns, empty="No user groups found.")
 
@@ -373,6 +406,18 @@ def edit_user_group_local(session) -> None:
         return
     lan_only = None if lan_only_raw == "" else lan_only_raw.lower() in {"y", "yes"}
 
+    from .federation import cluster
+
+    share = None  # unchanged
+    here = _clusters_here()
+    if here:
+        print(f"Shared with now: {', '.join(cluster.shared_with(group_id)) or 'nothing'} "
+              f"(clusters: {', '.join(here)}; global = anyone on RemoteRF Global)")
+        share_raw = _prompt_raw("Share with (comma-separated | none | Enter unchanged, c cancel): ")
+        if share_raw is None:
+            return
+        share = _names(share_raw) if share_raw else None
+
     # Ensure at least one change
     if (
         group_name is None
@@ -382,6 +427,7 @@ def edit_user_group_local(session) -> None:
         and lifetime_sec is None
         and horizon_days is None
         and lan_only is None
+        and share is None
     ):
         print("No changes specified. Nothing to do.")
         return
@@ -401,8 +447,20 @@ def edit_user_group_local(session) -> None:
     print(f"  lifetime_sec            : {lifetime_sec if lifetime_sec is not None else '(unchanged)'}")
     print(f"  max_days_ahead          : {(horizon_days or 'no limit') if horizon_days is not None else '(unchanged)'}")
     print(f"  lan_only                : {('yes' if lan_only else 'no') if lan_only is not None else '(unchanged)'}")
+    print(f"  shared_with             : {(', '.join(share) or 'nothing') if share is not None else '(unchanged)'}")
 
     if not _prompt_yes_no("Proceed? (y/n): "):
+        return
+
+    if share is not None:
+        try:
+            added, removed = cluster.share_group(str(group_id), share)
+            print(f"Sharing: +{', '.join(added) or 'none'}  -{', '.join(removed) or 'none'}")
+        except cluster.ClusterError as exc:
+            print(f"Sharing unchanged: {exc}")
+            return
+    if not any(v is not None for v in (group_name, devices_whitelist, max_res_time, max_reservations,
+                                         lifetime_sec, horizon_days, lan_only)):
         return
 
     ok = user_group_handler.edit_user_group(
@@ -455,6 +513,22 @@ def make_enrollment_codes_local(session) -> None:
                 print(f"Value must be >= {min_v}.")
                 continue
             return v
+
+    # A cluster code enrols the user at every lab in a partner cluster; `global` needs none.
+    partners = [name for name in _clusters_here() if name != "global"]
+    if partners and _prompt_yes_no(f"For a partner cluster instead of a group ({', '.join(partners)})? "
+                                   "Users join every lab in it. (y/N): ", default_no=True):
+        name = partners[0] if len(partners) == 1 else _prompt_raw(f"Which cluster? [{partners[0]}] (c to cancel): ")
+        if name is None:
+            return
+        from .federation import cluster
+        from .federation.cli import _codes_create
+
+        try:
+            _codes_create(name or partners[0])
+        except cluster.ClusterError as exc:
+            print(exc)
+        return
 
     count = _prompt_int("How many enrollment codes? (c to cancel): ", min_v=1)
     if count is None:

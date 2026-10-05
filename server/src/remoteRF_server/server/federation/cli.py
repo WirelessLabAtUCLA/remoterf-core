@@ -69,7 +69,7 @@ def cmd_clusters() -> int:
         if index:
             rows.append("")
         owner_row = None
-        public = {"open": "  public", "closed": "  public, closed to new labs", True: "  public"}.get(item["public"], "")
+        public = "  open to every lab on Global" if item["public"] else ""
         if item["role"] == "owner":
             invites = item["open_invites"]
             rows.append(f"{item['name']}  (yours){public}"
@@ -77,8 +77,7 @@ def cmd_clusters() -> int:
             labs = [(me, "admin", "", None)] + [
                 (m, "member", m["state"] or "joining", m.get("joined_at")) for m in item["members"]]
             if not item["members"] and not invites:
-                rows.append("    nobody yet: any lab on Global may walk in" if item["public"] == "open"
-                            else f"    nobody yet: `cluster invite {item['name']}`")
+                rows.append(f"    nobody yet: `cluster invite {item['name']}`")
         else:
             owner_row = owner = {"display_name": item.get("peer_name"), "deployment_id": item["peer"]}
             rows.append(f"{item['name']}  {item['state']}{public}")
@@ -134,14 +133,14 @@ def cmd_cluster_info(name: str) -> int:
         owner = {"display_name": item.get("peer_name"), "deployment_id": item["peer"]}
         labs = [(owner, "admin", item.get("peer_sharing")), (me, "member", mine)] + [
             (p, "member", p.get("sharing")) for p in item.get("peers", [])]
+    # Other labs show up only once they share something: membership alone isn't for every member to see.
+    labs = [entry for entry in labs
+            if entry[0]["deployment_id"] == me["deployment_id"] or (entry[2] or {}).get("detail")]
     rows = []
     for index, (lab, role, sharing) in enumerate(labs):
         if index:
             rows.append("")
         rows.append(f"{_lab(lab)}  {role}" + ("  (you)" if lab["deployment_id"] == me["deployment_id"] else ""))
-        if sharing is None:
-            rows.append("    (no details from this lab yet)")
-            continue
         if not sharing.get("detail"):
             rows.append("    shares nothing")
         for group in sharing["detail"]:
@@ -166,7 +165,7 @@ def _ask_for(verb: str) -> str:
     from . import cluster
 
     if verb == "join":
-        return _input("Invite code from the other lab, or a public cluster's name: ")
+        return _input("Invite code from the other lab: ")
     names = [name for name, item in sorted(cluster.load().items()) if item.get("role") == "owner"]
     if verb in ("remove", "groups", "codes", "info", "cap"):
         names = sorted(cluster.load())
@@ -271,7 +270,7 @@ def _codes_list(name: str | None) -> int:
     rows = []
     codes = cluster.list_codes(name)
     if not codes:
-        rows.append("No cluster codes. Make some with `cluster codes create`.")
+        rows.append("No cluster codes. Make some with `codes create`.")
     current = None
     for code in codes:
         if code["cluster_name"] != current:
@@ -283,33 +282,6 @@ def _codes_list(name: str | None) -> int:
         rows.append(f"        {_n(code['uses'], 'use')} left  ·  {_fmt_duration(code['duration_sec'])}")
     print()
     print_panel("Cluster codes", rows, literal=True)
-    print()
-    return 0
-
-
-def _public_pools() -> int:
-    """`cluster public` alone: the doors other labs hold open on Global."""
-    from ...common.utils.panel import print_panel
-    from . import cluster
-
-    rows = []
-    for pool in cluster.public_pools():
-        owner = pool["owner"]
-        lab = _lab({"display_name": owner.get("display_name"), "deployment_id": owner["identity"]["deployment_id"]})
-        state = {"joined": "joined", "left": f"left (`cluster join {pool['cluster_name']}` to return)"}.get(
-            pool.get("state"), "joining within a minute")
-        rows.append(f"{pool['cluster_name']}  from {lab}  —  {state}")
-    mine = [name for name, item in sorted(cluster.load().items())
-            if item.get("role") == "owner" and item.get("public") == "open"]
-    if mine:
-        rows += ([""] if rows else []) + ["Yours, open to every lab: " + ", ".join(mine)]
-    rows += ([""] if rows else ["None yet.", ""]) + [
-        "To open one of your clusters to every lab on Global, or close it again:",
-        "    cluster public <name> on",
-        "    cluster public <name> off",
-    ]
-    print()
-    print_panel("Public clusters", rows, literal=True)
     print()
     return 0
 
@@ -326,9 +298,9 @@ def _input(prompt: str) -> str:
         return ""
 
 
-_USAGE = ("Usage: cluster list | cluster create|invite|remove <name> | cluster join <code or public name> | "
-          "cluster info [<name>] | cluster groups [<name>] | cluster codes create|list [<name>] | "
-          "cluster public [<name> on|off] | cluster kick <name> <lab> | cluster cap <name> <reservations>")
+_USAGE = ("Usage: cluster list | cluster create|invite|remove <name> | cluster join <code> | "
+          "cluster info [<name>] | "
+          "cluster kick <name> <lab> | cluster cap <name> <reservations>")
 
 
 def cmd_cluster(argv: list[str]) -> int:
@@ -343,12 +315,6 @@ def cmd_cluster(argv: list[str]) -> int:
     if verb == "codes" and (not words or words[0] not in ("create", "list")):
         print("Usage: cluster codes create [<cluster>] | cluster codes list [<cluster>]", file=sys.stderr)
         return 2
-    if verb == "public" and not words:
-        try:
-            return _public_pools()
-        except RuntimeError as exc:
-            _print(f"  {exc}", Sty.WARNING)
-            return 1
     if not words and verb in ("create", "invite", "accept", "join", "remove", "groups", "info", "kick", "cap"):
         # Leaving the argument out asks for it (docs/deployment-groups.md §8).
         answer = _ask_for(verb)
@@ -375,17 +341,22 @@ def cmd_cluster(argv: list[str]) -> int:
             _print(f"  Accepted. {arg} activates once both servers confirm (about a minute).", Sty.GRAY)
         elif verb == "remove" and arg:
             _print(f"  {arg}: {cluster.remove(arg)}.", Sty.GRAY)
-        elif verb == "public" and len(words) == 2 and words[1] in ("on", "off"):
-            cluster.set_public(arg, words[1] == "on")
-            if words[1] == "on":
-                cap = cluster.load()[arg]["lab_cap"]
-                _print(f"  {arg} is public: every lab on Global joins it on its own, and every account on those "
-                       "labs can reserve what you share into it (`cluster groups`).", Sty.GRAY)
-                _print("  Any one lab may hold " + (_n(cap, "reservation") if cap else "any number of reservations")
-                       + f" here at a time (`cluster cap {arg} <n>`); `cluster kick {arg} <lab>` puts one out.",
-                       Sty.GRAY)
+        elif verb == "share" and len(words) == 1:
+            with cluster._usergroups() as conn:
+                group_id, group_name = cluster._group(conn, arg)
+            _print(f"  {group_name} is shared with: {', '.join(cluster.shared_with(group_id)) or 'no cluster'}"
+                   f"  (clusters here: {', '.join(sorted(cluster.load())) or 'none'})", Sty.GRAY)
+        elif verb == "share" and len(words) == 3 and words[2] in ("on", "off"):
+            if words[2] == "on":
+                _print(f"  {cluster.attach_group(words[1], arg)} is now shared with {words[1]}.", Sty.GRAY)
             else:
-                _print(f"  {arg} is closed to new labs. The labs already in stay; `cluster kick` removes one.", Sty.GRAY)
+                _print(f"  {cluster.detach_group(words[1], arg)} is no longer shared with {words[1]}.", Sty.GRAY)
+        elif verb == "public" and len(words) == 2 and words[1] in ("on", "off"):
+            # A group in Global's own cluster is open to every lab on Global and every Global account.
+            if words[1] == "on":
+                _print(f"  {cluster.attach_group(cluster.GLOBAL, arg)} is public on Global.", Sty.GRAY)
+            else:
+                _print(f"  {cluster.detach_group(cluster.GLOBAL, arg)} is no longer public.", Sty.GRAY)
         elif verb == "kick" and arg:
             lab = " ".join(words[1:]) or _input("Lab to put out (name or id from `cluster list`): ")
             name = cluster.kick(arg, lab)
@@ -470,7 +441,7 @@ def main(argv) -> int:
     if argv and argv[0] in ("cluster", "clusters"):
         argv = argv[1:] or ["list"]
     if argv and argv[0] in ("list", "create", "invite", "join", "accept", "remove", "groups", "codes", "info",
-                            "public", "kick", "cap"):
+                            "public", "share", "kick", "cap"):
         return cmd_cluster(argv)
     print(_USAGE, file=sys.stderr)
     return 2
