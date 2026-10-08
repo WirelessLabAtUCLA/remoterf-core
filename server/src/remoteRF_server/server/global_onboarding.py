@@ -169,6 +169,13 @@ def hostname() -> Optional[str]:
     return f"{name}.{domain()}" if name else None
 
 
+def account_name(username: str) -> str:
+    """A local account's full name: `ethan@ucla` on Global, else just `ethan`."""
+    kv = load()
+    name = kv.get("GLOBAL_FINAL_NAME") or kv.get("GLOBAL_NAME")
+    return f"{username}@{name}" if name and state() == "active" else username
+
+
 def invite(code_name: str, *, lan_only: bool = False) -> str:
     """What to hand a new user: the form `remoterf --register` accepts.
 

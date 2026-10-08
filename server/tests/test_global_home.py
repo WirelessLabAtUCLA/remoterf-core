@@ -122,6 +122,23 @@ class GlobalHomeContractTests(unittest.TestCase):
             cluster.tick(self.notes.append)
             self.assertEqual(cluster.load()[cluster.GLOBAL]["peers"][B]["sharing"]["devices"], 3)
 
+    def test_a_group_made_public_before_the_lab_walks_in_is_shared_when_it_does(self):
+        with self.server(H):
+            home_identity = cluster._identity()
+            cluster._public_note(cluster.GLOBAL, "open")
+        with self.server(B):
+            with cluster._usergroups() as conn:
+                conn.execute("INSERT INTO UserGroups(group_name,devices_whitelist,max_reservation_time_sec,"
+                             "max_reservations,lifetime_sec) VALUES ('bench','[1]',3600,5,0)")
+            cluster.attach_group(cluster.GLOBAL, "bench")
+            (group_id,) = global_home.load()["public_groups"]
+            self.assertEqual(cluster.shared_with(group_id), [cluster.GLOBAL])
+        self._standing(B, home_identity)
+        with self.server(B):
+            cluster.tick(self.notes.append)
+            self.assertEqual(cluster.load()[cluster.GLOBAL]["groups"], [group_id])
+            self.assertNotIn("public_groups", global_home.load())
+
 
 if __name__ == "__main__":
     unittest.main()

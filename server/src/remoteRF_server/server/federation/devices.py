@@ -531,8 +531,6 @@ class ServerDirectOpenHandler(_DeviceHandlerBase):
         }
 
     def finalize(self, action, result):
-        from .. import direct_path
-
         claims, payload = action.claims, action.request.value["payload"]
         live = self._live(action)
         reservation_id = int(payload["reservation_id"])
@@ -547,6 +545,8 @@ class ServerDirectOpenHandler(_DeviceHandlerBase):
             return run_bound_rpc(rpc, device_id=device_id, function_name=function_name, args=args)
 
         try:
+            from .. import direct_path
+
             answer = direct_path.offer_bound(
                 f"federated/{claims['iss']}/{claims['sub']}/{reservation_id}",
                 live["username"], payload["ice"], bound={"run": run, "authorize": authorize},

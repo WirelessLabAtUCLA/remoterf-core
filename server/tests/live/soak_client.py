@@ -25,15 +25,15 @@ def log(msg):
 
 
 def acc(name, **kw):
-    from remoteRF.common.utils import map_arg, unmap_arg
-    from remoteRF.core.grpc_client import rpc_client
+    from remoterf.common.utils import map_arg, unmap_arg
+    from remoterf.core.grpc_client import rpc_client
 
     response = rpc_client(function_name=f"ACC:{name}", args={k: map_arg(v) for k, v in kw.items()})
     return {k: unmap_arg(v) for k, v in response.results.items()}
 
 
 def configure(home, cert_port):
-    from remoteRF.config.cert_fetcher import fetch_ca_bytes
+    from remoterf.config.cert_fetcher import fetch_ca_bytes
 
     host = home.rsplit(":", 1)[0]
     cfg = Path.home() / ".config" / "remoterf-client"
@@ -110,8 +110,8 @@ def main():
         sys.exit(4)
     event("reserved", alias=alias, label=label)
 
-    from remoteRF.core import direct_path
-    from remoteRF.drivers import ensure_driver
+    from remoterf.core import direct_path
+    from remoterf.drivers import ensure_driver
 
     host, port = args.home.rsplit(":", 1)
     direct_path.start(username=user, secret=pw, route={"kind": "lan", "host": host, "port": int(port)})
@@ -123,7 +123,7 @@ def main():
 
     import numpy as np
 
-    module = importlib.import_module("remoteRF.drivers.sim_sdr")
+    module = importlib.import_module("remoterf.drivers.sim_sdr")
     cls = next(getattr(module, n) for n in dir(module) if n.lower() == "simsdr" or n == "SimSDR")
     dev = cls(token)
     api = [n for n in dir(dev) if not n.startswith("_")]

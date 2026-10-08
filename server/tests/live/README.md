@@ -16,6 +16,12 @@ a HOME user per worker, and the real Client library end to end.
 - `real_ota.py --tx <alias> --rx <alias>[,<alias>]` — over the air between real
   radios (Pluto or USRP either side): two tones per LO, each RX must see the
   exact tone step. Aliases as listed to the user (partner devices 1000000+id).
+- `e2e_matrix.py` — the client from PyPI on Python 3.12/3.13/3.14 × native and
+  Global accounts × relay/LAN × direct on/off, each case a fresh process: the
+  app's reserve flow, a script whose first call is `adi.Pluto(token)`,
+  `ensure_driver`, cancelled and bad tokens, refusals, and no asyncio noise on
+  stderr. Drives one radio only (`--device`, default 103). Run from this Mac;
+  the Global identity needs one `HOME=~/remoterf-e2e/global-home remoterf --login global`.
 - `native_punch.py` — the native Gate I punch from this machine to a HOME reached
   over its relay: tells a network that cannot punch from a partner-path bug.
 

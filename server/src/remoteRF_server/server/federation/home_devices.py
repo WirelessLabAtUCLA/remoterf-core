@@ -181,7 +181,7 @@ class ServerHomeDevices:
                 try:
                     result = future.result()
                 except Exception as exc:  # noqa: BLE001 - provenance goes to the log
-                    logger.warning(
+                    logger.debug(
                         "home_devices_owner_unavailable owner=%s action=%s reason=%s",
                         futures[future]["deployment_id"], action, _failure_text(exc),
                     )
@@ -191,7 +191,7 @@ class ServerHomeDevices:
                 break
         for future in pending:
             future.cancel()
-            logger.warning(
+            logger.debug(
                 "home_devices_owner_unavailable owner=%s action=%s reason=timeout",
                 futures[future]["deployment_id"], action,
             )

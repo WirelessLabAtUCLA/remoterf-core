@@ -68,7 +68,11 @@ from prompt_toolkit.output import DummyOutput
 
 from ..tools.gist_status import start_status_publisher
 from .cert_provider import start_cert_provider, stop_cert_provider
-from . import direct_path
+try:
+    from . import direct_path
+except Exception as _exc:  # noqa: BLE001 - an optimization: without it every call still goes over the relay
+    direct_path = None
+    _DIRECT_PATH_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 from pathlib import Path
 
@@ -217,7 +221,8 @@ class ServerRuntime:
         try:
             termination.wait(timeout=max(1.0, float(grace_sec) + 2.0))
         finally:
-            direct_path.shutdown()
+            if direct_path is not None:
+                direct_path.shutdown()
             session_manager.close_all()
             host_session_proxy.close_all()
             close_local_devices()
@@ -332,9 +337,10 @@ def start_server_runtime(
             )
         )
     cert_dir = Path(cert_dir)
-    direct_path.CERT_DIR = cert_dir
-    direct_path.BIND_HOST = bind_host
-    direct_path.UDP_PORT = int(os.getenv("REMOTERF_DIRECT_UDP_PORT", grpc_port) or 0)
+    if direct_path is not None:
+        direct_path.CERT_DIR = cert_dir
+        direct_path.BIND_HOST = bind_host
+        direct_path.UDP_PORT = int(os.getenv("REMOTERF_DIRECT_UDP_PORT", grpc_port) or 0)
 
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
@@ -399,7 +405,11 @@ def start_server_runtime(
         )
         reservation_handler.update_devices()
         server.start()
-        direct_path.start_listener()
+        if direct_path is not None:
+            direct_path.start_listener()
+        else:
+            print(f"Warning: direct path off, every call goes over the relay ({_DIRECT_PATH_ERROR}). "
+                  "Usually conda replaced pip's cryptography; fix: pip install --force-reinstall remoterf-server")
         if run_reservation_updates:
             update_thread = threading.Thread(
                 target=update_devices,
@@ -624,8 +634,18 @@ def set_acc():
 def get_devices():
     from ..common.utils.panel import print_table
 
-    rows = [{"device_id": key, "name": value} for key, value in sorted(get_all_devices_str().items())]
-    print_table("Devices", rows, ["device_id", "name"], empty="No devices configured.")
+    reg = hts.get_tunnel_registry(create=False)
+    live = reg.list_devices() if reg is not None else {}
+    rows = []
+    for key, value in sorted(get_all_devices_str().items()):
+        ds = live.get(str(key))
+        rows.append({
+            "device_id": key,
+            "name": value,
+            "host": f"{ds.host_id} #{ds.host_local_id}" if ds else "local",
+            "last_seen": f"{_fmt_ms_ago(ds.last_seen_ms)} ago" if ds and ds.last_seen_ms else "-",
+        })
+    print_table("Devices", rows, ["device_id", "name", "host", "last_seen"], empty="No devices configured.")
 
 def _fmt_ms_ago(ms: int) -> str:
     if not ms:
@@ -658,24 +678,6 @@ def _cmd_hosts_status() -> None:
         for hid, hs in sorted(hosts.items(), key=lambda kv: kv[0])
     ]
     print_table("Hosts (live)", rows, ["host_id", "online", "last_seen", "devices"])
-
-
-def _cmd_devices_status() -> None:
-    from ..common.utils.panel import print_table
-
-    reg = hts.get_tunnel_registry()
-    assert reg is not None
-    rows = [
-        {
-            "device_id": did,
-            "host": ds.host_id or "-",
-            "local_id": ds.host_local_id,
-            "online": ds.online,
-            "last_seen": f"{_fmt_ms_ago(ds.last_seen_ms)} ago",
-        }
-        for did, ds in sorted(reg.list_devices().items(), key=lambda kv: kv[0])
-    ]
-    print_table("Devices (live)", rows, ["device_id", "host", "local_id", "online", "last_seen"])
 
 
 def _repo_root_guess() -> Path:
@@ -1132,7 +1134,7 @@ _OLD_ALIASES = {
     "edit g": "groups edit", "show g": "groups list", "show groups": "groups list",
     "mk codes": "codes create", "mk code": "codes create", "mk c": "codes create",
     "show c": "codes list", "rm codes": "codes remove", "rm code": "codes remove",
-    "rm c": "codes remove", "host status": "hosts status", "tunnel devices": "devices status",
+    "rm c": "codes remove", "host status": "hosts status", "tunnel devices": "devices list",
 }
 
 
@@ -1219,7 +1221,6 @@ def _reexec() -> None:
 def cmd_status(argv): _cmd_status()
 def cmd_detach(argv): _cmd_detach()
 def cmd_clear(argv): clear()
-def cmd_devices_status(argv): _cmd_devices_status()
 def cmd_hosts_status(argv): _cmd_hosts_status()
 def cmd_hosts_wipe(argv): _cmd_hosts_wipe(yes=("-y" in argv or "--yes" in argv))
 def cmd_users_list(argv): reservation_handler.print_all_accounts()

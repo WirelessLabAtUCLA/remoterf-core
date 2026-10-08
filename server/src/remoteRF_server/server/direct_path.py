@@ -45,7 +45,6 @@ import os
 import secrets
 import socket
 import threading
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -59,7 +58,6 @@ from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet import QuicPacketType, pull_quic_header
 
 from ..common.grpc import grpc_pb2
-from ..common.utils.ansi_codes import Sty, printf
 from ..common.utils.process_arg import map_arg
 from .global_onboarding import RELAYED, hostname, is_offsite
 
@@ -158,23 +156,6 @@ _paths: dict[str, "_Path"] = {}
 _sessions: dict[str, dict] = {}  # secret -> the path a fixed-port hello may claim
 _listener = None
 _listener_port = 0
-
-
-def say(message: str) -> None:
-    """A console line about a path, stamped: paths fail minutes apart."""
-    printf(f"{time.strftime('%H:%M:%S')} {message}", Sty.GRAY)
-
-
-def describe_failure(exc: BaseException, stage: str) -> str:
-    """The exception class and a message that says what did not happen."""
-    if isinstance(exc, asyncio.TimeoutError):
-        return f"TimeoutError: {stage} did not complete within {CONNECT_SECONDS} s"
-    return f"{type(exc).__name__}: {exc}"
-
-
-def describe_remotes(ice: Connection) -> str:
-    """The candidates the client offered, host:port/type each."""
-    return " ".join(f"{c.host}:{c.port}/{c.type}" for c in ice.remote_candidates) or "none"
 
 
 def frame(payload: bytes) -> bytes:
@@ -356,31 +337,25 @@ class _Path:
 
     async def run(self) -> None:
         protocol = None
-        stage = "ICE"
         try:
             if self.hold:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self.ice.heard.wait(), self.hold)
             await asyncio.wait_for(self.ice.connect(), CONNECT_SECONDS)
             self.peer = peer_address(self.ice)
-            stage = "the QUIC Initial"
             protocol = await asyncio.wait_for(self._accept(), CONNECT_SECONDS)
             pump = asyncio.ensure_future(self._pump(protocol))
             closed = asyncio.ensure_future(protocol.wait_closed())
             try:
-                stage = "the QUIC handshake"
                 try:
                     await asyncio.wait_for(protocol.wait_connected(), CONNECT_SECONDS)
                 except ConnectionError:
                     raise ConnectionError(f"QUIC handshake failed: {protocol.terminated}") from None
-                where = "offsite" if is_offsite(self.peer[0]) else "local"
-                say(f"Direct path open: {self.user} from {self.peer[0]}:{self.peer[1]} ({where})")
                 await asyncio.wait({pump, closed}, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 await cancel_tasks((pump, closed))
-        except Exception as exc:  # noqa: BLE001 - a failed punch is expected on some networks
-            held = f"; held {self.hold:g} s" if self.hold else ""
-            say(f"Direct path failed: {self.user}: {describe_failure(exc, stage)}; offered {describe_remotes(self.ice)}{held}")
+        except Exception:  # noqa: BLE001 - a failed punch is expected on some networks; the client retries
+            pass
         finally:
             if protocol is not None:
                 protocol.close()
@@ -388,9 +363,6 @@ class _Path:
             if self.transport is not None:
                 self.transport.close()
             await self.close()
-            if self.peer is not None:
-                why = f" ({protocol.terminated})" if protocol is not None and protocol.terminated else ""
-                say(f"Direct path closed: {self.user} from {self.peer[0]}:{self.peer[1]} after {self.calls} calls{why}")
 
     async def _accept(self) -> QuicConnectionProtocol:
         """The client's Initial packet decides the connection, as aioquic's server does."""
@@ -474,10 +446,8 @@ async def _serve_call(path, reader: asyncio.StreamReader, writer: asyncio.Stream
     if bad_frame is not None:
         # A client that cannot frame a request is not ours; its bytes are
         # still arriving and would only pile up in this stream's buffer.
-        say(f"Direct path dropped: {path.user} sent a {bad_frame}")
         await path.drop()
     if refused is not None:
-        say(f"Direct path refused: {path.user}: {refused}")
         await path.drop()
 
 
@@ -525,8 +495,6 @@ class _Conn(_Protocol):
             self._hello_timer.cancel()
             if self.key is not None and _paths.get(self.key) is self:
                 del _paths[self.key]
-                why = f" ({self.terminated})" if self.terminated else ""
-                say(f"Direct path closed: {self.user} from {self.peer[0]}:{self.peer[1]} after {self.calls} calls{why}")
 
     def _stream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.ensure_future(self._hello(reader, writer) if self.key is None else _serve_call(self, reader, writer))
@@ -536,9 +504,7 @@ class _Conn(_Protocol):
     async def _hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             await self._claim(reader, writer)
-        except Exception as exc:  # noqa: BLE001 - a hello that cannot be honoured closes the connection
-            logger.warning("direct path fixed-port hello failed: %r", exc)
-            say(f"Direct path fixed-port hello failed: {type(exc).__name__}: {exc}")
+        except Exception:  # noqa: BLE001 - a hello that cannot be honoured closes the connection
             self.close()
 
     async def _claim(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -559,8 +525,6 @@ class _Conn(_Protocol):
         _paths[self.key] = self
         writer.write(frame(json.dumps({"ok": True}).encode()))
         writer.write_eof()
-        where = "offsite" if is_offsite(self.peer[0]) else "local"
-        say(f"Direct path open: {self.user} from {self.peer[0]}:{self.peer[1]} ({where}, fixed port)")
 
     async def drop(self) -> None:
         if self.key is not None and _paths.get(self.key) is self:
@@ -602,8 +566,7 @@ def start_listener(port: Optional[int] = None) -> int:
         port = UDP_PORT
     try:
         return asyncio.run_coroutine_threadsafe(_start_listener(port), _get_loop()).result(10)
-    except Exception as exc:  # noqa: BLE001 - the punch still works without it
-        printf(f"Direct path fixed port unavailable: {exc}", Sty.GRAY)
+    except Exception:  # noqa: BLE001 - the punch still works without it
         return 0
 
 
@@ -667,8 +630,7 @@ def offer(session_key: str, user: str, ice: str) -> dict:
         answer = asyncio.run_coroutine_threadsafe(
             _offer(key, user, remote), _get_loop()
         ).result(20)
-    except Exception as exc:  # noqa: BLE001 - the console gets the detail, the client a fixed line
-        say(f"Direct path offer failed: {user}: {type(exc).__name__}: {exc}")
+    except Exception:  # noqa: BLE001 - the client then stays on the relay
         return {"ace": map_arg("direct path unavailable")}
     return {"ice": map_arg(json.dumps(answer)), "server_name": map_arg(hostname() or "")}
 

@@ -31,7 +31,7 @@ def is_usrp(label):
 
 class PlutoRadio:
     def __init__(self, token, args):
-        from remoteRF.drivers.adalm_pluto import Pluto
+        from remoterf.drivers.adalm_pluto import Pluto
 
         self.sdr = Pluto(token)
         self.sdr.sample_rate = FS
@@ -59,7 +59,7 @@ class PlutoRadio:
 
 class UsrpRadio:
     def __init__(self, token, args):
-        from remoteRF.drivers.usrp import MultiUSRP
+        from remoterf.drivers.usrp import MultiUSRP
 
         self.usrp = MultiUSRP(token)
         self.args = args
@@ -120,7 +120,7 @@ def main():
         tokens[alias] = reply["Token"]
         log(f"reserved {alias} {devices[str(alias)]}")
 
-    from remoteRF.core import direct_path
+    from remoterf.core import direct_path
 
     host, port = args.home.rsplit(":", 1)
     direct_path.start(username=user, secret=pw, route={"kind": "lan", "host": host, "port": int(port)})

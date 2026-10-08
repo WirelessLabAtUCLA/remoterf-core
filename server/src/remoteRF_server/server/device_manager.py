@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import platform
 import re
 import secrets
 import shutil
@@ -611,10 +610,9 @@ def _seed_default_usrp_phaser_driver() -> None:
     _seed_default_driver("usrp_phaser_schema.py", "usrp_phaser")
 
 
-_LIBIIO_FIX = {
-    "Darwin": "brew install libiio",
-    "Linux": "sudo apt install libiio0  (or your distro's libiio package)",
-}.get(platform.system(), "install libiio from https://github.com/analogdevicesinc/libiio (on Windows, run the server in WSL)")
+# Only the C library from conda: pip already installed pyadi-iio, and conda's
+# pulls a cryptography that breaks the pip-installed pyOpenSSL aioquic needs.
+_LIBIIO_FIX = "conda install -c conda-forge libiio  (in the server's conda env; not pyadi-iio, pip already has it)"
 
 
 def _load_all_drivers() -> None:

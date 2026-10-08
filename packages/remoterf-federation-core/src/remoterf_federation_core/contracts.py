@@ -124,6 +124,10 @@ _BROKER_PATHS = frozenset(
         "/v2/broker/invites/join",
         # Cluster rosters: the owner's signed member list, so members mesh.
         "/v2/broker/clusters/roster",
+        # One account name across Global: a lab claims a name before it
+        # creates the account and releases it when the account goes.
+        "/v2/broker/usernames/claim",
+        "/v2/broker/usernames/release",
     }
 )
 

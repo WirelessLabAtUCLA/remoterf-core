@@ -105,8 +105,7 @@ def _table() -> list[Command]:
         Command(("clear", "cls"), "Clear the screen", _daemon("cmd_clear"), "Server", where=D, console_only=True),
         Command(("reload devices",), "", _daemon("cmd_reload_devices"), "Server", where=D, hidden=True),
         # ---- devices ----
-        Command(("devices list",), "Configured devices", _shell("cmd_devices_list"), "Devices"),
-        Command(("devices status",), "Live device online/last_seen/route", _daemon("cmd_devices_status"), "Devices", where=D),
+        Command(("devices list",), "Devices, with the host each is on", _shell("cmd_devices_list"), "Devices"),
         Command(("devices add",), "Add a device (asks type, name, serial)", _shell("cmd_devices_add"), "Devices", after="reload_devices", hidden=True),
         Command(("devices remove",), "Remove a device by id", _shell("cmd_devices_remove"), "Devices", after="reload_devices"),
         Command(("devices rename",), "Rename a device: devices rename <id> <name>", _shell("cmd_devices_rename"), "Devices", after="reload_devices"),

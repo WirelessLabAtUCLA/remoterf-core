@@ -420,6 +420,8 @@ def _public_note(name: str, state: str, owner: str | None = None) -> None:
 def join_public(pool: dict, party: dict) -> str:
     """Walk into Global's cluster under the standing contract with its home
     (`party`, from `global_home`); the home's key is pinned on Global's word."""
+    from . import global_home
+
     clusters = load()
     if GLOBAL in clusters:
         raise ClusterError(f"{GLOBAL} is already a cluster here")
@@ -429,8 +431,12 @@ def join_public(pool: dict, party: dict) -> str:
     _public_note(GLOBAL, "joined", owner=peer)
     clusters[GLOBAL] = {"role": "member", "state": "active", "public": True, "lab_cap": PUBLIC_LAB_CAP,
                         "peer": peer, "peer_name": owner.get("display_name"), "created_at": int(time.time()),
-                        "contract_id": party["contract_id"], "published": list(party.get("published", []))}
+                        "contract_id": party["contract_id"], "published": list(party.get("published", [])),
+                        "groups": []}
+    state = global_home.load()
+    clusters[GLOBAL]["groups"] = state.pop("public_groups", [])
     save(clusters)
+    global_home.save(state)
     return GLOBAL
 
 
@@ -609,8 +615,30 @@ def _account_counts(name: str) -> dict:
     return {"students": rows.get("local", 0), "visitors": rows.get("proxy", 0)}
 
 
+def _queueing(clusters: dict, name: str) -> bool:
+    """On Global but not yet walked into `global` (that takes an agent tick
+    or two after the lab goes active): public groups wait for join_public."""
+    return name == GLOBAL and GLOBAL not in clusters and g.participating()
+
+
+def _queue_public(ref: str, on: bool) -> str:
+    from . import global_home
+
+    with _usergroups() as conn:
+        group_id, group_name = _group(conn, ref)
+    state = global_home.load()
+    queued = state.setdefault("public_groups", [])
+    if on == (group_id in queued):
+        raise ClusterError(f"{group_name} is {'already' if on else 'not'} attached to {GLOBAL}")
+    queued.append(group_id) if on else queued.remove(group_id)
+    global_home.save(state)
+    return group_name
+
+
 def attach_group(name: str, ref: str) -> str:
     clusters = load()
+    if _queueing(clusters, name):
+        return _queue_public(ref, True)
     cluster = _find(clusters, name)
     with _usergroups() as conn:
         group_id, group_name = _group(conn, ref)
@@ -649,6 +677,8 @@ def _take_back(conn, name: str, group_id: int | None = None, account: int | None
 
 def detach_group(name: str, ref: str) -> str:
     clusters = load()
+    if _queueing(clusters, name):
+        return _queue_public(ref, False)
     cluster = _find(clusters, name)
     with _usergroups() as conn:
         group_id, group_name = _group(conn, ref)
@@ -662,14 +692,20 @@ def detach_group(name: str, ref: str) -> str:
 
 def shared_with(group_id: int) -> list[str]:
     """The clusters a group is shared into."""
-    return sorted(name for name, cluster in load().items() if int(group_id) in cluster.get("groups", []))
+    from . import global_home
+
+    names = {name for name, cluster in load().items() if int(group_id) in cluster.get("groups", [])}
+    if int(group_id) in global_home.load().get("public_groups", []):
+        names.add(GLOBAL)
+    return sorted(names)
 
 
 def share_group(ref: str, names: list[str]) -> tuple[list[str], list[str]]:
     """Share a group into exactly these clusters; returns (added, removed)."""
     clusters = load()
     for name in names:
-        _find(clusters, name)
+        if not _queueing(clusters, name):
+            _find(clusters, name)
     with _usergroups() as conn:
         group_id, _ = _group(conn, ref)
     current = set(shared_with(group_id))

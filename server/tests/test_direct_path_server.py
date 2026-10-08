@@ -13,12 +13,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""The Server end of the direct path: what its console lines say, and the
+"""The Server end of the direct path: the offer's failure reply, and the
 punch holding its first check for a client that dials the fixed port first."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 import unittest
 from unittest import mock
 
@@ -47,45 +48,11 @@ class _FakeIce:
         pass
 
 
-class ConsoleLineTests(unittest.TestCase):
-    def test_failure_names_the_stage_for_a_timeout(self):
-        self.assertEqual(
-            direct_path.describe_failure(asyncio.TimeoutError(), "ICE"),
-            f"TimeoutError: ICE did not complete within {direct_path.CONNECT_SECONDS} s",
-        )
-        self.assertEqual(
-            direct_path.describe_failure(ConnectionError("QUIC handshake failed: x"), "ICE"),
-            "ConnectionError: QUIC handshake failed: x",
-        )
-
-    def test_remotes_are_the_offered_candidates(self):
-        self.assertEqual(direct_path.describe_remotes(_FakeIce()), "172.20.10.2:53982/host 70.243.119.29:9961/srflx")
-        ice = _FakeIce()
-        ice.remote_candidates = []
-        self.assertEqual(direct_path.describe_remotes(ice), "none")
-
-    def test_lines_are_stamped(self):
-        with mock.patch.object(direct_path, "printf") as printf:
-            direct_path.say("Direct path open: u from 1.2.3.4:5 (offsite)")
-        line = printf.call_args.args[0]
-        self.assertRegex(line, r"^\d\d:\d\d:\d\d Direct path open: u from 1\.2\.3\.4:5 \(offsite\)$")
-
-    def test_offer_failure_is_fixed_for_the_client_and_detailed_on_the_console(self):
-        with mock.patch.object(direct_path, "_get_loop", side_effect=RuntimeError("no loop: secret detail")), \
-                mock.patch.object(direct_path, "printf") as printf:
+class OfferTests(unittest.TestCase):
+    def test_offer_failure_gives_the_client_a_fixed_line(self):
+        with mock.patch.object(direct_path, "_get_loop", side_effect=RuntimeError("no loop: secret detail")):
             reply = direct_path.offer("session", "tester", '{"id": "x"}')
         self.assertEqual(unmap_arg(reply["ace"]), "direct path unavailable")
-        self.assertIn("RuntimeError: no loop: secret detail", printf.call_args.args[0])
-
-    def test_run_reports_class_message_and_remotes(self):
-        async def go():
-            ice = _FakeIce()
-            with mock.patch.object(direct_path, "printf") as printf:
-                await direct_path._Path("k", "tester", ice).run()
-            return printf.call_args.args[0]
-
-        line = asyncio.run(go())
-        self.assertRegex(line, r"^\d\d:\d\d:\d\d Direct path failed: tester: ConnectionError: ICE negotiation failed; offered 172\.20\.10\.2:53982/host 70\.243\.119\.29:9961/srflx$")
 
 
 class HoldTests(unittest.TestCase):
@@ -98,8 +65,7 @@ class HoldTests(unittest.TestCase):
             if heard_after is not None:
                 loop.call_later(heard_after, ice.heard.set)
             started = loop.time()
-            with mock.patch.object(direct_path, "printf"):
-                await direct_path._Path("k", "tester", ice, hold=hold).run()
+            await direct_path._Path("k", "tester", ice, hold=hold).run()
             return ice.connected_at - started
 
         return asyncio.run(go())
@@ -112,15 +78,6 @@ class HoldTests(unittest.TestCase):
 
     def test_the_clients_first_check_ends_the_hold(self):
         self.assertLess(self._run(hold=0.3, heard_after=0.05), 0.2)
-
-    def test_the_failure_line_says_whether_the_check_was_held(self):
-        async def go(hold):
-            with mock.patch.object(direct_path, "printf") as printf:
-                await direct_path._Path("k", "tester", _FakeIce(), hold=hold).run()
-            return printf.call_args.args[0]
-
-        self.assertTrue(asyncio.run(go(3.0)).endswith("/srflx; held 3 s"))
-        self.assertTrue(asyncio.run(go(0.0)).endswith("/srflx"))
 
 
 class _OfferIce:
@@ -172,3 +129,18 @@ class OfferHoldTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_broken_pyopenssl_turns_the_direct_path_off_not_the_server(tmp_path):
+    # conda can swap in a cryptography the pip-installed pyOpenSSL (aioquic's) cannot use.
+    import subprocess
+    import sys
+
+    (tmp_path / "OpenSSL").mkdir()
+    (tmp_path / "OpenSSL" / "__init__.py").write_text("raise AttributeError(\"module 'lib' has no attribute 'GEN_EMAIL'\")\n")
+    env = {**os.environ, "PYTHONPATH": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path),
+           "GRPC_PORT": "50999", "CERT_PORT": "50998"}
+    probe = "from remoteRF_server.server import grpc_server as g; print(g.direct_path, g._DIRECT_PATH_ERROR)"
+    result = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True, timeout=120,
+                            stdin=subprocess.DEVNULL)
+    assert result.stdout.strip().splitlines()[-1].startswith("None AttributeError"), result.stderr[-2000:]

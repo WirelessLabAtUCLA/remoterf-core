@@ -101,6 +101,15 @@ class PoePlutoTests(unittest.TestCase):
         self.assertEqual(self.poe_calls[-1], ("ether5", True, "secret"))
         self.assertEqual(len(self.opened), 2)
 
+    def test_a_switch_timeout_at_reservation_end_is_retried(self) -> None:
+        schema = self.schema(poe=True, ip="192.168.4.101", poe_port="ether5")
+        schema.dispatch("call_power_up", {})
+        calls = len(self.poe_calls)
+        poe.set_poe.side_effect = [TimeoutError("timed out"), None]
+        schema.reset_for_next_holder()
+        self.assertEqual(poe.set_poe.call_count, calls + 2)
+        self.assertFalse(poe.set_poe.call_args.kwargs["on"])
+
     def test_power_cycle_and_shutdown(self) -> None:
         schema = self.schema(poe=True, ip="192.168.4.101", poe_port="ether5")
         schema.dispatch("call_power_cycle", {})

@@ -859,8 +859,7 @@ After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. 
 
 ### Devices
 
-* `devices list` — List all devices
-* `devices status` — Show live device routing/online/last_seen from the Host Tunnel
+* `devices list` — List all devices, with the host each is on (`local` for this server's own) and when it was last seen
 
 ---
 

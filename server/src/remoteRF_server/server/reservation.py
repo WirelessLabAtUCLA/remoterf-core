@@ -43,6 +43,7 @@ from .device_manager import (
 )
 from .acc_perms import perms
 from .user_group_handler import user_group_handler
+from . import global_onboarding
 from .global_onboarding import RELAYED, lan_only_hint
 from .federation.migrations import (
     FEDERATED_PASSWORD_HASH,
@@ -224,7 +225,10 @@ class ReservationHandler:
                         except HomeDeviceError as exc:
                             return {"ace": map_arg(str(exc))}
                         return {key: map_arg(value) for key, value in answer.items()}
-                    from .direct_path import offer
+                    try:
+                        from .direct_path import offer
+                    except Exception:  # noqa: BLE001 - aioquic unusable here; the relay carries the calls
+                        return {"ace": map_arg("direct path unavailable")}
                     return offer(self._session_hash(password), username, unmap_arg(args['ice']))
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
@@ -468,6 +472,9 @@ class ReservationHandler:
         # check if username and password fit the bill
         if len(un) < 3:
             return {"UE": map_arg("Username must be at least 3 characters long.")}
+        if '@' in un:
+            # On Global the full account name is `name@lab`.
+            return {"UE": map_arg("Username cannot contain '@'.")}
         if len(pw) < 5:
             return {"UE": map_arg("Password must be at least 5 characters long.")}
         if '@' not in em:
@@ -514,7 +521,7 @@ class ReservationHandler:
                 except Exception:  # noqa: BLE001 - the tick does it on its next pass
                     pass
             perms.set_user(un) # set perms
-            return {"UC": map_arg(f'{un}')}
+            return {"UC": map_arg(global_onboarding.account_name(un))}
         except sqlite3.IntegrityError:
             self.db.rollback()
             _record_failure("enroll")

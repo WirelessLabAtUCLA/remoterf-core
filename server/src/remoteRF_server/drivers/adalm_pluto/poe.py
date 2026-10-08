@@ -133,7 +133,14 @@ class PoePluto:
         return f"<PoE Pluto {self.uri} on {self._port}, {'on' if self._pluto is not None else 'off'}>"
 
     def _poe(self, on):
-        set_poe(port=self._port, on=on, **self._switch)
+        # The switch API occasionally times out; a lost power-off leaves the Pluto on.
+        for attempt in range(3):
+            try:
+                return set_poe(port=self._port, on=on, **self._switch)
+            except OSError:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
 
     @property
     def power_state(self):

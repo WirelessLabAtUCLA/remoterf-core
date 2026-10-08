@@ -78,8 +78,8 @@ def main():
     log(f"reserved {alias} {devices[str(alias)]}")
     report["alias"], report["label"] = alias, devices[str(alias)]
 
-    from remoteRF.core import direct_path
-    from remoteRF.drivers.adalm_pluto import Pluto
+    from remoterf.core import direct_path
+    from remoterf.drivers.adalm_pluto import Pluto
 
     host, port = args.home.rsplit(":", 1)
     direct_path.start(username=user, secret=pw, route={"kind": "lan", "host": host, "port": int(port)})
