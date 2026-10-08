@@ -59,12 +59,12 @@ class SchemaTests(unittest.TestCase):
         )
         other = "d9428888-122b-11e1-b85c-61cd3cbb3211"
         self.assertNotEqual(federated_proxy_adapter(issuer, other)[0], username)
-        for invalid in ("ethan", "ETHAN@example.com", issuer.upper(), str(0)):
+        for invalid in ("jdoe", "JDOE@example.com", issuer.upper(), str(0)):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 federated_identity(invalid, subject)
 
     def test_bounded_display_metadata(self):
-        value = {"display_name": "Ethan", "username_hint": "ethan"}
+        value = {"display_name": "Jane Doe", "username_hint": "jdoe"}
         self.assertEqual(validate_display_metadata(value), value)
         for invalid in (
             {"display_name": "x" * 257},

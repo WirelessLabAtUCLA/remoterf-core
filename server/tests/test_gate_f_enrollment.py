@@ -445,13 +445,13 @@ def test_server_plain_group_code_enrols_a_contract_partners_user_by_name(tmp_pat
     issued = pair["issuer"].issue(
         local_account_id=1, destination_deployment_id=pair["destination_id"],
         contract_id=pair["contract_id"], contract_version=1, action="federated_enroll",
-        code_name="PLAIN1", enrollee={"display_name": "Ethan", "email": "ethan@example.edu"},
+        code_name="PLAIN1", enrollee={"display_name": "Jane Doe", "email": "jdoe@example.edu"},
     )
     result = _result(pair, destination, issued)
     assert result["groups"] == [{"group_id": "7", "group_name": "federated-lab"}]
     with sqlite3.connect(pair["dest_db"]) as conn:
         (meta,) = conn.execute("SELECT display_metadata_json FROM FederatedPrincipals").fetchone()
-        assert json.loads(meta) == {"display_name": "Ethan", "email": "ethan@example.edu", "home": pair["home_id"]}
+        assert json.loads(meta) == {"display_name": "Jane Doe", "email": "jdoe@example.edu", "home": pair["home_id"]}
         assert conn.execute("SELECT COUNT(*) FROM EnrollmentCodes WHERE code_name='PLAIN1'").fetchone()[0] == 0  # one use
     # A second redemption of the single-use code is refused like a local one would be.
     again = pair["issuer"].issue(

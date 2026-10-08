@@ -170,7 +170,7 @@ def hostname() -> Optional[str]:
 
 
 def account_name(username: str) -> str:
-    """A local account's full name: `ethan@ucla` on Global, else just `ethan`."""
+    """A local account's full name: `alice@ucla` on Global, else just `alice`."""
     kv = load()
     name = kv.get("GLOBAL_FINAL_NAME") or kv.get("GLOBAL_NAME")
     return f"{username}@{name}" if name and state() == "active" else username

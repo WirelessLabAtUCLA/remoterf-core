@@ -171,7 +171,7 @@ def c_reserve(c: Case):
 
 
 def c_script(c: Case):
-    """Ian's script shape: nothing before adi.Pluto(token); then TX a tone and find it on RX."""
+    """A typical student script: nothing before adi.Pluto(token); then TX a tone and find it on RX."""
     import numpy as np
 
     t0 = time.monotonic()

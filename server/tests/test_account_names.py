@@ -36,9 +36,9 @@ class AccountNameTests(unittest.TestCase):
                                         ec=map_arg("C1"))
                     return {k: unmap_arg(v) for k, v in out.items()}
 
-                refused = register("ian@ucla", "i@x.org")
+                refused = register("jdoe@ucla", "i@x.org")
                 self.assertEqual(refused, {"UE": "Username cannot contain '@'."})
-                self.assertEqual(h.get_uid("ian@ucla"), -1)
+                self.assertEqual(h.get_uid("jdoe@ucla"), -1)
 
                 created = register("alice", "a@x.org")
                 self.assertEqual(created, {"UC": "alice@ucla" if on_global else "alice"})
