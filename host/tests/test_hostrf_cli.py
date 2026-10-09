@@ -36,9 +36,12 @@ class HostRfCliTests(unittest.TestCase):
         self.host_dir = self.root / "host"
         self.drivers_dir = self.root / "drivers"
 
-    def run_cli(self, *args: str) -> tuple[int, str, str]:
+    def run_cli(self, *args: str, tty_input: str | None = None, tty_stdout: bool = True) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
+        stdin = io.StringIO(tty_input or "")
+        stdin.isatty = lambda: tty_input is not None  # type: ignore[method-assign]
+        stdout.isatty = lambda: tty_stdout  # type: ignore[method-assign]
         env = {
             "REMOTERF_CONFIG_DIR": str(self.host_dir),
             "REMOTERF_DRIVERS_DIR": str(self.drivers_dir),
@@ -46,7 +49,8 @@ class HostRfCliTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, env, clear=False):
-            with patch.object(hostrf_cli.sys, "argv", ["hostrf", *args]):
+            with patch.object(hostrf_cli.sys, "argv", ["hostrf", *args]), \
+                    patch.object(hostrf_cli.sys, "stdin", stdin):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     rc = hostrf_cli.main()
 
@@ -106,6 +110,138 @@ class HostRfCliTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("Wiped device config", out)
         self.assertFalse(devices_yml.exists())
+
+    def test_device_add_with_handle_round_trips(self) -> None:
+        rc, out, err = self.run_cli(
+            "--device", "--add", "--pluto", "0:pluto_a:123123", "--handle", "PlutoA"
+        )
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("Set device handle: 0 handle=PlutoA", out)
+        rc, _, err = self.run_cli("--device", "--add", "--pluto", "1:pluto_b:456456")
+        self.assertEqual((rc, err), (0, ""))
+
+        # rename and removing another device keep the handle
+        self.assertEqual(self.run_cli("--device", "--edit-name", "0", "pluto_x")[0], 0)
+        self.assertEqual(self.run_cli("--device", "--remove", "1")[0], 0)
+
+        devices_yml = self.host_dir / "devices.yml"
+        self.assertEqual(
+            json.loads(devices_yml.read_text(encoding="utf-8"))["devices"],
+            [{
+                "device_id": 0,
+                "device_type": "adalm_pluto",
+                "name": "pluto_x",
+                "handle": "PlutoA",
+                "init": {"serial": "123123"},
+            }],
+        )
+        rc, out, _ = self.run_cli("--device", "--show")
+        self.assertIn("0: type=adalm_pluto name=pluto_x iio_serial=123123 handle=PlutoA", out)
+
+    def test_a_name_that_reads_as_a_handle_is_refused(self) -> None:
+        rc, out, err = self.run_cli("--device", "--add", "--pluto", "3:Bench [B1]:789789")
+        self.assertEqual(rc, 2)
+        self.assertIn("device lists show a handle that way", err + out)
+        self.assertNotIn("Added device", out)
+        self.assertEqual(self.run_cli("--device", "--add", "--pluto", "3:bench:789789")[0], 0)
+        rc, _, err = self.run_cli("--device", "--edit-name", "3", "Bench [B1]")
+        self.assertEqual(rc, 2)
+        self.assertIn("device lists show a handle that way", err)
+
+    def test_device_add_rejects_bad_or_duplicate_handle(self) -> None:
+        for bad in ("", "a@lab", "uuid:1", "two words", "rfg_x", "bridge-1", "tab\tx", "Pluto\u200bA", "\u202ePlutoA"):
+            rc, out, err = self.run_cli(
+                "--device", "--add", "--pluto", "3:pluto_c:789789", "--handle", bad
+            )
+            self.assertEqual(rc, 2, bad)
+            self.assertIn(f"ERROR: invalid handle {bad!r}", err)
+            self.assertNotIn("Added device", out)
+
+        self.run_cli("--device", "--add", "--pluto", "0:pluto_a:123123", "--handle", "PlutoA")
+        rc, out, err = self.run_cli(
+            "--device", "--add", "--pluto", "1:pluto_b:456456", "--handle", "PlutoA"
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("ERROR: handle 'PlutoA' is already used by global_id=0", err)
+        records = json.loads((self.host_dir / "devices.yml").read_text(encoding="utf-8"))
+        self.assertEqual([d["device_id"] for d in records["devices"]], [0])
+
+        # exact match: a different case is a different handle
+        rc, _, err = self.run_cli(
+            "--device", "--add", "--pluto", "1:pluto_b:456456", "--handle", "plutoa"
+        )
+        self.assertEqual((rc, err), (0, ""))
+
+    def handles(self) -> dict[int, str | None]:
+        records = json.loads((self.host_dir / "devices.yml").read_text(encoding="utf-8"))
+        return {d["device_id"]: d.get("handle") for d in records["devices"]}
+
+    def test_interactive_add_prompts_for_handle_until_valid(self) -> None:
+        self.run_cli("--device", "--add", "--pluto", "0:pluto_a:123123", "--handle", "PlutoA")
+        rc, out, err = self.run_cli(
+            "--device", "--add", "--pluto", "1:pluto_b:456456",
+            tty_input="bad handle\nPlutoA\nPlutoB\n",
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("Handle (optional, e.g. PlutoA): "), 3)
+        self.assertIn("ERROR: invalid handle 'bad handle'", err)
+        self.assertIn("ERROR: handle 'PlutoA' is already used by global_id=0", err)
+        self.assertEqual(self.handles(), {0: "PlutoA", 1: "PlutoB"})
+
+        # Enter or EOF skips; --handle and non-TTY runs never prompt
+        self.run_cli("--device", "--add", "--pluto", "2:pluto_c:1", tty_input="\n")
+        self.run_cli("--device", "--add", "--pluto", "3:pluto_d:2", tty_input="")
+        _, out, _ = self.run_cli("--device", "--add", "--pluto", "4:pluto_e:3", "--handle", "PlutoE", tty_input="")
+        self.assertNotIn("Handle (optional", out)
+        _, out, _ = self.run_cli("--device", "--add", "--pluto", "5:pluto_f:4")
+        self.assertNotIn("Handle (optional", out)
+        # stdout redirected: no prompt hidden in the output
+        _, out, _ = self.run_cli("--device", "--add", "--pluto", "6:pluto_g:5", tty_input="PlutoG\n", tty_stdout=False)
+        self.assertNotIn("Handle (optional", out)
+        # '-' skips like Enter; Ctrl-C skips without a traceback
+        self.run_cli("--device", "--add", "--pluto", "7:pluto_h:6", tty_input="-\n")
+        with patch("builtins.input", side_effect=KeyboardInterrupt):
+            rc, _, _ = self.run_cli("--device", "--add", "--pluto", "8:pluto_i:7", tty_input="")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.handles(),
+            {0: "PlutoA", 1: "PlutoB", 2: None, 3: None, 4: "PlutoE", 5: None, 6: None, 7: None, 8: None},
+        )
+        rc, _, err = self.run_cli("--device", "--add", "--pluto", "9:pluto_j:8", "--handle", "-")
+        self.assertEqual(rc, 2)
+        self.assertIn("'-' means no handle", err)
+        self.assertNotIn(9, self.handles())
+
+    def test_edit_handle_sets_validates_and_clears(self) -> None:
+        self.run_cli("--device", "--add", "--pluto", "0:pluto_a:123123", "--handle", "PlutoA")
+        self.run_cli("--device", "--add", "--pluto", "1:pluto_b:456456")
+
+        rc, out, err = self.run_cli("--device", "--edit-handle", "1", "PlutoB")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("Set device handle: 1 handle=PlutoB", out)
+        self.assertIn("when the host tunnel reconnects", out)
+        # re-setting a device's own handle is not a duplicate
+        self.assertEqual(self.run_cli("--device", "--edit-handle", "1", "PlutoB")[0], 0)
+
+        for bad, msg in (("PlutoA", "already used by global_id=0"), ("a@lab", "invalid handle")):
+            rc, _, err = self.run_cli("--device", "--edit-handle", "1", bad)
+            self.assertEqual(rc, 2)
+            self.assertIn(msg, err)
+        rc, _, err = self.run_cli("--device", "--edit-handle", "9", "PlutoZ")
+        self.assertEqual(rc, 2)
+        self.assertIn("global_id 9 not present", err)
+
+        rc, out, _ = self.run_cli("--device", "--edit-handle", "0", "-")
+        self.assertEqual(rc, 0)
+        self.assertIn("Cleared device handle: 0", out)
+        self.assertEqual(self.handles(), {0: None, 1: "PlutoB"})
+
+    def test_handle_without_add_is_rejected_even_with_wipe(self) -> None:
+        self.run_cli("--device", "--add", "--pluto", "0:pluto_a:123123")
+        rc, _, err = self.run_cli("--device", "--wipe", "-y", "--handle", "PlutoA")
+        self.assertEqual(rc, 2)
+        self.assertIn("ERROR: --handle is only valid with --device --add", err)
+        self.assertTrue((self.host_dir / "devices.yml").exists())
 
     def test_device_mode_adds_serial_bound_usrp(self) -> None:
         rc, out, err = self.run_cli(

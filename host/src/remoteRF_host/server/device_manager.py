@@ -40,6 +40,7 @@ class _DeviceState:
     ident: str
     dtype: str
     init: Dict[str, Any]
+    handle: str = ""
 
 
 _devices: Dict[int, _DeviceState] = {}
@@ -155,6 +156,7 @@ def _load_device_records() -> Dict[int, Dict[str, Any]]:
             "NAME": name,
             "IDENT": _infer_ident(init),
             "INIT": dict(init),
+            "HANDLE": str(item.get("handle") or "").strip(),
         }
 
     return recs
@@ -421,6 +423,7 @@ def reload_devices(*, force: bool = False) -> bool:
             ident=ident2 or ident,
             dtype=dtype2 or dtype,
             init=dict(rec.get("INIT") or {}),
+            handle=str(rec.get("HANDLE") or ""),
         )
         tmp_info[int(gid)] = name
         if ident:
@@ -470,6 +473,7 @@ def get_configured_devices() -> Dict[int, Dict[str, Any]]:
                 "ident": st.ident,
                 "init": dict(st.init),
                 "connected": st.schema is not None,
+                "handle": st.handle,
             }
             for gid, st in _devices.items()
         }

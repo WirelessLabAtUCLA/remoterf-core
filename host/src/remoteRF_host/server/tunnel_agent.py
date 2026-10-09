@@ -470,6 +470,7 @@ class HostTunnelAgent:
                     device_id=str(int(gid)),
                     serial=str(d.get("serial", "")),
                     kind=str(d.get("kind", "")),
+                    handle=str(d.get("handle", "")),
                 )
             )
 

@@ -80,6 +80,7 @@ class DeviceManagerRadioTests(unittest.TestCase):
                                 "device_id": 4,
                                 "device_type": "rtl_sdr",
                                 "name": "rtl",
+                                "handle": "rtl_A",
                                 "init": {"device_index": 0},
                             },
                             {
@@ -123,6 +124,16 @@ class DeviceManagerRadioTests(unittest.TestCase):
                         assert set(configured) == {1, 2, 3, 4, 5, 6}
                         assert configured[3]["ident"] == "192.168.10.2"
                         assert configured[4]["ident"] == "0"
+                        assert configured[4]["handle"] == "rtl_A"
+                        assert configured[1]["handle"] == ""
+
+                        from remoteRF_host.server.tunnel_agent import HostTunnelAgent
+
+                        agent = HostTunnelAgent.__new__(HostTunnelAgent)
+                        agent._devices = configured
+                        frame = agent._device_announce_frame()
+                        announced = {d.local_id: d.handle for d in frame.device_announce.devices}
+                        assert announced[4] == "rtl_A" and announced[1] == ""
 
                         for filename in (
                             "usrp_schema.py",
