@@ -52,6 +52,7 @@ from remoterf_federation_core import (
     validate_result_claims,
     validate_transport_response,
     validate_trusted_key_material,
+    verify_eddsa_jwt,
 )
 
 from .migrations import configure_connection, migrate_gate_e_usergroups_schema
@@ -347,20 +348,7 @@ class ServerHomeGrantIssuer:
                 key = Ed25519PublicKey.from_public_bytes(public_key_bytes(material))
             except (ContractError, ValueError, TypeError):
                 raise FederationError("result_key_mismatch") from None
-        try:
-            verified = jwt.decode(
-                token,
-                key,
-                algorithms=["EdDSA"],
-                options={
-                    "verify_aud": False,
-                    "verify_exp": False,
-                    "verify_iat": False,
-                    "verify_nbf": False,
-                },
-            )
-        except jwt.PyJWTError:
-            raise FederationError("invalid_result_signature") from None
+        verified = verify_eddsa_jwt(token, key, code="invalid_result_signature")
         if verified != unchecked:
             raise FederationError("invalid_result")
         claims = validate_result_claims(

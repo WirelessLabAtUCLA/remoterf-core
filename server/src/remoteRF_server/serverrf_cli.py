@@ -409,14 +409,13 @@ def _serve(*, headless: bool = False) -> int:
     if not _ensure_network_configured():
         return 1
 
-    from remoteRF_server.server.global_onboarding import ensure_consent, start_agent
+    from remoteRF_server.server.global_onboarding import ensure_consent
     if not ensure_consent():
         return 1
 
     if not _ensure_certificates():
         return 1
     _ensure_certificate_names()
-    start_agent()
 
     # UHD writes native log messages to stderr/std::clog. Set this before the
     # server imports device drivers so those messages cannot corrupt the

@@ -67,9 +67,10 @@ class FixedPortTests(unittest.TestCase):
         self.port = direct_path.start_listener(0)
         self.assertGreater(self.port, 0)
 
-    async def _connect(self, answer, session=None):
-        configuration = QuicConfiguration(is_client=True, alpn_protocols=[direct_path.ALPN], server_name=SERVER_NAME, idle_timeout=60)
-        configuration.load_verify_locations(cadata=self.ca_pem)
+    async def _connect(self, answer, session=None, pinned=False):
+        server_name = answer["server_name"] if pinned else SERVER_NAME
+        configuration = QuicConfiguration(is_client=True, alpn_protocols=[direct_path.ALPN], server_name=server_name, idle_timeout=60)
+        configuration.load_verify_locations(cadata=answer["ca_pem"].encode() if pinned else self.ca_pem)
         protocol = QuicConnectionProtocol(QuicConnection(configuration=configuration))
         host, port = answer["udp"].rsplit(":", 1)
         transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(lambda: protocol, local_addr=("127.0.0.1", 0))
@@ -161,6 +162,27 @@ class FixedPortTests(unittest.TestCase):
                 protocol.close(); transport.close()
 
         asyncio.run(run())
+
+    def test_a_bound_answer_pins_this_servers_certificate(self):
+        bound = {"run": lambda name, args: {"value": map_arg(42)}, "authorize": lambda name: None}
+
+        async def run():
+            answer = await asyncio.get_running_loop().run_in_executor(None, lambda: _offer("federated/r/2", "p2", bound))
+            self.assertEqual(answer["server_name"], SERVER_NAME)
+            self.assertEqual(answer["ca_pem"], self.ca_pem.decode())
+            protocol, transport, hello = await self._connect(answer, pinned=True)
+            try:
+                self.assertEqual(hello, {"ok": True})
+            finally:
+                protocol.close(); transport.close()
+            self.assertTrue(await self._gone())
+
+        with mock.patch.object(direct_path, "hostname", return_value=SERVER_NAME):
+            asyncio.run(run())
+            (Path(self._tmp.name) / "ca.crt").unlink()
+            with self.assertRaises(OSError):
+                _offer("federated/r/3", "p3", bound)
+        self.assertEqual(direct_path._paths, {})  # no CA, no path prepared
 
     def test_the_session_cap_applies_to_fixed_port_paths(self):
         cap = direct_path.MAX_PATHS_PER_SESSION

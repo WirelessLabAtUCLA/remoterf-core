@@ -391,6 +391,61 @@ class ClusterFlowTests(unittest.TestCase):
                     self.assertEqual(self.state("lab"), "active")
                     cluster.remove("lab")
 
+    def test_an_unreachable_lab_is_retried_with_backoff_not_every_tick(self):
+        from types import SimpleNamespace
+
+        from remoterf_federation_core import TransportFailure
+
+        calls, enrolled, failure, clock = [], set(), ["contract_unknown"], [1000.0]
+
+        def execute(**kwargs):
+            calls.append(kwargs["local_account_id"])
+            if failure[0]:
+                raise TransportFailure(failure[0])
+            return {}
+
+        home = SimpleNamespace(
+            federation_enroller=SimpleNamespace(outbound=SimpleNamespace(execute=execute)),
+            federation_devices=SimpleNamespace(
+                enrolled=lambda account: {peer for a, peer in enrolled if a == account},
+                record_enrollment=lambda *, local_account_id, destination_deployment_id:
+                    enrolled.add((local_account_id, destination_deployment_id)),
+            ),
+        )
+        with self.server(self.A), mock.patch.object(cluster.time, "monotonic", lambda: clock[0]), \
+                mock.patch.dict(cluster._unreachable, clear=True):
+            cluster.save({"lab": {"role": "member", "state": "active", "peer": self.B,
+                                  "contract_id": "c-1", "created_at": 1}})
+            with cluster._usergroups() as conn:
+                for account in (33, 48):
+                    conn.execute("INSERT INTO ClusterAccounts(cluster_name,local_account_id,kind,joined_at) "
+                                 "VALUES ('lab',?,'local',1)", (account,))
+            cluster.enroll_students(home)
+            self.assertEqual(calls, [33, 48])  # a lab that answers is not backed off
+            self.assertEqual(cluster._unreachable, {})
+            calls.clear()
+            failure[0] = "route_unavailable"
+            cluster.enroll_students(home, self.notes.append)
+            self.assertEqual(calls, [33])  # one failure stops this pass for that lab
+            self.assertIn("route_unavailable", self.notes[-1])
+            cluster.enroll_students(home)
+            self.assertEqual(len(calls), 1)
+            clock[0] += 30
+            cluster.enroll_students(home)
+            self.assertEqual(len(calls), 2)  # the first retry comes soon
+            clock[0] += 59
+            cluster.enroll_students(home)
+            self.assertEqual(len(calls), 2)  # then the wait doubles
+            for _ in range(8):
+                clock[0] += 600
+                cluster.enroll_students(home)
+            self.assertEqual(cluster._unreachable[self.B][1], 600)  # capped at ten minutes
+            failure[0] = None
+            clock[0] += 600
+            cluster.enroll_students(home)
+            self.assertEqual(enrolled, {(33, self.B), (48, self.B)})
+            self.assertNotIn(self.B, cluster._unreachable)
+
     def test_first_shape_state_file_is_upgraded_in_place(self):
         with self.server(self.A):
             cluster.save({"old": {"role": "owner", "state": "active", "created_at": 5, "peer": self.B,

@@ -293,13 +293,17 @@ class _IceTransport:
             self._pump = None
 
 
-def _server_configuration() -> QuicConfiguration:
-    cert_dir = CERT_DIR or Path(
+def _cert_dir() -> Path:
+    return CERT_DIR or Path(
         os.getenv(
             "REMOTERF_CERT_DIR",
             Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "remoterf" / "certs",
         )
     )
+
+
+def _server_configuration() -> QuicConfiguration:
+    cert_dir = _cert_dir()
     configuration = QuicConfiguration(
         is_client=False, alpn_protocols=[ALPN], idle_timeout=IDLE_SECONDS
     )
@@ -640,11 +644,15 @@ def offer_bound(session_key: str, user: str, ice: str, *, bound: dict) -> dict:
 
     ``bound["authorize"](function_name)`` decides every call (None allows,
     else the reason) and ``bound["run"](function_name, args)`` executes it
-    against the reservation's device. Returns the ICE answer; raises when no
-    path could be prepared.
+    against the reservation's device. Returns the ICE answer with this
+    Server's TLS pin; raises when no path could be prepared.
     """
+    # The owner pins itself: a Global client has no FederationPeers row for it.
+    # Read before _offer, so a missing CA prepares no path.
+    pin = {"server_name": hostname() or "", "ca_pem": (_cert_dir() / "ca.crt").read_text()}
     remote = json.loads(ice)
-    return asyncio.run_coroutine_threadsafe(_offer(_key(session_key, remote), user, remote, bound), _get_loop()).result(20)
+    answer = asyncio.run_coroutine_threadsafe(_offer(_key(session_key, remote), user, remote, bound), _get_loop()).result(20)
+    return {**answer, **pin}
 
 
 def shutdown() -> None:

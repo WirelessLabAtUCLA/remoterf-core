@@ -54,9 +54,10 @@ from .dynamic_v2 import (
 from .host_dynamic_v2 import host_session_proxy
 from .acc_perms import perms
 from ..common.utils import *
-from .device_manager import close_local_devices, get_registered_devices, get_all_devices_str, handle_report
+from .device_manager import close_local_devices, reload_devices, get_registered_devices, get_all_devices_str, handle_report
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
 from .user_group_handler import start_usergroup_cleanup_loop
+from .global_onboarding import start_agent
 
 from ..host import host_tunnel_server as hts
 from ..host.host_tunnel_server import HostTunnelServicer
@@ -403,6 +404,8 @@ def start_server_runtime(
             port=certificate_port,
             ca_path=cert_dir / "ca.crt",
         )
+        # The one place local hardware is opened: importing device_manager does not.
+        reload_devices()
         reservation_handler.update_devices()
         server.start()
         if direct_path is not None:
@@ -426,6 +429,7 @@ def start_server_runtime(
         server.stop(0)
         session_manager.close_all()
         host_session_proxy.close_all()
+        close_local_devices()
         if cert_server is not None:
             stop_cert_provider(cert_server)
         close_permissions = getattr(home_federation_permissions, "close", None)
@@ -1277,6 +1281,7 @@ def main() -> int:
     from . import console
 
     runtime = start_server_runtime()
+    start_agent()  # after the devices are open: its first status report lists them
     welcome()
     try:
         while True:
@@ -1300,6 +1305,7 @@ def main() -> int:
 
 def headless_main() -> int:
     runtime = start_server_runtime()
+    start_agent()  # after the devices are open: its first status report lists them
     welcome()
     try:
         runtime.wait()

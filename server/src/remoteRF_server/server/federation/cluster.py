@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from remoterf_federation_core import ContractError, FederationError, canonical_json
+from remoterf_federation_core import ContractError, FederationError, TransportFailure, canonical_json
 
 from .. import global_onboarding as g
 from .contracts import ContractStore
@@ -846,6 +846,10 @@ def redeem_code(local_account_id: int, code_name: str) -> Optional[str]:
     return row[1]
 
 
+_ENROL_RETRY_FIRST, _ENROL_RETRY_CAP = 30.0, 600.0
+_unreachable: dict[str, tuple[float, float]] = {}  # peer -> (retry_at, delay), monotonic
+
+
 def enroll_students(home, notify=None, *, only_account: int | None = None) -> None:
     """HOME: enrol every local student at every active lab they are not yet
     at. Idempotent; the tick retries whatever failed."""
@@ -870,6 +874,8 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
                 continue
             if cluster.get("public") and not (party.get("sharing") or {}).get("devices"):
                 continue  # a lab nobody chose gets our accounts only once it shares a device
+            if _unreachable.get(peer, (0.0, 0.0))[0] > time.monotonic():
+                continue  # unreachable a moment ago: back off rather than redial every tick
             try:
                 enroller.outbound.execute(
                     local_account_id=account, destination_deployment_id=peer,
@@ -877,9 +883,13 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
                     action="federated_enroll", code_name=CLUSTER_CODE,
                 )
             except (FederationError, OSError) as exc:
+                if isinstance(exc, TransportFailure) and exc.code == "route_unavailable":
+                    delay = min(_unreachable.get(peer, (0.0, _ENROL_RETRY_FIRST / 2))[1] * 2, _ENROL_RETRY_CAP)
+                    _unreachable[peer] = (time.monotonic() + delay, delay)
                 notify(f"[cluster] {name}: could not enrol account {account} at "
                        f"{party.get('display_name') or peer}: {getattr(exc, 'code', exc)}")
                 continue
+            _unreachable.pop(peer, None)
             plane.record_enrollment(local_account_id=account, destination_deployment_id=peer)
 
 

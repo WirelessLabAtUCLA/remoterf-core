@@ -338,6 +338,38 @@ def test_home_rejects_cryptographically_valid_result_substitution_matrix(tmp_pat
             pair["issuer"].verify_result(token, issued)
 
 
+def test_forged_result_and_grant_signatures_keep_their_stable_codes(tmp_path):
+    pair = active_pair(tmp_path)
+    issued = issue(pair)
+    response = executor(
+        pair, ActionRegistry({"permissions_read": ok_handler("Destination")})
+    ).execute("2", issued.grant, issued.request.json)
+    claims = jwt.decode(response["signed_result"], options={"verify_signature": False})
+    forged = jwt.encode(
+        claims,
+        Ed25519PrivateKey.generate(),
+        algorithm="EdDSA",
+        headers={"typ": FEDERATION_RESULT_TYP, "kid": pair["dest_material"]["kid"]},
+    )
+    with pytest.raises(FederationError) as refused:
+        pair["issuer"].verify_result(forged, issued)
+    assert refused.value.code == "invalid_result_signature"
+    assert pair["issuer"].verify_result(response["signed_result"], issued)["status"] == "ok"
+
+    fresh = issue(pair)
+    header = jwt.get_unverified_header(fresh.grant)
+    forged_grant = jwt.encode(
+        dict(fresh.claims),
+        Ed25519PrivateKey.generate(),
+        algorithm="EdDSA",
+        headers={"typ": header["typ"], "kid": header["kid"]},
+    )
+    response = executor(pair).execute("2", forged_grant, fresh.request.json)
+    assert response["error"]["code"] == "invalid_grant"
+    with sqlite3.connect(pair["dest_db"]) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM FederationGrantJTIs").fetchone()[0] == 1
+
+
 def test_federation_grant_is_not_any_legacy_or_dynamic_credential(
     tmp_path, monkeypatch
 ):

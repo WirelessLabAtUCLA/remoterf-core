@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from remoterf_federation_core import (
     ACTION_CAPABILITIES,
     FEDERATION_RESULT_TYP,
+    MAX_GRANT_TOKEN_BYTES,
     MAX_PROTOCOL_INTEGER,
     ContractError,
     FederationError,
@@ -49,6 +50,7 @@ from remoterf_federation_core import (
     validate_contract_terms,
     validate_grant_claims,
     validate_trusted_key_material,
+    verify_eddsa_jwt,
 )
 
 from .migrations import configure_connection, migrate_gate_f_usergroups_schema
@@ -336,20 +338,9 @@ class ServerFederationExecutor:
                 raise FederationError("contract_key_mismatch")
             key_row = self._key_row(conn, issuer, expected_kid, fingerprint)
             public_key = self._public_key(key_row)
-        try:
-            verified_raw = jwt.decode(
-                grant,
-                public_key,
-                algorithms=["EdDSA"],
-                options={
-                    "verify_aud": False,
-                    "verify_exp": False,
-                    "verify_iat": False,
-                    "verify_nbf": False,
-                },
-            )
-        except jwt.PyJWTError:
-            raise FederationError("invalid_grant") from None
+        verified_raw = verify_eddsa_jwt(
+            grant, public_key, code="invalid_grant", max_bytes=MAX_GRANT_TOKEN_BYTES
+        )
         now = int(self.clock())
         claims = validate_grant_claims(
             verified_raw,
@@ -607,41 +598,56 @@ class ServerFederationExecutor:
         if len(token.encode("utf-8")) > max_result_token_bytes(claims["action"]) - 64:
             raise FederationError("result_too_large")
 
+    def _signing_window(self, conn, claims, result):
+        now = int(self.clock())
+        row = conn.execute(
+            "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
+            (claims["contract_id"], claims["contract_version"]),
+        ).fetchone()
+        if row is None:
+            raise FederationError("result_signing_unavailable")
+        terms = self._terms(row)
+        kid, fingerprint = terms.key_binding(self.local_deployment_id)
+        key_row = self._key_row(conn, self.local_deployment_id, kid, fingerprint)
+        if (
+            kid != self.signing_kid
+            or fingerprint != self.signing_fingerprint
+            or not key_is_current(dict(key_row), now)
+            or not now - 60 <= result["retrieved_at"] <= now
+        ):
+            raise FederationError("result_signing_unavailable")
+        expires = now + 60
+        if key_row["valid_until"] is not None:
+            expires = min(expires, key_row["valid_until"])
+        if expires <= now:
+            raise FederationError("result_signing_unavailable")
+        return now, expires
+
     def _sign_after_commit(self, claims, result):
         if result["status"] == "error" and result["error_code"] == FINALIZE_PENDING:
             raise FederationError("finalize_incomplete")
+        max_bytes = max_result_token_bytes(claims["action"])
+        # Sign once, without the write lock: a large result takes milliseconds
+        # to encode and would serialize every federated caller on this lab.
+        with self._connect() as conn:
+            now, expires = self._signing_window(conn, claims, result)
+        token = self._encode_result(claims, result, now=now, expires=expires)
+        if len(token.encode("utf-8")) > max_bytes:
+            raise FederationError("result_too_large")
+        # The token is released only if the key is still current under the
+        # write lock, so a revocation is ordered after this signature exists.
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            now = int(self.clock())
-            row = conn.execute(
-                "SELECT * FROM FederationContracts WHERE contract_id=? AND version=?",
-                (claims["contract_id"], claims["contract_version"]),
-            ).fetchone()
-            if row is None:
-                raise FederationError("result_signing_unavailable")
-            terms = self._terms(row)
-            kid, fingerprint = terms.key_binding(self.local_deployment_id)
-            key_row = self._key_row(
-                conn, self.local_deployment_id, kid, fingerprint
-            )
-            if (
-                kid != self.signing_kid
-                or fingerprint != self.signing_fingerprint
-                or not key_is_current(dict(key_row), now)
-                or not now - 60 <= result["retrieved_at"] <= now
-            ):
-                raise FederationError("result_signing_unavailable")
-            expires = now + 60
-            if key_row["valid_until"] is not None:
-                expires = min(expires, key_row["valid_until"])
-            if expires <= now:
-                raise FederationError("result_signing_unavailable")
+            locked_now, locked_expires = self._signing_window(conn, claims, result)
+            if not locked_now < expires <= locked_expires:
+                token = self._encode_result(
+                    claims, result, now=locked_now, expires=locked_expires
+                )
+                if len(token.encode("utf-8")) > max_bytes:
+                    raise FederationError("result_too_large")
             hook = getattr(self, "_signing_lock_hook", None)
             if hook is not None:
                 hook()
-            token = self._encode_result(claims, result, now=now, expires=expires)
-            if len(token.encode("utf-8")) > max_result_token_bytes(claims["action"]):
-                raise FederationError("result_too_large")
         return {"protocol_version": "2", "signed_result": token, "error": None}
 
     def _finalize_after_commit(self, handler, verified, claims, state, result):
@@ -680,15 +686,6 @@ class ServerFederationExecutor:
             return self._typed_error(
                 claims, state, "finalize_failed", int(self.clock())
             )
-        # Predict the signed size before committing to this payload so an
-        # oversized hardware response degrades to a stable signed error
-        # instead of an unsigned transport failure.
-        probe_now = int(self.clock())
-        probe = self._encode_result(
-            claims, candidate, now=probe_now, expires=probe_now + 60
-        )
-        if len(probe.encode("utf-8")) > max_result_token_bytes(claims["action"]) - 64:
-            return self._typed_error(claims, state, "result_too_large", probe_now)
         return candidate
 
     def execute(self, protocol_version: str, grant: str, request_json: str) -> dict:
@@ -806,12 +803,26 @@ class ServerFederationExecutor:
                     )
         except Exception:
             return error_response("internal_error", retryable=False)
+        pending = result["status"] == "error" and result["error_code"] == FINALIZE_PENDING
         if verified is not None and handler is not None:
             result = self._finalize_after_commit(
                 handler, verified, claims, state, result
             )
         try:
-            return self._sign_after_commit(claims, result)
+            try:
+                return self._sign_after_commit(claims, result)
+            except FederationError as exc:
+                # Only a post-commit observation can outgrow the pre-commit
+                # size check; it degrades to a stable signed error instead of
+                # an unsigned transport failure.
+                if exc.code != "result_too_large" or not pending:
+                    raise
+                return self._sign_after_commit(
+                    claims,
+                    self._typed_error(
+                        claims, state, "result_too_large", int(self.clock())
+                    ),
+                )
         except Exception:
             # The owner/JTI transaction is already committed. Never claim rollback.
             return error_response("internal_error", retryable=False)

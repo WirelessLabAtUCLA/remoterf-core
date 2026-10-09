@@ -89,6 +89,7 @@ class PlutoSchema(DeviceSchema):
     device_type = "adalm_pluto"
     client_class = "Pluto"
     driver_version = "0.0.3"
+    _fir_rate = None  # the rate whose pyadi FIR this schema last loaded
 
     @staticmethod
     def make_device(**kwargs):
@@ -106,6 +107,7 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="set")
     def set_filter(self, value):
+        self._fir_rate = None
         self.device.filter = value
 
     @idl_expose(kind="get")
@@ -164,7 +166,20 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="set")
     def set_sample_rate(self, value):
+        # pyadi reloads its FIR and re-runs the AD9361 rate chain (~0.8 s) even
+        # for an unchanged rate: skip only what our own last set left in place.
+        if value == self._fir_rate:
+            try:
+                if (
+                    self.device.sample_rate == value
+                    and self.device._get_iio_attr("out", "voltage_filter_fir_en", False) == 1
+                ):
+                    return
+            except Exception:
+                pass
+        self._fir_rate = None
         self.device.sample_rate = value
+        self._fir_rate = value
 
     @idl_expose(kind="get")
     def get_rx_lo(self):
@@ -222,6 +237,7 @@ class PlutoSchema(DeviceSchema):
     def reset_for_next_holder(self):
         """A reservation ended: a PoE Pluto powers off. Otherwise stop its cyclic
         transmission, and drop its RX buffer so the next holder's rx_buffer_size takes effect."""
+        self._fir_rate = None
         if isinstance(self.device, PoePluto):
             self.device.power_down()
         elif self.device is not None:
@@ -244,12 +260,14 @@ class PlutoSchema(DeviceSchema):
     @idl_expose(kind="call")
     def call_power_down(self):
         """PoE Plutos: cut power; the next command powers it back up. No-op on other Plutos."""
+        self._fir_rate = None
         if isinstance(self.device, PoePluto):
             self.device.power_down()
 
     @idl_expose(kind="call")
     def call_power_cycle(self):
         """PoE Plutos: power off, then on, and wait for boot. No-op on other Plutos."""
+        self._fir_rate = None
         if isinstance(self.device, PoePluto):
             self.device.power_cycle()
 

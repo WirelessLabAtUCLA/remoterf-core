@@ -320,5 +320,67 @@ class PlutoCompatTests(unittest.TestCase):
         )
 
 
+class FakeAd936xRate:
+    """pyadi's ad936x sample_rate: every set reloads the FIR and enables it."""
+
+    def __init__(self):
+        self.rate, self.fir_en, self.reloads = 30_720_000, 0, 0
+
+    @property
+    def sample_rate(self):
+        return self.rate
+
+    @sample_rate.setter
+    def sample_rate(self, value):
+        self.reloads += 1
+        self.rate, self.fir_en = int(value), 1
+
+    @property
+    def filter(self):
+        return ""
+
+    @filter.setter
+    def filter(self, value):
+        self.fir_en = 1  # a custom FIR, same rate
+
+    def _get_iio_attr(self, channel_name, attr_name, output):
+        assert (channel_name, attr_name, output) == ("out", "voltage_filter_fir_en", False)
+        return self.fir_en
+
+    def tx_destroy_buffer(self):
+        pass
+
+    def rx_destroy_buffer(self):
+        pass
+
+
+class PlutoSampleRateTests(unittest.TestCase):
+    def test_an_unchanged_rate_skips_the_fir_reload_only_while_ours_is_in_place(self):
+        device = FakeAd936xRate()
+        schema = PlutoSchema()
+        schema.bind(device)
+
+        def set_rate(value, reloads):
+            schema.dispatch("set_sample_rate", {"value": value})
+            self.assertEqual(device.rate, int(value))
+            self.assertEqual(device.reloads, reloads)
+
+        set_rate(30_720_000, 1)  # the first set runs: the FIR in place may not be pyadi's
+        set_rate(30_720_000.0, 1)
+        set_rate(2_000_000, 2)
+        set_rate(2_000_000, 2)
+        device.fir_en = 0
+        set_rate(2_000_000, 3)
+        device.rate = 1_999_999
+        set_rate(2_000_000, 4)
+        schema.dispatch("set_filter", {"value": "custom.ftr"})
+        set_rate(2_000_000, 5)
+        schema.reset_for_next_holder()
+        set_rate(2_000_000, 6)
+        schema.dispatch("call_power_cycle", {})
+        set_rate(2_000_000, 7)
+        set_rate(2_000_000, 7)
+
+
 if __name__ == "__main__":
     unittest.main()

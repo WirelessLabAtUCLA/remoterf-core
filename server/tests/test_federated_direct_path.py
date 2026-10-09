@@ -35,6 +35,7 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from remoterf_federation_core import build_device_payload
+from remoterf_federation_core.devices import MAX_ICE_BYTES
 
 from remoteRF_server.common.grpc import grpc_pb2
 from remoteRF_server.common.utils import map_arg, unmap_arg
@@ -179,6 +180,26 @@ def test_a_partner_reservation_drives_the_device_over_a_punched_path(federated):
     # The offer was one grant to the owner; nothing rode the broker afterwards.
     assert fed["calls"][-1] == "direct_open"
     assert fed["calls"].count("device_rpc") == 0
+
+
+def test_the_owner_signed_answer_carries_its_pin_within_the_ice_limit(federated, monkeypatch):
+    monkeypatch.setattr(direct_path, "hostname", lambda: "owner.global.test")
+
+    async def run():
+        client = Client(federated, offer_id="pin1")
+        try:
+            return await client.punch()
+        finally:
+            await client.close()
+            assert await _gone()
+
+    reply = asyncio.run(run())
+    answer = json.loads(reply["ice"])
+    assert answer["server_name"] == "owner.global.test"
+    assert answer["ca_pem"] == federated["ca_pem"].decode()
+    assert len(reply["ice"].encode()) <= MAX_ICE_BYTES
+    # A partner client still pins the HOME's FederationPeers values for the owner.
+    assert reply["server_name"] == SERVER_NAME
 
 
 def test_an_offer_for_a_reservation_that_is_not_live_is_refused_before_ice(federated):

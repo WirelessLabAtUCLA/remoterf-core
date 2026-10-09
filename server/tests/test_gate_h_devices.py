@@ -625,6 +625,62 @@ def test_finalize_failures_become_destination_signed_errors(world):
         ).fetchone() == (3,)
 
 
+def test_a_device_result_is_signed_once_and_outside_the_write_lock(world):
+    world["enroll"](devices=[world["allowed"]])
+    start, end = _window(-5)
+    world["call"](
+        "device_reserve", local_device_id=str(world["allowed"]),
+        start_time=start, end_time=end,
+    )
+    executor = world["executor"]
+    encode = executor._encode_result
+    signed = []
+
+    def recording(claims, result, **kwargs):
+        if result["status"] == "ok":
+            probe = sqlite3.connect(world["dest_db"], timeout=0)
+            try:
+                probe.execute("BEGIN IMMEDIATE")
+                probe.rollback()
+                signed.append("unlocked")
+            except sqlite3.OperationalError:
+                signed.append("locked")
+            finally:
+                probe.close()
+        return encode(claims, result, **kwargs)
+
+    world["rpc"].response = {"blob": map_arg("x" * 65536)}
+    with patch.object(executor, "_encode_result", recording):
+        result, _ = world["call"](
+            "device_rpc", local_device_id=str(world["allowed"]),
+            request_b64=_frame("test:x:CALL0"),
+        )
+    assert result["status"] == "ok"
+    assert _decode(result["payload"]["response_b64"]) == {"blob": "x" * 65536}
+    assert signed == ["unlocked"]
+
+
+def test_an_oversized_device_result_is_a_signed_result_too_large(world, monkeypatch):
+    from remoteRF_server.server.federation import destination
+
+    world["enroll"](devices=[world["allowed"]])
+    start, end = _window(-5)
+    world["call"](
+        "device_reserve", local_device_id=str(world["allowed"]),
+        start_time=start, end_time=end,
+    )
+    monkeypatch.setattr(destination, "max_result_token_bytes", lambda action: 8192)
+    world["rpc"].response = {"blob": map_arg("x" * 20000)}
+    result, _ = world["call"](
+        "device_rpc", local_device_id=str(world["allowed"]),
+        request_b64=_frame("test:x:CALL0"),
+    )
+    assert result["status"] == "error"
+    assert result["error_code"] == "result_too_large"
+    assert result["payload"] == {"response_b64": None}
+    assert world["rpc"].device_calls[-1][1] == "test:x:CALL0"
+
+
 def test_contract_without_device_capability_cannot_reach_hardware(tmp_path, world):
     """Gate G contracts grant no hardware reach even at a Gate H destination."""
 

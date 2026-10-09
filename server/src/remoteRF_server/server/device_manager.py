@@ -378,8 +378,8 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
 
     return recs
 
-def _connect_from_record(rec: Dict[str, Any]):
-    """Returns (schema_instance_or_None, ident, dtype)."""
+def _connect_from_record(rec: Dict[str, Any], *, connect: bool = True):
+    """Returns (schema_instance_or_None, ident, dtype); connect=False opens nothing."""
     dtype = (rec.get("TYPE") or "").strip().lower()
     # Older serverrf builds serialized the --pluto shorthand as "pluto",
     # while the packaged schema has always registered as "adalm_pluto".
@@ -388,6 +388,8 @@ def _connect_from_record(rec: Dict[str, Any]):
         dtype = "adalm_pluto"
     ident = (rec.get("IDENT") or "").strip()
     init_kwargs = rec.get("INIT") or {}
+    if not connect:
+        return (None, ident, dtype)
 
     try:
         schema_cls = get_driver_class(dtype)
@@ -424,6 +426,9 @@ devices_info: Dict[int, str] = {}
 device_serialization: Dict[int, str] = {}
 
 def _init_from_env() -> None:
+    """devices.yml records, every local device offline: importing this module
+    must not open hardware another process (the server) may be using. The
+    server opens them with reload_devices() at startup (start_server_runtime)."""
     records = _load_device_records()
 
     tmp_devices: Dict[int, _DeviceState] = {}
@@ -436,7 +441,7 @@ def _init_from_env() -> None:
         ident = (rec.get("IDENT") or "").strip()
         dtype = (rec.get("TYPE") or "").strip().lower()
 
-        dev, ident2, dtype2 = _connect_from_record(rec)
+        dev, ident2, dtype2 = _connect_from_record(rec, connect=False)
 
         tmp_info[int(gid)] = name
         if ident:
@@ -683,14 +688,6 @@ def _load_all_drivers() -> None:
     for fname, status in load_drivers().items():
         if status != "ok":
             _warn(f"Driver load {fname}: {status}", status)
-
-
-def reload_devices() -> None:
-    """Re-read devices.yml and reconnect: `devices add/remove` on a running server."""
-    # ponytail: reconnects every local device, not just the changed one;
-    # diff against the current table if a reload mid-session ever hurts.
-    close_local_devices()
-    _init_from_env()
 
 
 _load_all_drivers()
@@ -1274,10 +1271,23 @@ def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
 
 def reload_devices() -> None:
     """
-    Reload devices.yml and reconnect local devices.
+    Open the local devices in devices.yml: once at server startup
+    (start_server_runtime), and again after `devices add/remove/rename/wipe`.
     Preserves existing salt/hash for devices that remain (same gid),
     and preserves host virtual devices + their auth state.
     """
+    # The console and the control socket can both reload; two at once would
+    # each make every device and leave one set open.
+    with _reload_lock:
+        _reload_devices_locked()
+
+
+_reload_lock = threading.Lock()
+
+
+def _reload_devices_locked() -> None:
+    # ponytail: reconnects every local device, not just the changed one;
+    # diff against the current table if a reload mid-session ever hurts.
     records = _load_device_records()
 
     _sync_host_devices()  # ensure host entries exist before snapshot
@@ -1285,6 +1295,20 @@ def reload_devices() -> None:
     with _state_lock:
         prev_auth = {gid: (st.salt, st.hsh) for gid, st in _devices.items()}
         prev_host = {gid: st for gid, st in _devices.items() if st.origin == "host"}
+        prev_local = [st for st in _devices.values() if st.origin == "local" and st.dev is not None]
+
+    # Let go of serial ports and USB handles before make_device opens them
+    # again, each once its in-flight call is done. A call still running after
+    # 30 s (a holder's wait_for_fix(timeout=1e9)) must not hang the console:
+    # that device is reopened without a close, as before.
+    for st in prev_local:
+        if not st.io_lock.acquire(timeout=30):
+            print(f"Warning: {st.name or st.ident} is busy; reopening it without closing it first")
+            continue
+        try:
+            _close_schema(st.dev)
+        finally:
+            st.io_lock.release()
 
     tmp_local: Dict[int, _DeviceState] = {}
     tmp_info: Dict[int, str] = {}
@@ -1335,6 +1359,27 @@ def reload_devices() -> None:
     _sync_host_devices(force=True)
 
 
+def _close_schema(schema) -> bool:
+    native = getattr(schema, "device", None)
+    if native is None:
+        return False
+    close_native = getattr(schema, "close_native_device", None)
+    try:
+        if callable(close_native):
+            close_native()
+        else:
+            close = getattr(native, "close", None)
+            if callable(close):
+                close()
+            bind = getattr(schema, "bind", None)
+            if callable(bind):
+                bind(None)
+        return True
+    except Exception as exc:
+        print(f"Warning: could not close local device cleanly: {exc}")
+        return False
+
+
 def close_local_devices() -> int:
     """Release server-owned native handles during an orderly shutdown."""
     with _state_lock:
@@ -1343,27 +1388,7 @@ def close_local_devices() -> int:
             for state in _devices.values()
             if state.origin == "local" and state.dev is not None
         ]
-
-    closed = 0
-    for schema in schemas:
-        native = getattr(schema, "device", None)
-        if native is None:
-            continue
-        close_native = getattr(schema, "close_native_device", None)
-        try:
-            if callable(close_native):
-                close_native()
-            else:
-                close = getattr(native, "close", None)
-                if callable(close):
-                    close()
-                bind = getattr(schema, "bind", None)
-                if callable(bind):
-                    bind(None)
-            closed += 1
-        except Exception as exc:
-            print(f"Warning: could not close local device cleanly: {exc}")
-    return closed
+    return sum(_close_schema(schema) for schema in schemas)
 
 def set_pluto(ip: str = "192.168.2.1"):
     # kept for compatibility (no-op)

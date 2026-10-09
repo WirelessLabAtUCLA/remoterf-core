@@ -728,6 +728,86 @@ class DynamicV2ServerTests(unittest.TestCase):
         self.assertTrue(entry.rx_prefetch_stop.is_set())
         self.assertTrue(entry.rx_prefetch.empty())
 
+    def test_rx_prefetch_recv_in_flight_does_not_hold_the_entry_lock(self):
+        import threading
+
+        in_recv, release = threading.Event(), threading.Event()
+
+        class SlowRX:
+            def recv(self, buffer, metadata, timeout):
+                in_recv.set()
+                release.wait(1.0)
+                metadata.error_code = "none"
+                return buffer.shape[-1]
+
+        entry = HandleEntry(
+            handle="rx",
+            type_id="uhd.rx_streamer.RXStreamer",
+            value=SlowRX(),
+            parent=None,
+            generation=1,
+            stream_channels=[0],
+            cpu_format="fc32",
+        )
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        manager = SessionManager()
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            manager._start_rx_prefetch(types.SimpleNamespace(closed=False), entry)
+            try:
+                self.assertTrue(in_recv.wait(1.0))
+                self.assertTrue(entry.lock.acquire(timeout=0.2))
+                entry.lock.release()
+            finally:
+                release.set()
+                manager._stop_rx_prefetch(entry)
+
+    def test_a_restart_never_overlaps_native_recvs_with_a_slow_worker(self):
+        import threading
+
+        guard, active, peak = threading.Lock(), [0], [0]
+        in_recv, release = threading.Event(), threading.Event()
+
+        class SlowRX:
+            def recv(self, buffer, metadata, timeout):
+                with guard:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+                in_recv.set()
+                release.wait(2.0)
+                with guard:
+                    active[0] -= 1
+                metadata.error_code = "none"
+                return buffer.shape[-1]
+
+        entry = HandleEntry(
+            handle="rx",
+            type_id="uhd.rx_streamer.RXStreamer",
+            value=SlowRX(),
+            parent=None,
+            generation=1,
+            stream_channels=[0],
+            cpu_format="fc32",
+        )
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        manager = SessionManager()
+        session = types.SimpleNamespace(closed=False)
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            manager._start_rx_prefetch(session, entry)
+            try:
+                self.assertTrue(in_recv.wait(1.0))
+                in_recv.clear()
+                # The first worker's recv outlasts the 0.5 s stop join.
+                manager._start_rx_prefetch(session, entry)
+                in_recv.wait(0.2)
+            finally:
+                release.set()
+                manager._stop_rx_prefetch(entry)
+        self.assertEqual(peak[0], 1)
+
     def test_reservation_loss_closes_session(self):
         inventory = FakeInventorySchema()
         context = {
