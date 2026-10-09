@@ -299,14 +299,32 @@ def build_device_payload(
     return extra
 
 
+def is_device_handle(value: object) -> bool:
+    """A lab-chosen device handle, as in ``Pluto("<handle>@<lab>")``.
+
+    Only parse safety is enforced: '@' splits the deployment off, ':' marks a
+    global ref, 'rfg_'/'bridge-' are token namespaces, whitespace would not
+    survive a command line, and invisible characters (controls, zero-width,
+    bidi overrides) would let two handles look identical.
+    """
+    return (
+        type(value) is str
+        and value != ""
+        and not value.startswith(("rfg_", "bridge-"))
+        and not any(c in "@:" or c.isspace() or not c.isprintable() for c in value)
+    )
+
+
 def _device_entry(value: object) -> dict:
-    if type(value) is not dict or set(value) != {
+    if type(value) is not dict or set(value) - {"handle"} != {
         "local_device_id",
         "display_name",
         "device_type",
         "online",
         "max_reservation_time_sec",
     }:
+        raise DeviceProtocolError("invalid_device_entry")
+    if "handle" in value and not is_device_handle(value["handle"]):
         raise DeviceProtocolError("invalid_device_entry")
     device_type = value["device_type"]
     if device_type is not None and (
@@ -322,6 +340,7 @@ def _device_entry(value: object) -> dict:
         "device_type": device_type,
         "online": _flag(value["online"], "invalid_device_entry"),
         "max_reservation_time_sec": block,
+        **({"handle": value["handle"]} if "handle" in value else {}),
     }
 
 
@@ -369,12 +388,17 @@ def validate_device_payload_result(value: object, *, action: str) -> dict:
         if type(devices) is not list or len(devices) > MAX_DEVICES_PER_RESULT:
             raise DeviceProtocolError("invalid_result_payload")
         seen: set[str] = set()
+        handles: set[str] = set()
         entries = []
         for item in devices:
             entry = _device_entry(item)
             if entry["local_device_id"] in seen:
                 raise DeviceProtocolError("duplicate_local_device_id")
+            if entry.get("handle") in handles:
+                raise DeviceProtocolError("duplicate_handle")
             seen.add(entry["local_device_id"])
+            if "handle" in entry:
+                handles.add(entry["handle"])
             entries.append(entry)
         entries.sort(key=lambda item: int(item["local_device_id"]))
         return {"devices": entries}
