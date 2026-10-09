@@ -28,6 +28,7 @@ from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
 from .common.idl.schema import ensure_default_driver_files
+from .common.utils import device_name_key
 from .common.utils.db_location import get_devices_config_path, get_host_config_dir, get_remoterf_root
 from .drivers.usrp.profiles import inventory_for_profile
 
@@ -93,11 +94,10 @@ def print_help() -> None:
         "  --add --rtl-sdr <id:name:selector>   Add by serial=... or index=N\n"
         "  --add --hackrf <id:name:selector>    Add by serial=... or index=N\n"
         "  --add --ti-mmwave <id:name:serial>   Add a TI xWR mmWave radar\n"
-        "  --handle <handle>                   With --add: set the device's handle (<handle>@<lab> tokens);\n"
-        "                                       without it, an interactive add asks for one (Enter skips)\n"
+        "                                       Names are unique and are the device's handle in\n"
+        "                                       <name>@<lab> tokens (spaces and '_' are the same)\n"
         "  --remove <id>                       Remove device\n"
         "  --edit-name <id> <name>             Override device NAME for existing device\n"
-        "  --edit-handle <id> <handle|->       Set (or clear with -) the handle of an existing device\n"
         "  --show | -s                         Show all devices\n"
         "  -w | --wipe [-y]                    Wipe ONLY device config (devices.yml)\n"
         "\n"
@@ -118,7 +118,6 @@ def print_help() -> None:
         "  hostrf --host --wipe -y\n"
         "\n"
         "  hostrf --device --add --pluto 0:pluto_aaa:123123\n"
-        "  hostrf --device --add --pluto 0:pluto_a:123123 --handle PlutoA\n"
         "  hostrf --device --add --usrp-2901 7:usrp2901_lab:31A2B3C\n"
         "  hostrf --device --add --usrp-b205-mini 8:b205mini_lab:31E9F48\n"
         "  hostrf --device --add --usrp-n210 9:n210_lab:192.168.10.2\n"
@@ -126,7 +125,6 @@ def print_help() -> None:
         "  hostrf --device --add --hackrf 11:hackrf_lab:index=0\n"
         "  hostrf --device --add --ti-mmwave 12:ti_xwr68xx:00DF4F69\n"
         "  hostrf --device --edit-name 0 \"New Pluto Name\"\n"
-        "  hostrf --device --edit-handle 0 PlutoB\n"
         "  hostrf --device --remove 0\n"
         "  hostrf --device --show\n"
         "  hostrf --device --wipe -y\n"
@@ -198,9 +196,8 @@ def _redact(s: str) -> str:
 #         serial: 123123
 # -----------------------------
 
-# Device lists label a device "name [handle] (status)": a name ending like that reads as a handle.
+# Device lists may label a device "name [handle] (status)": a name ending like that reads as a handle.
 _HANDLE_LIKE_NAME = re.compile(r" \[\S+\]$")
-_HANDLE_LIKE_NAME_MSG = "name must not end in ' [<word>]': device lists show a handle that way (use --handle instead)"
 
 
 def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, str]:
@@ -213,8 +210,6 @@ def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, st
         raise ValueError("gid must be >= 0")
     if not name:
         raise ValueError("name is empty")
-    if _HANDLE_LIKE_NAME.search(name):
-        raise ValueError(_HANDLE_LIKE_NAME_MSG)
     if not serial:
         raise ValueError(f"{serial_label} is empty")
     return gid, name, serial
@@ -310,10 +305,8 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
             "device_id": int(gid),
             "device_type": str(item.get("device_type", "adalm_pluto")),
             "name": str(item.get("name", f"device-{gid}")),
+            "init": dict(item.get("init") or {}),
         }
-        if item.get("handle"):
-            entry["handle"] = str(item["handle"])
-        entry["init"] = dict(item.get("init") or {})
         devices_list.append(entry)
 
     doc: Dict[str, Any] = {"devices": devices_list}
@@ -473,6 +466,8 @@ def _device_add_pluto(spec: str) -> int:
     if gid in recs:
         print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
         return 2
+    if not _check_name(recs, gid, name):
+        return 2
 
     # Prevent duplicate iio_serial across existing devices
     for other_gid, r in recs.items():
@@ -506,6 +501,8 @@ def _device_add_inventory(
     recs = _read_device_records()
     if gid in recs:
         print(f"ERROR: global_id {gid} already exists", file=sys.stderr)
+        return 2
+    if not _check_name(recs, gid, name):
         return 2
 
     selector_text = str(selector)
@@ -629,19 +626,19 @@ def _device_edit_name(global_id_str: str, new_name: str) -> int:
     if not new_name:
         print("ERROR: new_name is empty", file=sys.stderr)
         return 2
-    if _HANDLE_LIKE_NAME.search(new_name):
-        print(f"ERROR: {_HANDLE_LIKE_NAME_MSG}", file=sys.stderr)
-        return 2
 
     recs = _read_device_records()
     if gid not in recs:
         print(f"ERROR: global_id {gid} not present; cannot edit name.", file=sys.stderr)
+        return 2
+    if not _check_name(recs, gid, new_name):
         return 2
 
     recs[gid]["name"] = new_name
     _write_device_records(recs)
 
     print(f"Updated device name: {gid} name={new_name}")
+    print("The Server picks this up when the host tunnel reconnects (restart 'hostrf --serve' to apply now).")
     return 0
 
 def _valid_handle(handle: str) -> bool:
@@ -654,68 +651,23 @@ def _valid_handle(handle: str) -> bool:
     )
 
 
-def _check_handle(recs: Dict[int, Dict[str, Any]], gid: Optional[int], handle: str) -> bool:
-    if handle == "-":
-        print("ERROR: '-' means no handle (as in --edit-handle <id> -); omit --handle instead", file=sys.stderr)
-        return False
-    if not _valid_handle(handle):
-        print(
-            f"ERROR: invalid handle {handle!r}: it must be non-empty, without '@', ':', "
-            "spaces or invisible characters, and not start with 'rfg_' or 'bridge-'",
-            file=sys.stderr,
+def _check_name(recs: Dict[int, Dict[str, Any]], gid: int, name: str) -> bool:
+    """A name is the device's handle, so it must be addressable and unique (by key) among the other devices."""
+    key = device_name_key(name)
+    if _HANDLE_LIKE_NAME.search(name):
+        msg = "name must not end in ' [<word>]': device lists read that as a handle"
+    elif not _valid_handle(key):
+        msg = (
+            f"invalid name {name!r}: names can't contain '@' or ':' or invisible characters, "
+            "be only spaces/'_', or start with 'rfg_' or 'bridge-'"
         )
-        return False
-    for other_gid, record in recs.items():
-        if other_gid != gid and record.get("handle") == handle:
-            print(f"ERROR: handle {handle!r} is already used by global_id={other_gid}", file=sys.stderr)
-            return False
-    return True
-
-
-def _device_set_handle(gid: int, handle: Optional[str]) -> int:
-    recs = _read_device_records()
-    if gid not in recs:
-        print(f"ERROR: global_id {gid} not present; cannot set handle.", file=sys.stderr)
-        return 2
-    if handle is None:
-        recs[gid].pop("handle", None)
-        _write_device_records(recs)
-        print(f"Cleared device handle: {gid}")
-        return 0
-    if not _check_handle(recs, gid, handle):
-        return 2
-
-    recs[gid]["handle"] = handle
-    _write_device_records(recs)
-
-    print(f"Set device handle: {gid} handle={handle}")
-    return 0
-
-
-def _prompt_handle(gid: int) -> Optional[str]:
-    recs = _read_device_records()
-    while True:
-        try:
-            handle = input("Handle (optional, e.g. PlutoA): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return None
-        if handle in ("", "-"):
-            return None
-        if _check_handle(recs, gid, handle):
-            return handle
-
-
-def _device_edit_handle(global_id_str: str, handle: str) -> int:
-    try:
-        gid = int((global_id_str or "").strip())
-    except Exception:
-        print("ERROR: --edit-handle expects <gid:int> <handle|->", file=sys.stderr)
-        return 2
-    rc = _device_set_handle(gid, None if handle == "-" else handle)
-    if rc == 0:
-        print("The Server picks this up when the host tunnel reconnects (restart 'hostrf --serve' to apply now).")
-    return rc
+    else:
+        clash = next((g for g, r in recs.items() if g != gid and device_name_key(str(r.get("name") or "")) == key), None)
+        if clash is None:
+            return True
+        msg = f"a device named {recs[clash].get('name')!r} already exists (#{clash}); spaces and '_' count as the same"
+    print(f"ERROR: {msg}", file=sys.stderr)
+    return False
 
 def _device_remove(global_id_str: str) -> int:
     try:
@@ -762,8 +714,7 @@ def _device_show() -> int:
                 else "serial"
             )
             selector = init.get("serial", "")
-        handle = f" handle={r['handle']}" if r.get("handle") else ""
-        print(f"  {gid}: type={dtype} name={name} {selector_label}={selector}{handle}")
+        print(f"  {gid}: type={dtype} name={name} {selector_label}={selector}")
     return 0
 
 def _wipe_all(*, yes: bool) -> int:
@@ -916,12 +867,9 @@ def main() -> int:
     device_wipe = False
     device_add_type: Optional[str] = None
     device_add_spec: Optional[str] = None
-    device_add_handle: Optional[str] = None
     device_remove_gid: Optional[str] = None
     device_edit_gid: Optional[str] = None
     device_edit_name: Optional[str] = None
-    device_edit_handle_gid: Optional[str] = None
-    device_edit_handle: Optional[str] = None
 
     # wipe-all
     wipe_all = False
@@ -1056,29 +1004,12 @@ def main() -> int:
             i += 3
             continue
 
-        if device_mode and tok in ("--handle", "-handle"):
-            if i + 1 >= len(argv):
-                print("ERROR: missing value after --device --handle <handle>", file=sys.stderr)
-                return 2
-            device_add_handle = argv[i + 1]
-            i += 2
-            continue
-
         if device_mode and tok in ("--edit-name", "-edit-name", "--rename", "-rename"):
             if i + 2 >= len(argv):
                 print("ERROR: --device --edit-name expects <gid> <new_name>", file=sys.stderr)
                 return 2
             device_edit_gid = argv[i + 1].strip()
             device_edit_name = argv[i + 2]  # user can quote spaces in the shell
-            i += 3
-            continue
-
-        if device_mode and tok in ("--edit-handle", "-edit-handle"):
-            if i + 2 >= len(argv):
-                print("ERROR: --device --edit-handle expects <gid> <handle|->", file=sys.stderr)
-                return 2
-            device_edit_handle_gid = argv[i + 1].strip()
-            device_edit_handle = argv[i + 2]
             i += 3
             continue
 
@@ -1136,31 +1067,17 @@ def main() -> int:
         return 2
 
     if device_mode:
-        if device_add_handle is not None and device_add_spec is None:
-            print("ERROR: --handle is only valid with --device --add", file=sys.stderr)
-            return 2
-
         if device_wipe and (
             device_show
             or device_add_spec is not None
             or device_remove_gid is not None
             or device_edit_gid is not None
-            or device_edit_handle_gid is not None
         ):
             print("ERROR: cannot combine device add/remove/show/edit with device wipe. Use '-d -w' only.", file=sys.stderr)
             return 2
 
         if device_wipe:
             return int(_wipe_devices_only(yes=yes))
-
-        handle_gid: Optional[int] = None
-        if device_add_spec is not None:
-            try:
-                handle_gid = int(device_add_spec.split(":", 1)[0])
-            except ValueError:
-                pass  # the add itself reports the malformed spec
-        if device_add_handle is not None and not _check_handle(_read_device_records(), handle_gid, device_add_handle):
-            return 2
 
         ensure_default_driver_files()
         did_any = False
@@ -1213,21 +1130,8 @@ def main() -> int:
                 return rc
             did_any = True
 
-        if handle_gid is not None and device_add_handle is None and sys.stdin.isatty() and sys.stdout.isatty():
-            device_add_handle = _prompt_handle(handle_gid)
-        if device_add_handle is not None and handle_gid is not None:
-            rc = _device_set_handle(handle_gid, device_add_handle)
-            if rc != 0:
-                return rc
-
         if device_edit_gid is not None:
             rc = _device_edit_name(device_edit_gid, device_edit_name or "")
-            if rc != 0:
-                return rc
-            did_any = True
-
-        if device_edit_handle_gid is not None:
-            rc = _device_edit_handle(device_edit_handle_gid, device_edit_handle or "")
             if rc != 0:
                 return rc
             did_any = True

@@ -47,7 +47,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Iterable, List, Tuple, NoReturn
 
-from ..common.utils import get_devices_config_path, get_host_config_dir
+from ..common.utils import device_name_key, get_devices_config_path, get_host_config_dir
 from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
@@ -470,7 +470,8 @@ class HostTunnelAgent:
                     device_id=str(int(gid)),
                     serial=str(d.get("serial", "")),
                     kind=str(d.get("kind", "")),
-                    handle=str(d.get("handle", "")),
+                    # Server 1.2.0 resolves <handle>@lab from this; newer Servers key the label themselves.
+                    handle=device_name_key(label),
                 )
             )
 

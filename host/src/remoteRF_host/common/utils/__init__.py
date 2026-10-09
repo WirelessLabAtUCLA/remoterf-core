@@ -13,10 +13,17 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import re
+
 from .api_token import validate_token, generate_token, hash_token
 from .list_string import list_to_str, str_to_list
 from .db_connection import db_connection
 from .db_location import get_devices_config_path, get_drivers_dir, get_host_config_dir, get_remoterf_root
+
+
+def device_name_key(name: str) -> str:
+    """A device's handle: its name with whitespace/'_' runs as one '_' (same regex as Server and Client)."""
+    return re.sub(r"[\s_]+", "_", name).strip("_")
 
 
 def _missing_dependency(name: str, exc: Exception):
