@@ -641,10 +641,9 @@ def get_devices():
     handles = handle_report()
     for key, value in sorted(devices.items()):
         ds = live.get(str(key))
-        h = handles.get(key)
         rows.append({
             "device_id": key,
-            "name": value.replace(f" [{h}]", "", 1) if h else value,
+            "name": value,
             "handle": handles.get(key, "-"),
             "host": f"{ds.host_id} #{ds.host_local_id}" if ds else "local",
             "last_seen": f"{_fmt_ms_ago(ds.last_seen_ms)} ago" if ds and ds.last_seen_ms else "-",

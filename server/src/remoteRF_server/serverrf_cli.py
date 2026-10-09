@@ -905,9 +905,33 @@ def _config_wipe_ports(*, yes: bool) -> int:
 # -----------------------------
 
 _DEVICE_KEY_RE = re.compile(r"^DEVICE_(\d+)_(.+)$", re.IGNORECASE)
-# Device lists label a device "name [handle] (status)": a name ending like that reads as a handle.
+# Clients read a label ending in " [word]" as a handle tag (Server 1.2.0 labels).
 _HANDLE_LIKE_NAME = re.compile(r" \[\S+\]$")
-_HANDLE_LIKE_NAME_MSG = "name must not end in ' [<word>]': device lists show a handle that way (use --handle instead)"
+_HANDLE_LIKE_NAME_MSG = "name must not end in ' [<word>]': clients read that as a handle tag"
+
+
+def _name_problem(name: str, gid: Optional[int] = None) -> Optional[str]:
+    """Why device `gid` (None: one not added yet) cannot be named `name`. A name is
+    also the device's handle, so it must be addressable and unique, with spaces
+    and '_' alike (device_name_key)."""
+    from remoterf_federation_core import is_device_handle
+    from remoteRF_server.common.utils import device_name_key
+
+    if _HANDLE_LIKE_NAME.search(name):
+        return _HANDLE_LIKE_NAME_MSG
+    key = device_name_key(name)
+    if not is_device_handle(key):
+        return (f"name {name!r} cannot be typed as a handle: names can't contain '@', ':' or invisible "
+                "characters, need a visible character, and can't start with 'rfg_' or 'bridge-'")
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        return str(exc)
+    other = next((g for g, r in sorted(recs.items())
+                  if g != gid and device_name_key(str(r.get("NAME") or "")) == key), None)
+    if other is not None:
+        return f"a device named {recs[other]['NAME']!r} already exists (#{other})"
+    return None
 
 
 def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, str]:
@@ -920,8 +944,9 @@ def _parse_serial_add_spec(tok: str, *, serial_label: str) -> Tuple[int, str, st
         raise ValueError("gid must be >= 0")
     if not name:
         raise ValueError("name is empty")
-    if _HANDLE_LIKE_NAME.search(name):
-        raise ValueError(_HANDLE_LIKE_NAME_MSG)
+    problem = _name_problem(name)
+    if problem:
+        raise ValueError(problem)
     if not serial:
         raise ValueError(f"{serial_label} is empty")
     return gid, name, serial
@@ -966,8 +991,9 @@ def _parse_usrp_profile_add_spec(tok: str) -> Tuple[int, str, str, str]:
         raise ValueError("gid must be >= 0")
     if not name:
         raise ValueError("name is empty")
-    if _HANDLE_LIKE_NAME.search(name):
-        raise ValueError(_HANDLE_LIKE_NAME_MSG)
+    problem = _name_problem(name)
+    if problem:
+        raise ValueError(problem)
     if not selector:
         raise ValueError("selector is empty")
     profile = get_usrp_profile(profile_name)
@@ -986,9 +1012,6 @@ def _device_edit_name(global_id_str: str, new_name: str) -> int:
     if not name:
         print("ERROR: new_name is empty", file=sys.stderr)
         return 2
-    if _HANDLE_LIKE_NAME.search(name):
-        print(f"ERROR: {_HANDLE_LIKE_NAME_MSG}", file=sys.stderr)
-        return 2
 
     try:
         recs = _read_device_records()
@@ -998,54 +1021,15 @@ def _device_edit_name(global_id_str: str, new_name: str) -> int:
     if gid not in recs:
         print(f"ERROR: global_id {gid} not present; cannot edit name.", file=sys.stderr)
         return 2
+    problem = _name_problem(name, gid)
+    if problem:
+        print(f"ERROR: {problem}", file=sys.stderr)
+        return 2
 
     recs[gid]["NAME"] = name
     _write_device_records(recs)
     print(f"Updated device name: {gid} name={name}")
     return 0
-
-def _handle_problem(handle: str, gid: Optional[int] = None) -> Optional[str]:
-    """Why `handle` cannot go on device `gid` (None: a device not added yet)."""
-    from remoterf_federation_core import is_device_handle
-
-    if handle == "-":
-        return "'-' means no handle (as in devices handle <id> -); omit --handle instead"
-    if not is_device_handle(handle):
-        return (f"invalid handle {handle!r}: it must be non-empty, without '@', ':', spaces "
-                "or invisible characters, and not start with 'rfg_' or 'bridge-'")
-    try:
-        recs = _read_device_records()
-    except ValueError as exc:
-        return str(exc)
-    other = next((g for g, r in sorted(recs.items()) if g != gid and r.get("HANDLE") == handle), None)
-    if other is not None:
-        return f"handle {handle!r} is already used by global_id={other}"
-    return None
-
-def _device_set_handle(gid: int, handle: str) -> int:
-    """Set the handle of a device in devices.yml; "" clears it."""
-    problem = _handle_problem(handle, gid) if handle else None
-    if problem is not None:
-        print(f"ERROR: {problem}", file=sys.stderr)
-        return 2
-    recs = _read_device_records()
-    if gid not in recs:
-        print(f"ERROR: global_id {gid} not present; cannot set handle.", file=sys.stderr)
-        return 2
-    recs[gid]["HANDLE"] = handle
-    _write_device_records(recs)
-    print(f"Set device handle: {gid} handle={handle}" if handle else f"Cleared device handle: {gid}")
-    return 0
-
-
-def _ask_handle(gid: Optional[int] = None, prompt: str = "Handle (optional, e.g. PlutoA)") -> str:
-    """Ask until the answer is a valid, unused handle; "" (Enter) and "-" come back as is."""
-    while True:
-        handle = _ask(prompt)
-        problem = None if handle in ("", "-") else _handle_problem(handle, gid)
-        if problem is None:
-            return handle
-        print(f"  {problem}")
 
 def _read_device_records() -> Dict[int, Dict[str, Any]]:
     yaml_path = _devices_yaml_path()
@@ -1091,7 +1075,6 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
                     ),
                     "IDENT": ident,
                     "INIT": dict(init),
-                    "HANDLE": str(item.get("handle") or "").strip(),
                 }
             return recs
         except Exception as exc:
@@ -1146,8 +1129,6 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
             "device_type": dtype,
             "name": str(fields.get("NAME") or f"device-{gid}"),
         }
-        if fields.get("HANDLE"):
-            entry["handle"] = str(fields["HANDLE"])
         entry["init"] = init
         devices.append(entry)
     _cfg_dir().mkdir(parents=True, exist_ok=True)
@@ -1504,15 +1485,14 @@ def _device_show() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     from remoterf_federation_core import is_device_handle
+    from remoteRF_server.common.utils import device_name_key
 
     seen: set = set()
     handles: Dict[int, str] = {}
     for gid, r in sorted(recs.items()):
-        h = r.get("HANDLE") or ""
-        if h and not is_device_handle(h):
-            handles[gid] = f"{h} ignored (invalid)"
-        elif h:
-            handles[gid] = h if h not in seen else f"{h} ignored (duplicate)"
+        h = device_name_key(str(r.get("NAME") or ""))
+        if is_device_handle(h):
+            handles[gid] = h if h not in seen else f"{h} ignored (duplicate name)"
             seen.add(h)
     rows = [
         {"id": gid, "type": r.get("TYPE", ""), "name": r.get("NAME", ""),
@@ -1664,13 +1644,10 @@ def cmd_devices_add(argv: List[str]) -> int:
         return 2
     label, add = _DEVICE_TYPES[dtype]
     name = pos[1] if len(pos) > 1 else _ask("Name")
-    if _HANDLE_LIKE_NAME.search(name or ""):
-        print(f"ERROR: {_HANDLE_LIKE_NAME_MSG}", file=sys.stderr)
+    problem = _name_problem(name) if name else None
+    if problem:
+        print(f"ERROR: {problem}", file=sys.stderr)
         return 2
-    handle = _flag(argv, "handle")
-    if handle is None and sys.stdin.isatty():  # never block a script on the optional prompt
-        handle = _ask_handle()
-        handle = None if handle in ("", "-") else handle
     ident = (
         _flag(argv, "serial") or _flag(argv, "addr")
         or (f"index={_flag(argv, 'index')}" if _flag(argv, "index") else None)
@@ -1681,18 +1658,11 @@ def cmd_devices_add(argv: List[str]) -> int:
     if not name or not ident:
         print("ERROR: a name and an identifier are required", file=sys.stderr)
         return 2
-    problem = _handle_problem(handle) if handle is not None else None
-    if problem is not None:
-        print(f"ERROR: {problem}", file=sys.stderr)
-        return 2
     gid = _flag(argv, "id")
     if gid is None:
         recs = _read_device_records()
         gid = str(max(recs) + 1 if recs else 0)
-    rc = int(add(f"{gid}:{name}:{ident}"))
-    if rc == 0 and handle is not None:
-        rc = _device_set_handle(int(gid), handle)
-    return rc
+    return int(add(f"{gid}:{name}:{ident}"))
 
 
 def cmd_devices_remove(argv: List[str]) -> int:
@@ -1703,33 +1673,8 @@ def cmd_devices_remove(argv: List[str]) -> int:
 def cmd_devices_rename(argv: List[str]) -> int:
     pos = _positional(argv)
     gid = pos[0] if pos else _ask("Device id")
-    name = pos[1] if len(pos) > 1 else _ask("New name")
+    name = " ".join(pos[1:]) if len(pos) > 1 else _ask("New name")
     return _device_edit_name(gid, name)
-
-
-def cmd_devices_handle(argv: List[str]) -> int:
-    gid_s = argv[0] if argv else _ask("Device id")
-    try:
-        gid = int(gid_s)
-    except ValueError:
-        print(f"ERROR: expected a device id, got {gid_s!r}", file=sys.stderr)
-        return 2
-    try:
-        rec = _read_device_records().get(gid)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-    if rec is None:
-        print(f"ERROR: device {gid} is not in this server's devices.yml. A Host-attached device's handle "
-              f"is set on its Host: hostrf --device --edit-handle {gid} <handle|->", file=sys.stderr)
-        return 2
-    handle = _flag(argv, "handle")
-    if handle is None:
-        handle = argv[1] if len(argv) > 1 else _ask_handle(gid, f"Handle (now {rec['HANDLE'] or 'none'}; - clears)")
-    if not handle:
-        print("Handle unchanged.")
-        return 1
-    return _device_set_handle(gid, "" if handle == "-" else handle)
 
 
 def cmd_devices_wipe(argv: List[str]) -> int:
@@ -2068,7 +2013,6 @@ def _legacy_main(argv: List[str]) -> int:
     device_remove_gid: Optional[str] = None
     device_edit_gid: Optional[str] = None
     device_edit_new_name: Optional[str] = None
-    device_add_handle: Optional[str] = None
     
     # host commands
     host_mode = False
@@ -2380,14 +2324,6 @@ def _legacy_main(argv: List[str]) -> int:
             i += 3
             continue
 
-        if device_mode and tok in ("--handle", "-handle"):
-            if i + 1 >= len(argv):
-                print("ERROR: missing value after --device --add ... --handle <handle>", file=sys.stderr)
-                return 2
-            device_add_handle = argv[i + 1].strip()
-            i += 2
-            continue
-
         if device_mode and tok in ("--remove", "-remove", "-r"):
             if i + 1 >= len(argv):
                 print("ERROR: missing value after --device --remove <gid>", file=sys.stderr)
@@ -2632,16 +2568,6 @@ def _legacy_main(argv: List[str]) -> int:
                 return rc
             did_any = True
 
-        if device_add_handle is not None:
-            problem = (
-                _handle_problem(device_add_handle)
-                if device_add_spec is not None
-                else "--handle goes with --device --add"
-            )
-            if problem is not None:
-                print(f"ERROR: {problem}", file=sys.stderr)
-                return 2
-
         if device_add_type == "pluto" and device_add_spec is not None:
             rc = _device_add_pluto(device_add_spec)
             if rc != 0:
@@ -2682,11 +2608,6 @@ def _legacy_main(argv: List[str]) -> int:
             if rc != 0:
                 return rc
             did_any = True
-
-        if device_add_handle is not None:
-            rc = _device_set_handle(int(device_add_spec.split(":", 1)[0]), device_add_handle)
-            if rc != 0:
-                return rc
 
         if device_edit_gid is not None:
             rc = _device_edit_name(device_edit_gid, device_edit_new_name or "")

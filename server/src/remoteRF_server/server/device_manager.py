@@ -33,7 +33,7 @@ from contextlib import contextmanager
 
 from remoterf_federation_core import is_device_handle
 
-from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir
+from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir, device_name_key
 from ..common.idl.schema import get_driver_class, load_drivers
 from ..host import host_tunnel_server as hts
 
@@ -70,11 +70,16 @@ class _DeviceState:
     io_lock: threading.RLock = field(default_factory=threading.RLock)
     # The last reservation ended; see _reset_locked().
     reset_pending: bool = False
-    # Requested handle (validated, or ""); _handle_owners() decides who keeps a duplicate.
+    # _name_handle(name); _handle_owners() decides who keeps a duplicate.
     handle: str = ""
 
 # gid -> state
 _devices: Dict[int, _DeviceState] = {}
+
+def _name_handle(name: str) -> str:
+    """A device's handle: its name as typed (device_name_key), or "" when that is not addressable."""
+    key = device_name_key(name)
+    return key if is_device_handle(key) else ""
 
 def _is_connected(st: _DeviceState) -> bool:
     if st.origin == "local":
@@ -122,7 +127,6 @@ def _sync_host_devices(*, force: bool = False) -> None:
         label = str(getattr(info_obj, "label", "") or "").strip()
         serial = str(getattr(info_obj, "serial", "") or "").strip()
         kind = str(getattr(info_obj, "kind", "") or "").strip()
-        handle = str(getattr(info_obj, "handle", "") or "").strip()
 
         updates[gid] = {
             "host_id": str(host_id),
@@ -130,7 +134,6 @@ def _sync_host_devices(*, force: bool = False) -> None:
             "label": label,
             "serial": serial,
             "kind": kind,
-            "handle": handle if is_device_handle(handle) else "",
             "online": bool(is_active),
         }
 
@@ -175,7 +178,7 @@ def _sync_host_devices(*, force: bool = False) -> None:
                 ident=ident,
                 dtype=dtype,
                 io_lock=lock,
-                handle=str(u["handle"]),
+                handle=_name_handle(name),
             )
 
             # Keep legacy maps coherent for host devices too (best-effort)
@@ -194,14 +197,11 @@ def _sync_host_devices(*, force: bool = False) -> None:
 def _local_devices_str_snapshot() -> Dict[int, str]:
     out: Dict[int, str] = {}
     with _state_lock:
-        owners = _handle_owners()
         for gid, st in _devices.items():
             if st.origin != "local":
                 continue
 
             name = (st.name or f"device-{gid}").strip()
-            if st.handle and owners.get(st.handle) == gid:
-                name = f"{name} [{st.handle}]"
 
             status = "online" if _is_connected(st) else "offline"
             fault = _poe_fault(st)
@@ -230,7 +230,6 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
         status_map = {}
 
     now_ms = int(time.time() * 1000)
-    owners = _handle_owners()
 
     out: Dict[int, str] = {}
     for device_id, (host_id, info_obj, is_active) in snap.items():
@@ -252,9 +251,6 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 
         status = "online" if bool(is_active) else "offline"
         name = label or f"host-device-{gid}"
-        handle = str(getattr(info_obj, "handle", "") or "").strip()
-        if handle and owners.get(handle) == gid:
-            name = f"{name} [{handle}]"
 
         last_seen = ""
         ds = status_map.get(str(device_id))
@@ -356,17 +352,12 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
             if "device_index" in init
             else ""
         )
-        handle = str(item.get("handle") or "").strip()
-        if handle and not is_device_handle(handle):
-            print(f"Warning: device {gid}: handle {handle!r} ignored (invalid)")
-            handle = ""
 
         recs[gid] = {
             "TYPE": dtype,
             "NAME": name,
             "IDENT": address or serial or device_args or device_index,
             "INIT": init,
-            "HANDLE": handle,
         }
 
     return recs
@@ -445,7 +436,7 @@ def _init_from_env() -> None:
             ident=ident2,
             dtype=dtype2 or dtype,
             io_lock=threading.RLock(),
-            handle=rec.get("HANDLE", ""),
+            handle=_name_handle(name),
         )
 
     # Swap atomically
@@ -1086,16 +1077,16 @@ def _handle_owners() -> Dict[str, int]:
     return owners
 
 def find_device_id_by_handle(handle: str) -> Optional[int]:
-    """The gid whose effective handle is exactly `handle` (case-sensitive), or None."""
+    """The gid owning `handle` as typed (device_name_key, case-sensitive), or None."""
     _sync_host_devices()
-    return _handle_owners().get(handle)
+    return _handle_owners().get(device_name_key(str(handle)))
 
 def handle_report() -> Dict[int, str]:
-    """gid -> its handle, or why it was ignored, for devices that asked for one."""
+    """gid -> its handle, or why it was ignored, for devices whose name is addressable."""
     with _state_lock:
         owners = _handle_owners()
         return {
-            gid: st.handle if owners[st.handle] == gid else f"{st.handle} ignored (duplicate)"
+            gid: st.handle if owners[st.handle] == gid else f"{st.handle} ignored (duplicate name)"
             for gid, st in _devices.items()
             if st.handle
         }
@@ -1304,7 +1295,7 @@ def reload_devices() -> None:
             ident=ident2,
             dtype=dtype2,
             io_lock=threading.RLock(),
-            handle=rec.get("HANDLE", ""),
+            handle=_name_handle(name),
         )
 
     with _state_lock:
