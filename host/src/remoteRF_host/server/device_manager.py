@@ -388,7 +388,17 @@ def _load_all_drivers(required_types: set[str]) -> None:
             warn(f"Driver load {fname}: {status}", component="hostrf.device_manager")
 
 
+_reload_lock = threading.Lock()
+
+
 def reload_devices(*, force: bool = False) -> bool:
+    # MetaRequests each run on their own thread; two reloads at once would
+    # each make every device and leave one set open.
+    with _reload_lock:
+        return _reload_devices_locked(force=force)
+
+
+def _reload_devices_locked(*, force: bool) -> bool:
     global _loaded_signature
 
     sig = _reload_signature()
@@ -403,6 +413,25 @@ def reload_devices(*, force: bool = False) -> bool:
     # signature. Cache the post-seed state so the tunnel agent does not
     # immediately reload and attempt to open the same USB radio twice.
     sig = _reload_signature()
+
+    # Let go of serial ports and USB handles before make_device opens them again.
+    with _state_lock:
+        old_schemas = [st.schema for st in _devices.values() if st.schema is not None]
+    for schema in old_schemas:
+        native = getattr(schema, "device", None)
+        if native is None:
+            continue
+        try:
+            close_native = getattr(schema, "close_native_device", None)
+            if callable(close_native):
+                close_native()
+            else:
+                close = getattr(native, "close", None)
+                if callable(close):
+                    close()
+                schema.bind(None)
+        except Exception as e:
+            warn(f"could not close a device before reloading: {e}", component="hostrf.device_manager")
 
     tmp_devices: Dict[int, _DeviceState] = {}
     tmp_info: Dict[int, str] = {}

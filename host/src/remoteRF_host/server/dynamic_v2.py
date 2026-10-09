@@ -499,6 +499,9 @@ class HandleEntry:
     )
     rx_prefetch_stop: threading.Event = field(default_factory=threading.Event)
     rx_worker: threading.Thread | None = None
+    # Only native recv calls: a prefetch worker outliving its 0.5 s stop join
+    # must never recv on the streamer alongside its successor or a direct recv.
+    rx_recv_lock: threading.Lock = field(default_factory=threading.Lock)
     rx_prefetch_overflowed: bool = False
     rx_pending: tuple[np.ndarray, dict, int] | None = None
 
@@ -842,7 +845,8 @@ class SessionManager:
                     # every sample frame's bookkeeping takes that lock. UHD
                     # streamers accept control calls while another thread recvs,
                     # and issue_stream_cmd stops this worker before it runs.
-                    received = int(entry.value.recv(buffer, metadata, 0.1))
+                    with entry.rx_recv_lock:
+                        received = int(entry.value.recv(buffer, metadata, 0.1))
                 except Exception:
                     break
                 snapshot = snapshot_native(metadata)
@@ -1577,7 +1581,7 @@ class SampleDataV1Servicer(grpc_pb2_grpc.SampleDataV1Servicer):
                                 timeout,
                             )
                         else:
-                            with entry.lock:
+                            with entry.lock, entry.rx_recv_lock:
                                 while count < int(request.sample_count):
                                     remaining = max(0.0, deadline - time.monotonic())
                                     if count and remaining <= 0.0:

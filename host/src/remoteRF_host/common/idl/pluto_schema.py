@@ -86,6 +86,7 @@ class PlutoSchema(DeviceSchema):
     device_type = "adalm_pluto"
     client_class = "Pluto"
     driver_version = "0.0.2"
+    _fir_rate = None  # the rate whose pyadi FIR this schema last loaded
 
     @staticmethod
     def make_device(**kwargs):
@@ -100,6 +101,7 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="set")
     def set_filter(self, value):
+        self._fir_rate = None
         self.device.filter = value
 
     @idl_expose(kind="get")
@@ -158,7 +160,20 @@ class PlutoSchema(DeviceSchema):
 
     @idl_expose(kind="set")
     def set_sample_rate(self, value):
+        # pyadi reloads its FIR and re-runs the AD9361 rate chain (~0.8 s) even
+        # for an unchanged rate: skip only what our own last set left in place.
+        if value == self._fir_rate:
+            try:
+                if (
+                    self.device.sample_rate == value
+                    and self.device._get_iio_attr("out", "voltage_filter_fir_en", False) == 1
+                ):
+                    return
+            except Exception:
+                pass
+        self._fir_rate = None
         self.device.sample_rate = value
+        self._fir_rate = value
 
     @idl_expose(kind="get")
     def get_rx_lo(self):

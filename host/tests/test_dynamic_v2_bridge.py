@@ -589,6 +589,41 @@ class RXPrefetchTests(unittest.TestCase):
         self.assertIsNone(entry.rx_worker)
         self.assertTrue(entry.rx_prefetch.empty())
 
+    def test_a_restart_never_overlaps_native_recvs_with_a_slow_worker(self):
+        guard, active, peak = threading.Lock(), [0], [0]
+        in_recv, release = threading.Event(), threading.Event()
+
+        class SlowRX:
+            def recv(self, buffer, metadata, timeout):
+                with guard:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+                in_recv.set()
+                release.wait(2.0)
+                with guard:
+                    active[0] -= 1
+                metadata.error_code = "none"
+                return buffer.shape[-1]
+
+        entry = self.entry(value=SlowRX(), stream_channels=[0], cpu_format="fc32")
+        session = types.SimpleNamespace(closed=False)
+        fake_uhd = types.SimpleNamespace(
+            types=types.SimpleNamespace(RXMetadata=FakeRXMetadata)
+        )
+        manager = SessionManager()
+        with patch.dict(sys.modules, {"uhd": fake_uhd}):
+            manager._start_rx_prefetch(session, entry)
+            try:
+                self.assertTrue(in_recv.wait(1.0))
+                in_recv.clear()
+                # The first worker's recv outlasts the 0.5 s stop join.
+                manager._start_rx_prefetch(session, entry)
+                in_recv.wait(0.2)
+            finally:
+                release.set()
+                manager._stop_rx_prefetch(entry)
+        self.assertEqual(peak[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

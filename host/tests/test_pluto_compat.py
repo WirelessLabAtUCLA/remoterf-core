@@ -100,6 +100,46 @@ class PlutoCompatTests(unittest.TestCase):
         self.assertIsNone(schema.dispatch("call_tx", {"value": samples}))
         np.testing.assert_allclose(self.device.tx_samples, samples)
 
+    def test_set_sample_rate_skips_only_an_unchanged_rate_this_schema_set(self) -> None:
+        class CountingPluto:
+            fir_en = 1
+            rate = 1_000_000
+            sets = 0
+            filter = None
+
+            @property
+            def sample_rate(self):
+                return self.rate
+
+            @sample_rate.setter
+            def sample_rate(self, value):
+                self.sets += 1
+                self.rate = int(value)
+
+            def _get_iio_attr(self, channel, attr, output):
+                assert (channel, attr, output) == ("out", "voltage_filter_fir_en", False)
+                return self.fir_en
+
+        device = CountingPluto()
+        schema = PlutoSchema()
+        schema.bind(device)
+
+        def set_rate(value, sets):
+            schema.dispatch("set_sample_rate", {"value": value})
+            self.assertEqual((device.rate, device.sets), (int(value), sets))
+
+        set_rate(1_000_000, 1)  # the first set runs: the FIR in place may not be pyadi's
+        set_rate(1e6, 1)
+        set_rate(2_000_000, 2)
+        set_rate(2_000_000, 2)
+        device.fir_en = 0
+        set_rate(2_000_000, 3)
+        device.fir_en, device.rate = 1, 1_999_999
+        set_rate(2_000_000, 4)
+        schema.dispatch("set_filter", {"value": "custom.ftr"})
+        set_rate(2_000_000, 5)
+        set_rate(2_000_000, 5)
+
 
 if __name__ == "__main__":
     unittest.main()
