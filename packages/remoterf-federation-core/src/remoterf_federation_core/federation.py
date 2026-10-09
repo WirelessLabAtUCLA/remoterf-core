@@ -2,7 +2,8 @@
 
 This module deliberately performs no signing, key lookup, persistence, HTTP,
 or gRPC work.  Applications select local contract-bound keys, verify Ed25519
-signatures, own transaction boundaries, and then call these strict validators.
+signatures (``verify_eddsa_jwt`` with the key they selected), own transaction
+boundaries, and then call these strict validators.
 """
 
 from __future__ import annotations
@@ -173,6 +174,10 @@ RESULT_STATES = frozenset(
 )
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_.-]{0,63}")
 _DECIMAL_ID = re.compile(r"0|[1-9][0-9]{0,19}")
+_COMPACT_JWS = re.compile(r"([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)")
+# Canonical unpadded base64url: the final character carries no stray low bits.
+_B64URL_LAST = {2: "AQgw", 3: "AEIMQUYcgkosw048"}
+_JWS_HEADER_FIELDS = frozenset({"alg", "kid", "typ"})
 
 
 class FederationError(ContractError):
@@ -837,6 +842,69 @@ def parse_unverified_jwt(
     if type(header) is not dict or type(claims) is not dict:
         raise FederationError("invalid_token")
     return header, claims
+
+
+def _b64url_canonical(segment: str) -> bytes:
+    remainder = len(segment) % 4
+    if remainder == 1 or (remainder and segment[-1] not in _B64URL_LAST[remainder]):
+        raise ValueError("non-canonical base64url")
+    return base64.urlsafe_b64decode(segment + "=" * (-remainder % 4))
+
+
+def verify_eddsa_jwt(
+    token: object,
+    public_key: object,
+    *,
+    code: str = "invalid_token",
+    max_bytes: int = MAX_DEVICE_RESULT_TOKEN_BYTES,
+) -> dict:
+    """Verify a compact EdDSA (Ed25519) JWS and return its claims.
+
+    Accepts what ``jwt.decode(token, public_key, algorithms=["EdDSA"],
+    options={"verify_aud": False, "verify_exp": False, "verify_iat": False,
+    "verify_nbf": False})`` accepts for every token this protocol emits,
+    without PyJWT 2.15's per-character base64url loop.  It is stricter where
+    PyJWT is lenient: no ``=`` padding, ``strict_json`` for header and claims,
+    and no header fields beyond alg/kid/typ.  Time and audience checks stay
+    with the caller's claim validators.  Every failure is
+    ``FederationError(code)``.
+    """
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    if (
+        type(token) is not str
+        or len(token) > max_bytes
+        or not isinstance(public_key, Ed25519PublicKey)
+    ):
+        raise FederationError(code)
+    match = _COMPACT_JWS.fullmatch(token)
+    if match is None:
+        raise FederationError(code)
+    header_segment, payload_segment, signature_segment = match.groups()
+    try:
+        header = strict_json(_b64url_canonical(header_segment), max_bytes=max_bytes)
+        if (
+            type(header) is not dict
+            or header.get("alg") != "EdDSA"
+            or not set(header) <= _JWS_HEADER_FIELDS
+            or type(header.get("kid", "")) is not str
+        ):
+            raise ValueError("unsupported header")
+        public_key.verify(
+            _b64url_canonical(signature_segment),
+            token[: match.end(2)].encode("ascii"),
+        )
+        claims = strict_json(_b64url_canonical(payload_segment), max_bytes=max_bytes)
+        # PyJWT's default verify_sub / verify_jti checks.
+        if type(claims) is not dict or any(
+            name in claims and type(claims[name]) is not str for name in ("sub", "jti")
+        ):
+            raise ValueError("invalid claims")
+    except (ValueError, InvalidSignature):
+        raise FederationError(code) from None
+    return claims
 
 
 def parse_unverified_grant(token: object) -> tuple[dict, dict]:
