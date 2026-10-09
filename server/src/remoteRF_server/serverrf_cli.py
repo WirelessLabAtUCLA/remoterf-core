@@ -1749,7 +1749,7 @@ def cmd_hosts_token(argv: List[str]) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
-    print(f'On the host, run:\n  hostrf --config --host {host_id} "{token}"')
+    print(f'On the host, run:\n  hostrf --host --set {host_id} "{token}"')
     return 0
 
 
@@ -1767,15 +1767,44 @@ def cmd_hosts_tokens(argv: List[str]) -> int:
 
 
 def cmd_hosts_forget(argv: List[str]) -> int:
-    from .host.host_auth_token import delete_host_token
+    from .host import host_tunnel_server as hts
+    from .host.host_auth_token import _validate_host_id, delete_host_token
 
     pos = _positional(argv)
-    host_id = pos[0] if pos else _ask("Host id")
-    if delete_host_token(host_id):
+    try:
+        host_id = _validate_host_id(pos[0] if pos else _ask("Host id"))
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    from .server import commands, control
+
+    # A running server owns the directory files (they are not written atomically): let it do the forget.
+    if not commands._IN_DAEMON:
+        reply = control.call(["hosts", "forget", host_id])
+        if reply is not None:
+            sys.stdout.write(reply[1])
+            return reply[0]
+    # In the server process this is the live registry; from a shell, a copy loaded from the same files.
+    live = hts.get_tunnel_registry(create=False)
+    try:
+        dids = (live or hts.HostTunnelRegistry()).forget_host(host_id)
+    except RuntimeError:
+        print(f"Host {host_id} is connected. Stop it first, then run: hosts forget {host_id}")
+        return 1
+    had_token = delete_host_token(host_id)
+    if had_token:
         print(f"Deleted host token: {host_id}")
+    if dids is None:
+        if not had_token:
+            print(f"No host token or directory entry found for: {host_id}")
+            return 1
         return 0
-    print(f"No host token found for: {host_id}")
-    return 1
+    print(f"Removed host {host_id} and its devices from the directory: {', '.join(dids) or 'none'}")
+    if live is not None:
+        from .server import device_manager
+
+        device_manager.forget_host_devices(dids)
+    return 0
 
 
 def cmd_certs_show(argv: List[str]) -> int:
@@ -2541,7 +2570,7 @@ def _legacy_main(argv: List[str]) -> int:
 
         print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
         print("First start the server with 'serverrf -s'.")
-        print(f'Then, on the host you want to set up, run the following:\n  hostrf --config --host {host_token_create_id} "{token}"')
+        print(f'Then, on the host you want to set up, run the following:\n  hostrf --host --set {host_token_create_id} "{token}"')
         return 0
 
     # ----------------

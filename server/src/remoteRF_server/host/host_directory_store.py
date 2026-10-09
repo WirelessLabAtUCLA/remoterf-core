@@ -125,6 +125,31 @@ class EnvStore:
 
             self._write_lines(lines)
 
+    def remove_from_csv_list(self, key: str, value: str) -> None:
+        key = sanitize_env_key(key)
+        value = (value or "").strip()
+
+        with self._lock:
+            lines = self._read_lines()
+            for i, ln in enumerate(lines):
+                if ln.startswith(key + "="):
+                    existing = csv_split(ln[len(key) + 1:])
+                    if value not in existing:
+                        return
+                    existing.remove(value)
+                    lines[i] = f"{key}=" + ",".join(existing)
+                    self._write_lines(lines)
+                    return
+
+    def remove_keys(self, keys: List[str]) -> None:
+        prefixes = tuple(sanitize_env_key(k) + "=" for k in keys)
+
+        with self._lock:
+            lines = self._read_lines()
+            kept = [ln for ln in lines if not ln.startswith(prefixes)]
+            if len(kept) != len(lines):
+                self._write_lines(kept)
+
     def upsert_kv(self, key: str, value: str) -> None:
         key = sanitize_env_key(key)
         value = (value or "").strip()

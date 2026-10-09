@@ -2,6 +2,8 @@
 holder can trade (logged in) for a token bound to their own live reservation
 (ACC:device_token)."""
 
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -112,6 +114,137 @@ class HandleTableTests(_Devices):
         self.assertEqual(dm.handle_report(), {503: "PlutoB"})
         self.assertFalse(dm._devices[502].online)
         self.assertFalse(reg.is_host_device("502"))
+
+
+class HostForgetTests(_Devices):
+    def setUp(self):
+        super().setUp()
+        from remoteRF_server.host import host_auth_token
+        from remoteRF_server.host import host_tunnel_server as hts
+        from remoteRF_server.server import commands
+
+        self.hts = hts
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        for patcher in (
+            mock.patch.dict(os.environ, {"REMOTERF_CONFIG_DIR": tmp.name}),
+            mock.patch.object(host_auth_token, "_hosts_auth_path", return_value=self.tmp / "hosts_auth.env"),
+            mock.patch.object(hts, "TUNNEL_REGISTRY", None),
+            mock.patch.object(commands, "_IN_DAEMON", False),  # a shell: other tests leave it set
+            mock.patch.dict(dm.devices_info, clear=True),
+            mock.patch.dict(dm.device_serialization, clear=True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _dev(gid):
+        return grpc_host_pb2.DeviceInfo(device_id=str(gid), local_id=gid, label=f"d{gid}")
+
+    def _registry_with_hosts(self):
+        reg = self.hts.HostTunnelRegistry()
+        sess = self.hts.HostSession("livecheck-h1")
+        reg.register_host("livecheck-h1", sess)
+        reg.persist_host_meta_from_hello(SimpleNamespace(host_id="livecheck-h1", version="1.2.1"))
+        reg.announce_devices("livecheck-h1", [self._dev(111), self._dev(112)], full_snapshot=True)
+        reg.register_host("other-h", self.hts.HostSession("other-h"))
+        reg.announce_devices("other-h", [self._dev(120)], full_snapshot=True)
+        return reg, sess
+
+    def _on_disk(self):
+        return "".join(p.read_text() for p in self.tmp.glob("host_directory*.env"))
+
+    def _assert_forgotten(self, reg):
+        self.assertEqual(set(reg.list_routes()), {"120"})
+        self.assertEqual(set(reg.list_devices()), {"120"})
+        self.assertEqual(set(reg.list_hosts()), {"other-h"})
+        self.assertEqual(set(reg.device_directory_cached(ttl_ms=0)), {"120"})
+
+    def test_forget_drops_the_host_and_its_devices_in_memory_and_on_disk(self):
+        reg, sess = self._registry_with_hosts()
+        with self.assertRaises(RuntimeError):  # still connected: nothing changes
+            reg.forget_host("livecheck-h1")
+        self.assertIn("111", reg.list_routes())
+        reg.drop_host_if_match("livecheck-h1", sess)
+
+        self.assertEqual(reg.forget_host("livecheck-h1"), ["111", "112"])
+        self._assert_forgotten(reg)
+        self._assert_forgotten(self.hts.HostTunnelRegistry())
+        disk = self._on_disk()
+        for gone in ("livecheck-h1", self.hts.host_key("livecheck-h1"), "DEVICE_111_", "DEVICE_112_"):
+            self.assertNotIn(gone, disk)
+        self.assertIn("DEVICE_120_HOST=other-h", disk)
+        self.assertIsNone(reg.forget_host("livecheck-h1"))
+
+    def test_a_device_dropped_by_a_full_snapshot_stays_dropped_after_reload(self):
+        reg, _ = self._registry_with_hosts()
+        reg.announce_devices("livecheck-h1", [self._dev(112)], full_snapshot=True)
+        fresh = self.hts.HostTunnelRegistry()
+        self.assertEqual(set(fresh.list_routes()), {"112", "120"})
+        self.assertNotIn("111", fresh.list_devices())
+        self.assertNotIn("DEVICE_111_", self._on_disk())
+
+    def test_console_forget_drops_the_live_devices_but_not_a_local_radio(self):
+        from remoteRF_server import serverrf_cli
+
+        reg, sess = self._registry_with_hosts()
+        reg.drop_host_if_match("livecheck-h1", sess)
+        with mock.patch.object(dm, "_get_host_registry", return_value=reg):
+            dm._sync_host_devices(force=True)
+        dm._devices[112] = _state(name="local112")  # a local radio reusing a host id stays
+        self.assertEqual(dm._devices[111].origin, "host")
+        with mock.patch.object(self.hts, "TUNNEL_REGISTRY", reg), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(serverrf_cli.cmd_hosts_forget(["livecheck-h1"]), 0)
+        self.assertNotIn(111, dm._devices)
+        self.assertEqual(dm._devices[112].origin, "local")
+        self._assert_forgotten(reg)
+
+    def test_shell_forget_cleans_the_files_with_no_token_and_refuses_an_unknown_host(self):
+        from remoteRF_server import serverrf_cli
+
+        reg, sess = self._registry_with_hosts()
+        reg.drop_host_if_match("livecheck-h1", sess)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(serverrf_cli.cmd_hosts_forget(["livecheck-h1"]), 0)
+            self.assertEqual(serverrf_cli.cmd_hosts_forget(["livecheck-h1"]), 1)
+        with contextlib.redirect_stderr(io.StringIO()):  # rejected before it reaches a server
+            self.assertEqual(serverrf_cli.cmd_hosts_forget(["bad id"]), 2)
+        self.assertIn("No host token or directory entry found for: livecheck-h1", out.getvalue())
+        self._assert_forgotten(self.hts.HostTunnelRegistry())
+
+    def test_a_shell_forget_runs_in_the_running_server(self):
+        from remoteRF_server import serverrf_cli
+        from remoteRF_server.server import control
+
+        reg, sess = self._registry_with_hosts()
+        reg.drop_host_if_match("livecheck-h1", sess)
+        with mock.patch.object(control, "call", return_value=(0, "")) as call, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(serverrf_cli.cmd_hosts_forget(["livecheck-h1"]), 0)
+        call.assert_called_once_with(["hosts", "forget", "livecheck-h1"])
+        self.assertIn("111", self.hts.HostTunnelRegistry().list_routes())  # files left to the server
+
+    def test_a_sync_snapshotted_before_a_forget_does_not_re_add_its_devices(self):
+        reg, _ = self._registry_with_hosts()
+        stale = reg.device_directory_cached(ttl_ms=0)
+
+        def snap(**_):
+            dm.forget_host_devices(["111"])  # the forget lands between the snapshot and its apply
+            return stale
+
+        with mock.patch.object(dm, "_get_host_registry", return_value=SimpleNamespace(device_directory_cached=snap)):
+            dm._sync_host_devices(force=True)
+        self.assertNotIn(111, dm._devices)
+
+    def test_the_token_hint_matches_hostrf_help(self):
+        from remoteRF_server import serverrf_cli
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(serverrf_cli.cmd_hosts_token(["livecheck-h1"]), 0)
+        self.assertRegex(out.getvalue(), r'hostrf --host --set livecheck-h1 "[^"]+"')
+        self.assertNotIn("--config", out.getvalue())
 
 
 class BridgeTokenTests(_Devices):

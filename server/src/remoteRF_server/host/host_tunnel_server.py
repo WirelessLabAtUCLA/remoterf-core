@@ -445,6 +445,13 @@ class HostTunnelRegistry:
             f"label={label!r} serial={serial!r} kind={kind!r}"
         )
 
+    def _unpersist_device(self, host_id: str, device_id: str) -> None:
+        self._env_lists.remove_from_csv_list("KNOWN_DEVICES", device_id)
+        self._env_lists.remove_from_csv_list(f"HOST_{host_key(host_id)}_DEVICES", device_id)
+        dk = sanitize_env_key(device_id)
+        self._env_meta.remove_keys([f"DEVICE_{dk}_{f}" for f in ("HOST", "LOCAL_ID", "LABEL", "SERIAL", "KIND")])
+        info(f"[registry] unpersisted device: host_id={host_id!r} device_id={device_id!r}")
+
     # directory/status mutators
 
     def register_host(self, host_id: str, session: HostSession, *, replace_if_stale_ms: int = 15_000) -> None:
@@ -533,6 +540,40 @@ class HostTunnelRegistry:
 
         info(f"[registry] drop_host_if_match done: host_id={host_id!r} online=False")
         return True
+
+    def forget_host(self, host_id: str) -> Optional[List[str]]:
+        """Remove a host and its devices from the directory, in memory and persisted.
+
+        Returns the forgotten device ids, or None if the directory did not know the host.
+        Raises RuntimeError while the host is connected: its next announce would add them back.
+        """
+        hk = host_key(host_id)
+        with self._lock:
+            sess = self._hosts.get(host_id)
+            if sess is not None and sess.alive:
+                raise RuntimeError(f"Host '{host_id}' is connected")
+
+            known = host_id in self._host_status or host_id in self._host_devices
+            dids = sorted(self._host_devices.get(host_id, set()))
+            # Files first: if a write fails, memory still lists everything and a rerun retries it all.
+            for did in dids:
+                self._unpersist_device(host_id, did)
+            self._env_lists.remove_from_csv_list("KNOWN_HOSTS", host_id)
+            self._env_lists.remove_keys([f"HOST_{hk}_DEVICES"])
+            self._env_meta.remove_keys([f"HOST_{hk}_{f}" for f in ("ID", "NAME", "PLATFORM", "VERSION")])
+
+            for did in dids:
+                self._routes.pop(did, None)
+                self._device_infos.pop(did, None)
+                self._device_status.pop(did, None)
+                self._host_device_caps.pop(did, None)
+            self._host_devices.pop(host_id, None)
+            self._hosts.pop(host_id, None)
+            self._host_status.pop(host_id, None)
+            self._invalidate_caches_locked()
+
+        info(f"[registry] forget_host done: host_id={host_id!r} known={known} devices={dids}")
+        return dids if known else None
 
     def heartbeat(self, host_id: str, unix_ms: int = 0) -> None:
         now = int(unix_ms) or now_ms()
@@ -639,6 +680,7 @@ class HostTunnelRegistry:
                     self._device_infos.pop(did, None)
                     self._device_status.pop(did, None)
                     self._host_devices[host_id].discard(did)
+                    self._unpersist_device(host_id, did)
 
             for d, device_id in pairs:
                 try:

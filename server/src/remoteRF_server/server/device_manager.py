@@ -99,6 +99,7 @@ def _get_host_registry():
 _host_sync_lock = threading.RLock()
 _host_sync_last_ms = 0
 _HOST_SYNC_TTL_MS = 500  # tune later
+_host_forget_gen = 0  # bumped by forget_host_devices so an in-flight sync cannot re-add them
 
 def _sync_host_devices(*, force: bool = False) -> None:
     global _host_sync_last_ms
@@ -114,6 +115,7 @@ def _sync_host_devices(*, force: bool = False) -> None:
         return
 
     # Do registry calls without holding _state_lock
+    gen = _host_forget_gen
     snap = reg.device_directory_cached(ttl_ms=0)  # device_id -> (host_id, info_obj, is_active)
 
     updates: Dict[int, Dict[str, object]] = {}
@@ -138,6 +140,8 @@ def _sync_host_devices(*, force: bool = False) -> None:
         }
 
     with _state_lock:
+        if gen != _host_forget_gen:  # snapshot may predate a forget; the next sync redoes it
+            return
         # Upsert / refresh host entries
         for gid, u in updates.items():
             prev = _devices.get(int(gid))
@@ -193,6 +197,18 @@ def _sync_host_devices(*, force: bool = False) -> None:
             if st.origin == "host" and gid not in present:
                 st.online = False
                 st.handle = ""
+
+def forget_host_devices(device_ids) -> None:
+    """Drop a forgotten Host's devices; local radios with the same id are left alone."""
+    global _host_forget_gen
+    with _state_lock:
+        _host_forget_gen += 1
+        for gid in map(int, device_ids):
+            st = _devices.get(gid)
+            if st is not None and st.origin == "host":
+                del _devices[gid]
+                devices_info.pop(gid, None)
+                device_serialization.pop(gid, None)
 
 def _local_devices_str_snapshot() -> Dict[int, str]:
     out: Dict[int, str] = {}

@@ -136,7 +136,7 @@ def _table() -> list[Command]:
         Command(("hosts wipe",), "Wipe persisted host directory state [-y]", _daemon("cmd_hosts_wipe"), "Hosts", where=D),
         Command(("hosts token",), "Create a host token: hosts token <id> [--force]", _shell("cmd_hosts_token"), "Hosts"),
         Command(("hosts tokens",), "List host tokens [--secrets] | hosts tokens wipe", _shell("cmd_hosts_tokens"), "Hosts"),
-        Command(("hosts forget",), "Delete a host token: hosts forget <host_id>", _shell("cmd_hosts_forget"), "Hosts"),
+        Command(("hosts forget",), "Forget a host and its devices: hosts forget <host_id>", _shell("cmd_hosts_forget"), "Hosts"),
         # ---- certificates / config ----
         Command(("certs list",), "Show the certificates [-v]", _shell("cmd_certs_show"), "Certificates"),
         Command(("certs reset",), "New CA + server cert: certs reset [ip] [--dns …]", _shell("cmd_certs_reset"), "Certificates", after="restart"),
