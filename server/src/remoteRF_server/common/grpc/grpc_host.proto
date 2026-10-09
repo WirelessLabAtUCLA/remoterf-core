@@ -31,6 +31,7 @@ message DeviceInfo {
   string device_id = 3;
   string serial = 4;
   string kind = 5;
+  string handle = 6;
 }
 
 message DeviceAnnounce {

@@ -419,11 +419,15 @@ class LoopbackPathTests(unittest.TestCase):
             asyncio.run(run())
 
     def test_bad_offer_is_an_answer_not_an_exception(self):
-        reply = direct_path.offer("session-key", "tester", "not json")
-        self.assertIn("direct path unavailable", unmap_arg(reply["ace"]))
-        reply = direct_path.offer("session-key", "tester", json.dumps({"ufrag": "x"}))
+        # STUN off: the unit suite never contacts a public STUN server.
+        with mock.patch.dict("os.environ", {"REMOTERF_STUN_SERVER": "off"}), \
+             mock.patch.object(direct_path, "Ice", wraps=direct_path.Ice) as ice:
+            reply = direct_path.offer("session-key", "tester", "not json")
+            self.assertIn("direct path unavailable", unmap_arg(reply["ace"]))
+            reply = direct_path.offer("session-key", "tester", json.dumps({"ufrag": "x"}))
         self.assertIn("ace", reply)
         self.assertEqual(direct_path._paths, {})
+        self.assertIsNone(ice.call_args.kwargs["stun_server"])
 
 
 if __name__ == "__main__":

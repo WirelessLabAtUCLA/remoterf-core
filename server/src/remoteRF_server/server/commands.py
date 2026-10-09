@@ -106,9 +106,10 @@ def _table() -> list[Command]:
         Command(("reload devices",), "", _daemon("cmd_reload_devices"), "Server", where=D, hidden=True),
         # ---- devices ----
         Command(("devices list",), "Devices, with the host each is on", _shell("cmd_devices_list"), "Devices"),
-        Command(("devices add",), "Add a device (asks type, name, serial)", _shell("cmd_devices_add"), "Devices", after="reload_devices", hidden=True),
+        Command(("devices add",), "Add a device (asks type, name, handle, serial) [--handle <h>]", _shell("cmd_devices_add"), "Devices", after="reload_devices", hidden=True),
         Command(("devices remove",), "Remove a device by id", _shell("cmd_devices_remove"), "Devices", after="reload_devices"),
         Command(("devices rename",), "Rename a device: devices rename <id> <name>", _shell("cmd_devices_rename"), "Devices", after="reload_devices"),
+        Command(("devices handle",), "Set or clear a device's handle: devices handle <id> [<handle>|-]", _shell("cmd_devices_handle"), "Devices", after="reload_devices"),
         Command(("devices wipe",), "Remove ALL devices [-y]", _shell("cmd_devices_wipe"), "Devices", after="reload_devices"),
         # ---- users ----
         Command(("users list",), "List accounts", _daemon("cmd_users_list"), "Users", where=D),

@@ -54,7 +54,7 @@ from .dynamic_v2 import (
 from .host_dynamic_v2 import host_session_proxy
 from .acc_perms import perms
 from ..common.utils import *
-from .device_manager import close_local_devices, get_registered_devices, get_all_devices_str
+from .device_manager import close_local_devices, get_registered_devices, get_all_devices_str, handle_report
 from .user_group_cli import make_user_group_local, edit_user_group_local, list_user_groups_local, remove_user_group_local, make_enrollment_codes_local, remove_enrollment_code_local, list_enrollment_codes_local, export_user_groups_csv_local, export_enrollment_codes_csv_local
 from .user_group_handler import start_usergroup_cleanup_loop
 
@@ -637,15 +637,19 @@ def get_devices():
     reg = hts.get_tunnel_registry(create=False)
     live = reg.list_devices() if reg is not None else {}
     rows = []
-    for key, value in sorted(get_all_devices_str().items()):
+    devices = get_all_devices_str()
+    handles = handle_report()
+    for key, value in sorted(devices.items()):
         ds = live.get(str(key))
+        h = handles.get(key)
         rows.append({
             "device_id": key,
-            "name": value,
+            "name": value.replace(f" [{h}]", "", 1) if h else value,
+            "handle": handles.get(key, "-"),
             "host": f"{ds.host_id} #{ds.host_local_id}" if ds else "local",
             "last_seen": f"{_fmt_ms_ago(ds.last_seen_ms)} ago" if ds and ds.last_seen_ms else "-",
         })
-    print_table("Devices", rows, ["device_id", "name", "host", "last_seen"], empty="No devices configured.")
+    print_table("Devices", rows, ["device_id", "name", "handle", "host", "last_seen"], empty="No devices configured.")
 
 def _fmt_ms_ago(ms: int) -> str:
     if not ms:

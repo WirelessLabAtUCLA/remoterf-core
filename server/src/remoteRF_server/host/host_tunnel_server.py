@@ -572,7 +572,7 @@ class HostTunnelRegistry:
         with self._lock:
             return self._host_device_caps.get(str(device_id), "")
 
-    def announce_devices(self, host_id: str, devices: list) -> None:
+    def announce_devices(self, host_id: str, devices: list, *, full_snapshot: bool = False) -> None:
         info(f"[registry] announce_devices: host_id={host_id!r} n={len(devices)}")
 
         # STRICT MODE:
@@ -630,6 +630,15 @@ class HostTunnelRegistry:
                 device_id0 = str(getattr(d, "device_id", "") or "").strip()
                 if not device_id0:
                     warn(f"[registry] announce_devices: skipping device with empty device_id host_id={host_id!r}")
+
+            # A full snapshot drops this host's devices it no longer announces,
+            # so a removed device stops listing online and frees its handle.
+            if full_snapshot:
+                for did in self._host_devices[host_id] - {device_id for _, device_id in pairs}:
+                    self._routes.pop(did, None)
+                    self._device_infos.pop(did, None)
+                    self._device_status.pop(did, None)
+                    self._host_devices[host_id].discard(did)
 
             for d, device_id in pairs:
                 try:
@@ -1133,7 +1142,9 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             )
 
                         try:
-                            self.registry.announce_devices(host_id, list(ann.devices))
+                            self.registry.announce_devices(
+                                host_id, list(ann.devices), full_snapshot=bool(ann.full_snapshot)
+                            )
                             info(f"[inbound] registry announce applied host_id={host_id!r} stream_sess={stream_uuid}")
                         except ValueError as e:
                             error(

@@ -35,7 +35,9 @@ from remoterf_federation_core import (
 )
 from .device_manager import (
     device_inventory_snapshot,
+    find_device_id_by_handle,
     get_all_devices,
+    reservation_bridge_token,
     get_registered_devices,
     set_device,
     get_all_devices_str,
@@ -230,6 +232,13 @@ class ReservationHandler:
                     except Exception:  # noqa: BLE001 - aioquic unusable here; the relay carries the calls
                         return {"ace": map_arg("direct path unavailable")}
                     return offer(self._session_hash(password), username, unmap_arg(args['ice']))
+                else:
+                    return {"ace": map_arg("Invalid login credentials.")}
+            elif function_name == 'device_token':
+                username = unmap_arg(args['un'])
+                password = unmap_arg(args['pw'])
+                if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
+                    return self.device_token(username, unmap_arg(args['h']))
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
             elif function_name == 'cancel_res':
@@ -1357,6 +1366,37 @@ class ReservationHandler:
         return row is not None
 
     @db_connection
+    def device_token(self, username, handle):
+        """`handle` (which may be a raw token: never log it) as a token for the
+        caller's own live reservation on that device: a bridge token bound to
+        it. Anything that is not a handle comes back unchanged, for the device
+        plane to judge. The refusal never says who holds the device."""
+        gid = find_device_id_by_handle(handle)
+        if gid is None:
+            return {"Token": map_arg(handle)}
+        why = {"Token": map_arg(handle), "why": map_arg(f"no active reservation of yours on {handle} right now")}
+        # update_devices() applied the federated/incoherent filters to the live
+        # pair, but leaves an offline device's pair and expired rows alone:
+        # require connected and re-check the window.
+        entry = get_all_devices().get(gid)
+        if not entry or not (entry[1] and entry[2]):
+            return why
+        row = self.cursor.execute(
+            "SELECT res_id, username, start_time, end_time FROM Reservations "
+            "WHERE device_id = ? AND salt = ? AND hash = ?",
+            (int(gid), entry[1], entry[2]),
+        ).fetchone()
+        if row is None or row[1] != username or not (
+            _parse_reservation_datetime(row[2]) <= datetime.now() < _parse_reservation_datetime(row[3])
+        ):
+            return why
+        try:
+            token = reservation_bridge_token(gid, expect=(entry[1], entry[2]))
+        except RuntimeError:
+            return why
+        return {"Token": map_arg(token), "res_id": map_arg(int(row[0]))}
+
+    @db_connection
     def federated_visible_devices(self, *, local_account_id: int) -> list[dict]:
         """Devices this federated principal is permitted to see.
 
@@ -1374,17 +1414,18 @@ class ReservationHandler:
         for gid, info in sorted(inventory.items(), key=lambda kv: int(kv[0])):
             if allowed is not None and int(gid) not in allowed:
                 continue
-            entries.append(
-                {
-                    "local_device_id": str(int(gid)),
-                    "display_name": str(info.get("name") or f"device {gid}"),
-                    "device_type": info.get("device_type") or None,
-                    "online": bool(info.get("online")),
-                    "max_reservation_time_sec": self._device_block_seconds_locked(
-                        username, int(gid)
-                    ),
-                }
-            )
+            entry = {
+                "local_device_id": str(int(gid)),
+                "display_name": str(info.get("name") or f"device {gid}"),
+                "device_type": info.get("device_type") or None,
+                "online": bool(info.get("online")),
+                "max_reservation_time_sec": self._device_block_seconds_locked(
+                    username, int(gid)
+                ),
+            }
+            if info.get("handle"):
+                entry["handle"] = info["handle"]
+            entries.append(entry)
         return entries
 
     @db_connection
@@ -1784,6 +1825,7 @@ _SAFE_ACTIVITY_ARGS = {
     "cancel_res": ("un", "res_id"),
     "set_enroll": ("un",),
     "direct_offer": ("un",),
+    "device_token": ("un",),
 }
 
 

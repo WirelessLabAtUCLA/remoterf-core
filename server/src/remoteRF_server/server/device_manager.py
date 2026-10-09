@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, Any, List, Iterator
 from contextlib import contextmanager
 
+from remoterf_federation_core import is_device_handle
+
 from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir
 from ..common.idl.schema import get_driver_class, load_drivers
 from ..host import host_tunnel_server as hts
@@ -68,6 +70,8 @@ class _DeviceState:
     io_lock: threading.RLock = field(default_factory=threading.RLock)
     # The last reservation ended; see _reset_locked().
     reset_pending: bool = False
+    # Requested handle (validated, or ""); _handle_owners() decides who keeps a duplicate.
+    handle: str = ""
 
 # gid -> state
 _devices: Dict[int, _DeviceState] = {}
@@ -118,6 +122,7 @@ def _sync_host_devices(*, force: bool = False) -> None:
         label = str(getattr(info_obj, "label", "") or "").strip()
         serial = str(getattr(info_obj, "serial", "") or "").strip()
         kind = str(getattr(info_obj, "kind", "") or "").strip()
+        handle = str(getattr(info_obj, "handle", "") or "").strip()
 
         updates[gid] = {
             "host_id": str(host_id),
@@ -125,6 +130,7 @@ def _sync_host_devices(*, force: bool = False) -> None:
             "label": label,
             "serial": serial,
             "kind": kind,
+            "handle": handle if is_device_handle(handle) else "",
             "online": bool(is_active),
         }
 
@@ -169,6 +175,7 @@ def _sync_host_devices(*, force: bool = False) -> None:
                 ident=ident,
                 dtype=dtype,
                 io_lock=lock,
+                handle=str(u["handle"]),
             )
 
             # Keep legacy maps coherent for host devices too (best-effort)
@@ -176,20 +183,25 @@ def _sync_host_devices(*, force: bool = False) -> None:
             if ident:
                 device_serialization[int(gid)] = ident
 
-        # Mark host entries not present in current snap as offline (but keep proxy + auth)
+        # Mark host entries not present in current snap as offline (but keep proxy + auth);
+        # a device no longer announced claims no handle.
         present = set(updates.keys())
         for gid, st in _devices.items():
             if st.origin == "host" and gid not in present:
                 st.online = False
+                st.handle = ""
 
 def _local_devices_str_snapshot() -> Dict[int, str]:
     out: Dict[int, str] = {}
     with _state_lock:
+        owners = _handle_owners()
         for gid, st in _devices.items():
             if st.origin != "local":
                 continue
 
             name = (st.name or f"device-{gid}").strip()
+            if st.handle and owners.get(st.handle) == gid:
+                name = f"{name} [{st.handle}]"
 
             status = "online" if _is_connected(st) else "offline"
             fault = _poe_fault(st)
@@ -218,6 +230,7 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
         status_map = {}
 
     now_ms = int(time.time() * 1000)
+    owners = _handle_owners()
 
     out: Dict[int, str] = {}
     for device_id, (host_id, info_obj, is_active) in snap.items():
@@ -239,6 +252,9 @@ def _host_devices_str_snapshot() -> Dict[int, str]:
 
         status = "online" if bool(is_active) else "offline"
         name = label or f"host-device-{gid}"
+        handle = str(getattr(info_obj, "handle", "") or "").strip()
+        if handle and owners.get(handle) == gid:
+            name = f"{name} [{handle}]"
 
         last_seen = ""
         ds = status_map.get(str(device_id))
@@ -340,12 +356,17 @@ def _load_device_records() -> Dict[int, Dict[str, str]]:
             if "device_index" in init
             else ""
         )
+        handle = str(item.get("handle") or "").strip()
+        if handle and not is_device_handle(handle):
+            print(f"Warning: device {gid}: handle {handle!r} ignored (invalid)")
+            handle = ""
 
         recs[gid] = {
             "TYPE": dtype,
             "NAME": name,
             "IDENT": address or serial or device_args or device_index,
             "INIT": init,
+            "HANDLE": handle,
         }
 
     return recs
@@ -424,6 +445,7 @@ def _init_from_env() -> None:
             ident=ident2,
             dtype=dtype2 or dtype,
             io_lock=threading.RLock(),
+            handle=rec.get("HANDLE", ""),
         )
 
     # Swap atomically
@@ -731,12 +753,15 @@ def describe_devices(ids) -> list[dict]:
     _sync_host_devices()
     out = []
     with _state_lock:
+        owners = _handle_owners()
         for gid in ids:
             st = _devices.get(int(gid))
             if st is None:
                 continue
             out.append({"id": int(gid), "name": (st.name or f"device-{gid}").strip(),
                         "type": st.dtype or "", "online": _is_connected(st) and not _poe_fault(st)})
+            if st.handle and owners.get(st.handle) == int(gid):
+                out[-1]["handle"] = st.handle
     return out
 
 
@@ -819,19 +844,22 @@ def _reset_if_pending(device_id: int) -> None:
             _reset_locked(st)
 
 
-def reservation_bridge_token(device_id: int) -> str:
-    """A process-internal stand-in for the device's current reservation token.
+def reservation_bridge_token(device_id: int, expect=None) -> str:
+    """A stand-in for the device's current reservation token.
 
     A federated caller is authorized per call by the federation plane and never
     holds this deployment's bearer token, but Dynamic v2 keys its sessions to a
-    token. This one never leaves the process and dies with the reservation:
-    resolve_gid_for_token() honours it only while the device still carries the
-    reservation it was minted under.
+    token. ACC:device_token also hands it to the reservation's own holder (who
+    named the device by its handle). Either way it dies with the reservation:
+    resolve_gid_for_token() and acquire_device() honour it only while the
+    device still carries the reservation it was minted under, and it is gone
+    on a change of holder (set_device) and on restart. With `expect`, the
+    reservation must still be that (salt, hash) pair.
     """
     did = int(device_id)
     with _state_lock:
         st = _devices.get(did)
-        if st is None or not (st.salt and st.hsh):
+        if st is None or not (st.salt and st.hsh) or (expect is not None and (st.salt, st.hsh) != tuple(expect)):
             raise RuntimeError("the device has no active reservation")
         bound = (did, st.salt, st.hsh)
         for token, entry in _bridge_tokens.items():
@@ -1048,6 +1076,30 @@ def find_device_id_by_name(name: str) -> Optional[int]:
                 return gid
     return None
 
+def _handle_owners() -> Dict[str, int]:
+    """handle -> the device that keeps it: local devices first, then the lowest id."""
+    owners: Dict[str, int] = {}
+    with _state_lock:
+        for gid, st in sorted(_devices.items(), key=lambda kv: (kv[1].origin != "local", kv[0])):
+            if st.handle:
+                owners.setdefault(st.handle, int(gid))
+    return owners
+
+def find_device_id_by_handle(handle: str) -> Optional[int]:
+    """The gid whose effective handle is exactly `handle` (case-sensitive), or None."""
+    _sync_host_devices()
+    return _handle_owners().get(handle)
+
+def handle_report() -> Dict[int, str]:
+    """gid -> its handle, or why it was ignored, for devices that asked for one."""
+    with _state_lock:
+        owners = _handle_owners()
+        return {
+            gid: st.handle if owners[st.handle] == gid else f"{st.handle} ignored (duplicate)"
+            for gid, st in _devices.items()
+            if st.handle
+        }
+
 def get_device(*, api_token: str):
     if not api_token:
         return None
@@ -1105,7 +1157,14 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
     gid: Optional[int] = None
     configured_token = _get_master_token()
 
-    if configured_token and api_token == configured_token:
+    with _state_lock:
+        bound = _bridge_tokens.get(api_token)
+        st = _devices.get(bound[0]) if bound is not None else None
+        live = st is not None and _is_connected(st) and (st.salt, st.hsh) == bound[1:]
+
+    if bound is not None:
+        gid = bound[0] if live else None
+    elif configured_token and api_token == configured_token:
         with _state_lock:
             # prefer local first
             for k, st in _devices.items():
@@ -1191,12 +1250,14 @@ def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
     _sync_host_devices()
 
     with _state_lock:
+        owners = _handle_owners()
         return {
             gid: {
                 "name": st.name or f"device {gid}",
                 "device_type": st.dtype or None,
                 "online": _is_connected(st) and not _poe_fault(st),
                 "origin": st.origin,
+                "handle": st.handle if st.handle and owners.get(st.handle) == gid else "",
             }
             for gid, st in _devices.items()
         }
@@ -1243,6 +1304,7 @@ def reload_devices() -> None:
             ident=ident2,
             dtype=dtype2,
             io_lock=threading.RLock(),
+            handle=rec.get("HANDLE", ""),
         )
 
     with _state_lock:

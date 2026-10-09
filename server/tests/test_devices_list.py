@@ -10,10 +10,12 @@ def test_devices_list_shows_the_host_of_each_device():
     reg = SimpleNamespace(list_devices=lambda: {
         "1": SimpleNamespace(host_id="lab-nuc", host_local_id=0, last_seen_ms=0),
     })
-    with patch.object(grpc_server, "get_all_devices_str", return_value={0: "Pluto A (online)", 1: "USRP (online)"}), \
+    with patch.object(grpc_server, "get_all_devices_str", return_value={0: "Pluto A [PA] (online)", 1: "USRP (online)"}), \
+            patch.object(grpc_server, "handle_report", return_value={0: "PA"}), \
             patch.object(grpc_server.hts, "get_tunnel_registry", return_value=reg), \
             patch("remoteRF_server.common.utils.panel.print_table") as table:
         grpc_server.get_devices()
     rows = {r["device_id"]: r for r in table.call_args.args[1]}
     assert rows[0]["host"] == "local"
+    assert (rows[0]["name"], rows[0]["handle"]) == ("Pluto A (online)", "PA")
     assert rows[1]["host"] == "lab-nuc #0" and rows[1]["last_seen"] == "-"
