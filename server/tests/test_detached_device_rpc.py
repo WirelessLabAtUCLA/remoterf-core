@@ -10,8 +10,10 @@ import base64
 import hashlib
 import json
 import sqlite3
+import time
 import uuid
 
+import grpc
 import pytest
 import requests
 
@@ -379,3 +381,67 @@ def test_a_direct_peer_is_dialed_with_accept_detached(reserved, monkeypatch):
     for _ in range(2):
         assert _response(_rpc(world, outbound)["frame"]).results["value"].int64_value == 42
     assert sent == [(b"", True), (_raw("test:ip:CALL0"), True)]
+
+
+def test_a_direct_peer_channel_is_reused_until_its_pin_changes_or_it_fails(reserved, monkeypatch):
+    world = reserved
+    opened, fail = [], []
+
+    class Stub:
+        def __init__(self, channel):
+            self.channel = channel
+
+        def Execute(self, request, timeout):
+            self.channel.calls += 1
+            if fail:
+                fail.pop()
+                raise grpc.RpcError()
+            out = world["executor"].execute(
+                request.protocol_version, request.grant, request.request_json,
+                request.frame, request.accept_detached,
+            )
+            return pb.FederationResponse(
+                protocol_version="2", signed_result=out["signed_result"], frame=out.get("frame", b"")
+            )
+
+    class Channel:
+        def __init__(self, endpoint, credentials, options):
+            self.endpoint, self.calls = endpoint, 0
+            opened.append(self)
+
+    monkeypatch.setattr(pb_grpc, "FederationV2Stub", Stub)
+    monkeypatch.setattr(home_module.grpc, "secure_channel", Channel)
+    monkeypatch.setattr(home_module.grpc, "ssl_channel_credentials", lambda **k: None)
+    outbound = _outbound(world)
+    route = {"ca_pem": "-", "tls_server_name": "lab.example.org", "endpoint": "lab.example.org:1",
+             "deployment_id": "peer", "via": "direct"}
+    outbound.peer = lambda deployment_id: dict(route)
+
+    for _ in range(3):
+        _rpc(world, outbound)
+    assert len(opened) == 1 and opened[0].calls == 3  # one handshake, three grants
+    route["ca_pem"] = "rotated"
+    _rpc(world, outbound)
+    assert len(opened) == 2 and opened[1].calls == 1
+    route["endpoint"] = "lab.example.org:2"
+    _rpc(world, outbound)
+    assert len(opened) == 3 and opened[2].endpoint == "lab.example.org:2"
+    fail.append(1)  # a channel that fails is dropped; the next call dials a fresh one
+    with pytest.raises(TransportFailure):
+        _rpc(world, outbound)
+    _rpc(world, outbound)
+    assert len(opened) == 4 and opened[2].calls == 2 and opened[3].calls == 1
+    assert list(outbound._channels) == ["peer"]  # one per peer, old pins replaced
+
+
+def test_peer_channels_are_bounded(reserved, monkeypatch):
+    monkeypatch.setattr(home_module, "MAX_PEER_CHANNELS", 2)
+    monkeypatch.setattr(home_module.grpc, "secure_channel", lambda *a, **k: object())
+    monkeypatch.setattr(home_module.grpc, "ssl_channel_credentials", lambda **k: None)
+    monkeypatch.setattr(pb_grpc, "FederationV2Stub", lambda channel: (_ for _ in ()).throw(TimeoutError()))
+    outbound = _outbound(reserved)
+    for name in ("a", "b", "c"):
+        with pytest.raises(TimeoutError):
+            outbound._dial({"deployment_id": name, "endpoint": name, "tls_server_name": name, "ca_pem": "-"},
+                           "grant", "{}", time.monotonic() + 5)
+    assert list(outbound._channels) == ["b", "c"]

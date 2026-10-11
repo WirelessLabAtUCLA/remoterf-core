@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,7 @@ from .peers import PeerStore
 
 FORWARD_PATH = "/v2/broker/federation/forward"
 MAX_FORWARD_RESPONSE_BYTES = 32768
+MAX_PEER_CHANNELS = 64  # open gRPC channels kept to direct peers
 logger = logging.getLogger("remoteRF_server.federation.home")
 
 
@@ -422,6 +424,8 @@ class HomeFederationOutbound:
         self.overall_timeout = self.timeout * 2
         self.sender = sender
         self.peers = PeerStore(issuer.usergroups_path)
+        self._channels: dict = {}  # peer -> ((endpoint, TLS name, CA), open channel), oldest use first
+        self._channels_lock = threading.Lock()
         self._sender_accepts_deadline = bool(
             sender is not None
             and len(inspect.signature(sender).parameters) >= 3
@@ -535,19 +539,29 @@ class HomeFederationOutbound:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError()
-        credentials = grpc.ssl_channel_credentials(
-            root_certificates=route["ca_pem"].encode("utf-8")
-        )
-        options = (
-            ("grpc.ssl_target_name_override", route["tls_server_name"]),
-            ("grpc.default_authority", route["tls_server_name"]),
-            ("grpc.max_send_message_length", MAX_DEVICE_FORWARD_REQUEST_BYTES),
-            ("grpc.max_receive_message_length", MAX_DEVICE_FORWARD_RESPONSE_BYTES),
-        )
-        # ponytail: one channel per call; cache per peer if the handshake
-        # ever shows up in a fan-out budget.
-        with grpc.secure_channel(route["endpoint"], credentials, options=options) as channel:
-            response = rpc.FederationV2Stub(channel).Execute(
+        # One channel per peer, reused so a call skips the TCP+TLS setup; the
+        # grant is still per call. A dropped channel is never closed here:
+        # it closes once calls still in flight on it let go of it.
+        key = route.get("deployment_id") or route["endpoint"]
+        pin = (route["endpoint"], route["tls_server_name"], route["ca_pem"])
+        with self._channels_lock:
+            cached = self._channels.pop(key, None)
+            if cached is None or cached[0] != pin:  # new peer, moved route or rotated CA
+                credentials = grpc.ssl_channel_credentials(
+                    root_certificates=route["ca_pem"].encode("utf-8")
+                )
+                options = (
+                    ("grpc.ssl_target_name_override", route["tls_server_name"]),
+                    ("grpc.default_authority", route["tls_server_name"]),
+                    ("grpc.max_send_message_length", MAX_DEVICE_FORWARD_REQUEST_BYTES),
+                    ("grpc.max_receive_message_length", MAX_DEVICE_FORWARD_RESPONSE_BYTES),
+                )
+                cached = (pin, grpc.secure_channel(route["endpoint"], credentials, options=options))
+            self._channels[key] = cached
+            while len(self._channels) > MAX_PEER_CHANNELS:
+                self._channels.pop(next(iter(self._channels)))
+        try:
+            response = rpc.FederationV2Stub(cached[1]).Execute(
                 pb.FederationRequest(
                     protocol_version="2",
                     grant=grant,
@@ -557,6 +571,11 @@ class HomeFederationOutbound:
                 ),
                 timeout=remaining,
             )
+        except grpc.RpcError:
+            with self._channels_lock:
+                if self._channels.get(key) is cached:
+                    del self._channels[key]
+            raise
         return {
             **({"frame": response.frame} if response.frame else {}),
             "protocol_version": response.protocol_version,

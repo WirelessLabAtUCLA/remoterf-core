@@ -401,7 +401,7 @@ class ServerHomeDevices:
             ).fetchone()
         return int(row[0]) if row else None
 
-    def direct_offer(self, *, local_account_id: int, token: str, ice: str) -> dict:
+    def direct_offer(self, *, local_account_id: int | None, token: str, ice: str) -> dict:
         """Have the owner answer this client's ICE offer for the reservation
         behind a HOME-minted token (docs/deployment-groups.md §7.6).
 
@@ -409,11 +409,25 @@ class ServerHomeDevices:
         handshake: the owner's TLS name and CA from its FederationPeers row.
         Without that row there is no direct route, and the client simply
         keeps driving the device through this HOME.
+
+        ``local_account_id`` None: no login, the token alone authorizes the
+        offer, for the account and reservation it already names.
         """
 
         route = self.resolve_token(token)
-        if route is None or int(route["local_account_id"]) != int(local_account_id):
+        if route is None or (
+            local_account_id is not None and int(route["local_account_id"]) != int(local_account_id)
+        ):
             raise HomeDeviceError("That token does not name a partner device of yours.")
+        local_account_id = int(route["local_account_id"])
+        now = datetime.now()
+        with self._connect() as conn:
+            live = conn.execute(
+                "SELECT 1 FROM Reservations WHERE res_id=? AND start_time<=? AND end_time>?",
+                (route["res_id"], now, now),
+            ).fetchone()
+        if live is None:
+            raise HomeDeviceError("That reservation is not active now.")
         owner = route["owner_deployment_id"]
         peer = self.outbound.peer(owner)
         if peer is None:

@@ -28,6 +28,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 import pytest
 from aioice import Candidate, Connection
@@ -85,15 +86,19 @@ _OFFERS = ThreadPoolExecutor(2, "test-offer")  # the blocking ACC calls, off the
 class Client:
     """One client process's end of a path to the owner."""
 
-    def __init__(self, fed, *, offer_id="abcd", ca_pem=None, idle_timeout=60.0):
+    def __init__(self, fed, *, offer_id="abcd", ca_pem=None, idle_timeout=60.0, login=True):
         self.fed, self.offer_id, self.ca_pem, self.idle_timeout = fed, offer_id, ca_pem, idle_timeout
+        self.login = login
         self.ice = self.protocol = self.pump = None
 
     def offer(self, ice):
-        return _acc(self.fed, "direct_offer", a=self.fed["token"], ice=json.dumps({
+        ice = json.dumps({
             "id": self.offer_id, "ufrag": ice.local_username, "pwd": ice.local_password,
             "candidates": [c.to_sdp() for c in ice.local_candidates],
-        }))
+        })
+        if self.login:
+            return _acc(self.fed, "direct_offer", a=self.fed["token"], ice=ice)
+        return _token_offer(self.fed, self.fed["token"], ice)
 
     async def punch(self):
         loop = asyncio.get_running_loop()
@@ -145,6 +150,14 @@ class Client:
             await asyncio.sleep(0)
         if self.ice is not None:
             await self.ice.close()
+
+
+def _token_offer(fed, token, ice="{}"):
+    """ACC:direct_offer from a script with no login: the token is all it sends."""
+    reply = fed["reservations"].handle_call(
+        function_name="direct_offer", args={"a": map_arg(token), "ice": map_arg(ice)},
+    )
+    return {k: unmap_arg(v) for k, v in reply.items()}
 
 
 async def _gone(seconds=5.0):
@@ -303,3 +316,38 @@ def test_without_a_route_the_client_stays_on_the_relay(federated):
         assert "No direct route" in str(refused.value)
 
     asyncio.run(run())
+
+
+def test_a_token_alone_punches_to_the_owner_for_its_live_reservation(federated):
+    fed = federated
+
+    async def run():
+        client = Client(fed, login=False)
+        try:
+            reply = await client.punch()
+            assert reply["owner"] == DEST and reply["server_name"] == SERVER_NAME
+            assert (await client.call("Test:rx:CALL0", {"a": map_arg(fed["token"])}))["value"] == 42
+            assert fed["rpc"].device_calls[-1][:2] == (fed["allowed"], "Test:rx:CALL0")
+        finally:
+            await client.close()
+        assert await _gone()
+
+    asyncio.run(run())
+    assert fed["calls"][-1] == "direct_open"
+
+
+def test_a_token_alone_is_refused_without_a_live_reservation(federated):
+    fed = federated
+    calls = len(fed["calls"])
+    assert "does not name a partner device" in _token_offer(fed, "not-a-token")["ace"]
+    assert "does not name a partner device" in _token_offer(fed, "")["ace"]
+    with sqlite3.connect(fed["root"] / "reservations.db") as conn:  # ended a minute ago
+        conn.execute("UPDATE Reservations SET end_time=? WHERE res_id=?",
+                     (datetime.now() - timedelta(minutes=1), fed["res_id"]))
+    assert "not active" in _token_offer(fed, fed["token"])["ace"]
+    with sqlite3.connect(fed["root"] / "reservations.db") as conn:  # not started yet
+        conn.execute("UPDATE Reservations SET start_time=?, end_time=? WHERE res_id=?",
+                     (datetime.now() + timedelta(minutes=5), datetime.now() + timedelta(minutes=30), fed["res_id"]))
+    assert "not active" in _token_offer(fed, fed["token"])["ace"]
+    assert "not active" in _acc(fed, "direct_offer", a=fed["token"], ice="{}")["ace"]  # a login gets no more
+    assert len(fed["calls"]) == calls and not direct_path._paths  # nothing reached the owner

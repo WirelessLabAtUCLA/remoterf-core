@@ -209,24 +209,15 @@ class ReservationHandler:
                 self.revoke_session(unmap_arg(args['pw']))
                 return {"UC": map_arg("Logged out.")}
             elif function_name == 'direct_offer':
+                if 'un' not in args and 'a' in args:
+                    # A script with no login: the partner device token is its
+                    # own credential, for its own live reservation only.
+                    return self._partner_offer(None, args)
                 username = unmap_arg(args['un'])
                 password = unmap_arg(args['pw'])
                 if self.login_user(username, password) == {"UC": map_arg(f'{username}')}:
                     if 'a' in args:
-                        # A partner device: the owner answers, over the HOME's
-                        # grant; the client then punches to the owner itself.
-                        from .federation.home_devices import HomeDeviceError
-
-                        if self.federation_devices is None:
-                            return {"ace": map_arg("This home has no partner devices.")}
-                        try:
-                            answer = self.federation_devices.direct_offer(
-                                local_account_id=self.get_uid(username),
-                                token=unmap_arg(args['a']), ice=unmap_arg(args['ice']),
-                            )
-                        except HomeDeviceError as exc:
-                            return {"ace": map_arg(str(exc))}
-                        return {key: map_arg(value) for key, value in answer.items()}
+                        return self._partner_offer(self.get_uid(username), args)
                     try:
                         from .direct_path import offer
                     except Exception:  # noqa: BLE001 - aioquic unusable here; the relay carries the calls
@@ -443,6 +434,22 @@ class ReservationHandler:
         except HomeDeviceError as exc:
             return {"ace": map_arg(str(exc))}
         return {"Token": map_arg(issued["token"])}
+
+    def _partner_offer(self, local_account_id, args):
+        """A partner device: the owner answers, over the HOME's grant; the
+        client then punches to the owner itself."""
+        from .federation.home_devices import HomeDeviceError
+
+        if self.federation_devices is None:
+            return {"ace": map_arg("This home has no partner devices.")}
+        try:
+            answer = self.federation_devices.direct_offer(
+                local_account_id=local_account_id,
+                token=unmap_arg(args['a']), ice=unmap_arg(args['ice']),
+            )
+        except HomeDeviceError as exc:
+            return {"ace": map_arg(str(exc))}
+        return {key: map_arg(value) for key, value in answer.items()}
 
     def _federated_cancel(self, username, res_id):
         from .federation.home_devices import HomeDeviceError
