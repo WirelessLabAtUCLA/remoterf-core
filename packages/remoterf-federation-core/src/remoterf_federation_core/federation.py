@@ -28,9 +28,11 @@ from .devices import (
     DEVICE_ACTION_CAPABILITIES,
     DEVICE_ACTIONS,
     DEVICE_PAYLOAD_FIELDS,
+    DEVICE_RPC_DETACHED_PAYLOAD_FIELDS,
     MAX_DEVICE_ACTION_REQUEST_BYTES,
     MAX_DEVICE_RESULT_BYTES,
     MAX_DEVICE_RESULT_TOKEN_BYTES,
+    MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES,
     READ_ONLY_DEVICE_ACTIONS,
     is_device_action,
     validate_device_payload,
@@ -342,7 +344,9 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
     action = value["action"]
     action_capability(action)
     payload = value["payload"]
-    if is_device_action(action):
+    if action == "device_rpc" and type(payload) is dict and "frame_sha256" in payload:
+        expected = DEVICE_RPC_DETACHED_PAYLOAD_FIELDS
+    elif is_device_action(action):
         expected = DEVICE_PAYLOAD_FIELDS[action]
     else:
         expected = (
@@ -929,7 +933,7 @@ def validate_transport_response(value: object, *, expected_action: str | None = 
     device one.
     """
 
-    if type(value) is not dict or set(value) != {
+    if type(value) is not dict or set(value) - {"frame"} != {
         "protocol_version",
         "signed_result",
         "error",
@@ -940,6 +944,19 @@ def validate_transport_response(value: object, *, expected_action: str | None = 
     signed, error = value["signed_result"], value["error"]
     if (signed is None) == (error is None):
         raise FederationError("invalid_transport_response")
+    # A detached device_rpc result's raw frame rides beside the token; the
+    # caller verifies it against the signed descriptor.  JSON never has bytes.
+    extra = {}
+    if "frame" in value:
+        frame = value["frame"]
+        if (
+            signed is None
+            or type(frame) is not bytes
+            or len(frame) > MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES
+            or (frame and expected_action not in (None, "device_rpc"))
+        ):
+            raise FederationError("invalid_transport_response")
+        extra["frame"] = frame
     ceiling = (
         MAX_DEVICE_RESULT_TOKEN_BYTES
         if expected_action is None
@@ -948,7 +965,12 @@ def validate_transport_response(value: object, *, expected_action: str | None = 
     if signed is not None:
         if type(signed) is not str or not signed or len(signed.encode()) > ceiling:
             raise FederationError("invalid_transport_response")
-        return {"protocol_version": PROTOCOL_VERSION, "signed_result": signed, "error": None}
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "signed_result": signed,
+            "error": None,
+            **extra,
+        }
     if type(error) is not dict or set(error) != {"code", "message", "retryable"}:
         raise FederationError("invalid_transport_response")
     code = error["code"]

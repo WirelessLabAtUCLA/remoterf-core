@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import re
+from typing import Mapping
 
-from .schemas import ValidationError, canonical_json, canonical_uuid
+from .schemas import ValidationError, canonical_json, canonical_uuid, strict_json
 
 # Device actions carry serialized RemoteRF device RPC frames, which are far
 # larger than the control-plane actions.  The ceilings stay explicit and
@@ -28,6 +30,12 @@ MAX_DEVICE_RESULT_BYTES = 1048576
 MAX_DEVICE_RESULT_TOKEN_BYTES = 1572864
 MAX_DEVICE_FORWARD_REQUEST_BYTES = 393216
 MAX_DEVICE_FORWARD_RESPONSE_BYTES = 1835008
+# Raw device RPC frame ceilings: exactly what the base64 ceilings above admit,
+# so a detached frame never passes where the legacy encoding would not.
+MAX_DEVICE_RPC_REQUEST_FRAME_BYTES = (MAX_DEVICE_ACTION_REQUEST_BYTES // 4) * 3
+MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES = (MAX_DEVICE_RESULT_BYTES // 4) * 3
+# HTTP body: u32be(len(envelope)) || canonical JSON envelope || raw frame.
+FRAMED_CONTENT_TYPE = "application/x-remoterf-framed"
 
 MAX_DEVICES_PER_RESULT = 512
 MAX_RESERVATIONS_PER_RESULT = 512
@@ -144,6 +152,13 @@ DEVICE_PAYLOAD_FIELDS = {
     "device_rpc": _BASE_PAYLOAD_FIELDS | {"local_device_id", "request_b64"},
     "direct_open": _BASE_PAYLOAD_FIELDS | {"reservation_id", "ice"},
 }
+# device_rpc with the frame carried beside the signed JSON: the grant's
+# request_sha256 covers this descriptor, which binds the frame bytes.
+DEVICE_RPC_DETACHED_PAYLOAD_FIELDS = _BASE_PAYLOAD_FIELDS | {
+    "local_device_id",
+    "frame_sha256",
+    "frame_len",
+}
 
 # Destination-local identifiers are opaque decimal strings on the wire.  A
 # destination keeps its own integer IDs; nothing here renumbers them.
@@ -151,6 +166,7 @@ _LOCAL_ID = re.compile(r"0|[1-9][0-9]{0,19}")
 _DEVICE_TYPE = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 _FUNCTION_NAME = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
 _BASE64 = re.compile(r"[A-Za-z0-9+/]*={0,2}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class DeviceProtocolError(ValidationError):
@@ -232,12 +248,110 @@ def encode_device_b64(raw: object, *, code: str, max_bytes: int) -> str:
     return encoded
 
 
+def _descriptor(value: Mapping, *, code: str, minimum: int, maximum: int) -> dict:
+    length = value["frame_len"]
+    digest = value["frame_sha256"]
+    if (
+        type(length) is not int
+        or not minimum <= length <= maximum
+        or type(digest) is not str
+        or _SHA256.fullmatch(digest) is None
+    ):
+        raise DeviceProtocolError(code)
+    return {"frame_sha256": digest, "frame_len": length}
+
+
+def frame_digest(frame: object, *, max_bytes: int, code: str) -> dict:
+    """The signed descriptor of a detached frame."""
+
+    if type(frame) is not bytes or len(frame) > max_bytes:
+        raise DeviceProtocolError(code)
+    return {"frame_sha256": hashlib.sha256(frame).hexdigest(), "frame_len": len(frame)}
+
+
+def verify_frame(frame: object, descriptor: Mapping, *, max_bytes: int, code: str) -> bytes:
+    """Return ``frame`` iff it matches the descriptor; length before hashing."""
+
+    length = descriptor.get("frame_len") if isinstance(descriptor, Mapping) else None
+    if (
+        type(frame) is not bytes
+        or type(length) is not int
+        or len(frame) != length
+        or length > max_bytes
+        or hashlib.sha256(frame).hexdigest() != descriptor.get("frame_sha256")
+    ):
+        raise DeviceProtocolError(code)
+    return frame
+
+
+def device_request_frame(payload: Mapping, frame: object) -> bytes:
+    """Raw GenericRPCRequest from a validated device_rpc payload in either form."""
+
+    code = "invalid_device_request"
+    if "frame_sha256" in payload:
+        if frame == b"":
+            raise DeviceProtocolError(code)
+        return verify_frame(
+            frame, payload, max_bytes=MAX_DEVICE_RPC_REQUEST_FRAME_BYTES, code=code
+        )
+    if type(frame) is not bytes or frame:
+        raise DeviceProtocolError(code)
+    return decode_device_b64(
+        payload.get("request_b64"), code=code, max_bytes=MAX_DEVICE_ACTION_REQUEST_BYTES
+    )
+
+
+def device_response_frame(payload: Mapping, frame: object) -> bytes:
+    """Raw GenericRPCResponse from a validated ok device_rpc result payload."""
+
+    code = "invalid_device_response"
+    if "frame_sha256" in payload:
+        return verify_frame(
+            frame, payload, max_bytes=MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES, code=code
+        )
+    if type(frame) is not bytes or frame:
+        raise DeviceProtocolError(code)
+    return decode_device_b64(
+        payload.get("response_b64"),
+        code=code,
+        max_bytes=MAX_DEVICE_RESULT_BYTES,
+        allow_empty=True,
+    )
+
+
+def pack_framed(envelope: Mapping, frame: bytes = b"") -> bytes:
+    if not isinstance(envelope, Mapping) or type(frame) is not bytes:
+        raise ValidationError("invalid_framed_body")
+    encoded = canonical_json(dict(envelope)).encode("utf-8")
+    return len(encoded).to_bytes(4, "big") + encoded + frame
+
+
+def unpack_framed(raw: object, *, max_bytes: int) -> tuple[dict, bytes]:
+    """Split a framed body; ``max_bytes`` bounds the envelope, callers cap the frame."""
+
+    if type(raw) is not bytes or len(raw) < 4:
+        raise ValidationError("invalid_framed_body")
+    end = 4 + int.from_bytes(raw[:4], "big")
+    if end > len(raw):
+        raise ValidationError("invalid_framed_body")
+    try:
+        envelope = strict_json(raw[4:end], max_bytes=max_bytes)
+    except ValidationError:
+        raise ValidationError("invalid_framed_body") from None
+    if type(envelope) is not dict:
+        raise ValidationError("invalid_framed_body")
+    return envelope, raw[end:]
+
+
 def validate_device_payload(action: str, payload: object) -> dict:
     """Return the canonical destination-facing payload for a device action."""
 
     expected = DEVICE_PAYLOAD_FIELDS.get(action)
     if expected is None:
         raise DeviceProtocolError("unknown_action")
+    detached = action == "device_rpc" and type(payload) is dict and "frame_sha256" in payload
+    if detached:
+        expected = DEVICE_RPC_DETACHED_PAYLOAD_FIELDS
     if type(payload) is not dict or set(payload) != expected:
         raise DeviceProtocolError("invalid_payload_fields")
     clean = {}
@@ -258,7 +372,16 @@ def validate_device_payload(action: str, payload: object) -> dict:
         )
     if action == "direct_open":
         clean["ice"] = _text(payload["ice"], "invalid_ice", MAX_ICE_BYTES)
-    if action == "device_rpc":
+    if detached:
+        clean.update(
+            _descriptor(
+                payload,
+                code="invalid_device_request",
+                minimum=1,
+                maximum=MAX_DEVICE_RPC_REQUEST_FRAME_BYTES,
+            )
+        )
+    elif action == "device_rpc":
         # Kept as the encoded string: the canonical request bytes are what the
         # grant's request_sha256 commits to.
         decode_device_b64(
@@ -279,6 +402,8 @@ def build_device_payload(
     reservation_id: str | None = None,
     request_b64: str | None = None,
     ice: str | None = None,
+    frame_sha256: str | None = None,
+    frame_len: int | None = None,
 ) -> dict:
     """Return only the action-specific payload fields, unvalidated bases aside."""
 
@@ -290,7 +415,10 @@ def build_device_payload(
         extra["end_time"] = end_time
     if action in ("device_cancel", "direct_open"):
         extra["reservation_id"] = reservation_id
-    if action == "device_rpc":
+    if action == "device_rpc" and frame_sha256 is not None:
+        extra["frame_sha256"] = frame_sha256
+        extra["frame_len"] = frame_len
+    elif action == "device_rpc":
         extra["request_b64"] = request_b64
     if action == "direct_open":
         extra["ice"] = ice
@@ -462,6 +590,13 @@ def validate_device_payload_result(value: object, *, action: str) -> dict:
         if set(value) != {"ice"}:
             raise DeviceProtocolError("invalid_result_payload")
         return {"ice": _text(value["ice"], "invalid_result_payload", MAX_ICE_BYTES)}
+    if set(value) == {"frame_sha256", "frame_len"}:
+        return _descriptor(
+            value,
+            code="invalid_device_response",
+            minimum=0,
+            maximum=MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES,
+        )
     if set(value) != {"response_b64"}:
         raise DeviceProtocolError("invalid_result_payload")
     decode_device_b64(
