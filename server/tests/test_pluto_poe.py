@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ from remoteRF_server.server import device_manager
 
 SERIAL = "104473b80a160019efff2c005a01be9b75"
 real_port_running = poe.port_running  # setUp replaces the module attribute
+real_set_poe = poe.set_poe
 
 
 class FakePluto:
@@ -211,6 +213,34 @@ class PoePlutoTests(unittest.TestCase):
             FakeRouterOS.replies = [["!done"]]
             with self.assertRaises(RuntimeError):
                 real_port_running(switch="s", user="u", password="p", port="ether5")
+
+    def test_twelve_reservations_starting_at_once_log_into_the_switch_a_few_at_a_time(self) -> None:
+        lock, active, peak = threading.Lock(), [0], [0]
+
+        class FakeRouterOS:
+            def __init__(self, *a, **kw):
+                with lock:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+
+            def cmd(self, *words):
+                threading.Event().wait(0.02)  # time.sleep is patched out
+
+            def close(self):
+                with lock:
+                    active[0] -= 1
+
+        with patch.object(poe, "RouterOS", FakeRouterOS):
+            threads = [
+                threading.Thread(target=real_set_poe, kwargs=dict(switch="s", user="u", password="p", port=f"ether{i}", on=True))
+                for i in range(12)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(active[0], 0)
+        self.assertLessEqual(peak[0], 4)
 
     def test_power_commands_do_nothing_on_a_usb_pluto(self) -> None:
         schema = PlutoSchema()

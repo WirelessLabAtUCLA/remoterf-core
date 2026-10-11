@@ -32,6 +32,9 @@ IIOD_PORT = 30431
 BOOT_TIMEOUT_S = 45
 LINK_CHECK_S = 30  # no IIOD by then: ask the switch whether the port even has a link
 OFF_S = 3  # long enough for the Pluto to lose power before it is switched back on
+# Reservations starting together (the top of an hour) power every Pluto at
+# once: keep the switch's API logins to a few at a time.
+_SWITCH_SESSIONS = threading.BoundedSemaphore(4)
 
 
 class RouterOS:
@@ -85,20 +88,22 @@ class RouterOS:
 
 
 def set_poe(*, switch, user, password, port, on):
-    ros = RouterOS(switch, user, password)
-    try:
-        ros.cmd("/interface/ethernet/poe/set", f"=.id={port}", f"=poe-out={'auto-on' if on else 'off'}")
-    finally:
-        ros.close()
+    with _SWITCH_SESSIONS:
+        ros = RouterOS(switch, user, password)
+        try:
+            ros.cmd("/interface/ethernet/poe/set", f"=.id={port}", f"=poe-out={'auto-on' if on else 'off'}")
+        finally:
+            ros.close()
 
 
 def port_running(*, switch, user, password, port):
     """Whether the switch port has an Ethernet link (RouterOS 'running')."""
-    ros = RouterOS(switch, user, password)
-    try:
-        replies = ros.cmd("/interface/ethernet/print", f"?name={port}", "=.proplist=name,running")
-    finally:
-        ros.close()
+    with _SWITCH_SESSIONS:
+        ros = RouterOS(switch, user, password)
+        try:
+            replies = ros.cmd("/interface/ethernet/print", f"?name={port}", "=.proplist=name,running")
+        finally:
+            ros.close()
     for sentence in replies:
         if sentence[0] == "!re":
             return "=running=true" in sentence

@@ -5,6 +5,7 @@ back-to-back one taking over, and resets the device (buffers, streamers, a
 running transmitter) before anyone else drives it.
 """
 
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -94,6 +95,25 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(self._wait_log(2), ["reset"])
         device_manager._prepare_for_holder(GID, ("a1", "h1"))  # a stale pre-warm finds it over
         self.assertEqual(self.radio.log, ["reset"])
+
+    def test_a_first_call_during_the_boot_waits_for_that_boot(self):
+        booting, boot_done = threading.Event(), threading.Event()
+
+        def slow_boot():
+            booting.set()
+            boot_done.wait(5)
+            self.radio.log.append("prepare")
+
+        self.radio.prepare_for_holder = slow_boot
+        device_manager.set_device(GID, "b2", "h2")
+        self.assertTrue(booting.wait(5))
+        first_call = threading.Thread(target=lambda: self.radio.log.append(("call", self._drive())))
+        first_call.start()
+        first_call.join(0.1)
+        self.assertTrue(first_call.is_alive())  # held on io_lock, not booting a second time
+        boot_done.set()
+        first_call.join(5)
+        self.assertEqual(self.radio.log, ["reset", "prepare", ("call", 1)])
 
     def test_host_devices_are_not_prepared(self):
         device_manager._devices[GID].origin = "host"
