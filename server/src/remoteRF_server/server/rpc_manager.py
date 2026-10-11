@@ -78,6 +78,15 @@ from .device_manager import acquire_device, acquire_device_by_gid, VirtualDevice
 from ..host import host_tunnel_server as hts
 
 
+# <Prefix>:batch:CALLN runs op0..op{n-1} in order under one io_lock hold.
+_BATCH_MAX_OPS = 64
+_BATCH_VERBS = {"GET", "SET", "CALL0", "CALL1", "CALLN"}
+_BATCH_ROUTING_KEYS = {"a", "g", "gid", "token", "device_id", "device_name"}
+# <Prefix>:rx_n:CALL1 returns up to arg1 rx() buffers stacked on a new axis.
+_RX_N_MAX_BUFFERS = 64
+_RX_N_MAX_SAMPLES = 1 << 20
+
+
 def _normalize_device_rpc_type(value: str) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
@@ -220,6 +229,22 @@ class RpcManager:
     ) -> dict:
         self._validate_device_rpc_type(function_name=function_name, gid=gid, dev=dev)
 
+        # Both live in the RPC layer, not in schemas, so no schema hash moves.
+        # An old server sends either to dispatch("call_batch"/"call_rx_n"),
+        # which refuses before running anything: the client's probe is safe.
+        # A driver's own call_batch/call_rx_n keeps its meaning.
+        _, prop, verb = function_name.split(':', 2)
+        calls = (
+            dev.list_exposed().get("calls", [])
+            if prop in ("batch", "rx_n") and hasattr(dev, "list_exposed") else []
+        )
+        if prop == "batch" and verb == "CALLN" and "call_batch" not in calls:
+            return self._run_batch(function_name=function_name, args=args, gid=gid, dev=dev)
+        if prop == "rx_n" and verb == "CALL1" and "call_rx_n" not in calls and (
+            isinstance(dev, VirtualDevice) or "call_rx" in calls
+        ):
+            return self._run_rx_n(function_name=function_name, args=args, gid=gid, dev=dev)
+
         if self._should_use_builtin_ip_fallback(function_name=function_name, gid=gid, dev=dev):
             return {"ip": map_arg(self._builtin_ip_fallback(gid=gid, dev=dev))}
 
@@ -237,6 +262,85 @@ class RpcManager:
             )
 
         return self._dispatch_local_schema(function_name=function_name, args=args, gid=gid, dev=dev)
+
+    def _run_batch(self, *, function_name: str, args: dict, gid: int, dev: object) -> dict:
+        """Every op is checked before any runs; the first failing op (raised,
+        or answered with ``a``/``Error``) stops the batch. Success returns the
+        last op's results plus ``batch_done``; failure at op i returns
+        ``batch_done = batch_failed = i`` and ``batch_error``."""
+        prefix = function_name.split(':', 1)[0]
+        names = {str(key) for key in args if str(key).startswith("op")}
+        count = len(names)
+        if not 1 <= count <= _BATCH_MAX_OPS or names != {f"op{i}" for i in range(count)}:
+            raise ValueError(f"batch needs op0..op{{n-1}}, 1 <= n <= {_BATCH_MAX_OPS}")
+        ops = []
+        for i in range(count):
+            arg = args[f"op{i}"]
+            if arg.WhichOneof("value") != "bytes_value":
+                raise ValueError(f"batch op{i} is not a request")
+            op = generic_pb2.GenericRPCRequest()
+            try:
+                op.ParseFromString(arg.bytes_value)
+            except Exception:
+                raise ValueError(f"batch op{i} is not a request") from None
+            parts = op.function_name.split(':', 2)
+            if (
+                len(parts) != 3
+                or parts[0] != prefix
+                or parts[1] in ("", "batch")
+                or parts[2] not in _BATCH_VERBS
+                or _BATCH_ROUTING_KEYS & set(op.args)
+            ):
+                raise ValueError(f"batch op{i} is not allowed: {op.function_name!r}")
+            ops.append(op)
+
+        results = {}
+        for i, op in enumerate(ops):
+            try:
+                results = self._dispatch_acquired(
+                    function_name=op.function_name, args=dict(op.args), gid=gid, dev=dev
+                )
+                failure = results.get('a', results.get('Error'))
+                error = None if failure is None else str(unmap_arg(failure))
+            except Exception as exc:
+                error = str(exc)
+            if error is not None:
+                return {
+                    "batch_done": map_arg(i),
+                    "batch_failed": map_arg(i),
+                    "batch_error": map_arg(error),
+                }
+        return {**results, "batch_done": map_arg(count)}
+
+    def _run_rx_n(self, *, function_name: str, args: dict, gid: int, dev: object) -> dict:
+        """``arg1`` rx() calls back to back under the held io_lock, each exactly
+        as a plain rx would run (so a Host device expands here too), stacked to
+        shape (m, ...) and sent in the caller's ``wire`` encoding. A failure on
+        the first buffer is the plain rx failure; a later one returns the
+        buffers already captured, and the next call surfaces it."""
+        if 'arg1' not in args:
+            raise ValueError("CALL1 requires 'arg1' in args")
+        want = max(1, min(int(unmap_arg(args['arg1'])), _RX_N_MAX_BUFFERS))
+        rx_name = function_name.split(':', 1)[0] + ":rx:CALL0"
+        rx_args = {key: value for key, value in args.items() if key != 'arg1'}
+        buffers = []
+        while len(buffers) < want:
+            try:
+                results = self._dispatch_acquired(
+                    function_name=rx_name, args=rx_args, gid=gid, dev=dev
+                )
+                buffer = None if 'Error' in results or 'rx' not in results else unmap_arg(results['rx'])
+            except Exception:
+                if not buffers:
+                    raise
+                break
+            if not isinstance(buffer, np.ndarray):
+                if not buffers:
+                    return results
+                break
+            buffers.append(buffer)
+            want = min(want, max(1, _RX_N_MAX_SAMPLES // max(1, buffer.size)))
+        return {"rx_n": _wire(np.stack(buffers), args)}
 
     def _validate_device_rpc_type(self, *, function_name: str, gid: int, dev: object) -> None:
         requested_type = function_name.split(':', 1)[0]
