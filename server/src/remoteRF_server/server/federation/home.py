@@ -555,8 +555,11 @@ class HomeFederationOutbound:
                     ("grpc.default_authority", route["tls_server_name"]),
                     ("grpc.max_send_message_length", MAX_DEVICE_FORWARD_REQUEST_BYTES),
                     ("grpc.max_receive_message_length", MAX_DEVICE_FORWARD_RESPONSE_BYTES),
+                    # Reuse within a burst only: a connection a relay or NAT
+                    # dropped silently while idle would hang a call to its deadline.
+                    ("grpc.client_idle_timeout_ms", 60_000),
                 )
-                cached = (pin, grpc.secure_channel(route["endpoint"], credentials, options=options))
+                cached =(pin, grpc.secure_channel(route["endpoint"], credentials, options=options))
             self._channels[key] = cached
             while len(self._channels) > MAX_PEER_CHANNELS:
                 self._channels.pop(next(iter(self._channels)))
