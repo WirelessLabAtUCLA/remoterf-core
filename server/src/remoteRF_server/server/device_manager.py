@@ -807,6 +807,11 @@ def set_device(device_id: int, salt: str, hash: str):
         previous = (st.salt, st.hsh)
         st.salt = str(salt or "")
         st.hsh = str(hash or "")
+        held = (st.salt, st.hsh)
+        prepare = (
+            all(held) and previous != held and st.origin == "local"
+            and callable(getattr(st.dev, "prepare_for_holder", None))
+        )
         # The holder changed: the reservation ended, or a back-to-back one
         # replaced it without the device ever being free.
         notify_end = any(previous) and previous != (st.salt, st.hsh)
@@ -824,6 +829,26 @@ def set_device(device_id: int, salt: str, hash: str):
         # Now, not at the next call: a transmitter left running must stop
         # even when nobody reserves the device next.
         threading.Thread(target=_reset_if_pending, args=(int(device_id),), daemon=True).start()
+    if prepare:
+        threading.Thread(target=_prepare_for_holder, args=(int(device_id), held), daemon=True).start()
+
+
+def _prepare_for_holder(device_id: int, held: Tuple[str, str]) -> None:
+    """A reservation started: ready the device (a PoE Pluto boots) before the
+    holder's first call, which waits on io_lock for this same boot meanwhile."""
+    with _state_lock:
+        st = _devices.get(int(device_id))
+    if st is None:
+        return
+    with st.io_lock:
+        _reset_locked(st)  # a back-to-back predecessor's power-down comes first
+        with _state_lock:
+            if _devices.get(int(device_id)) is not st or (st.salt, st.hsh) != held:
+                return  # the reservation is already over: leave the device off
+        try:
+            st.dev.prepare_for_holder()
+        except Exception as exc:
+            print(f"Warning: preparing {st.name or st.ident} for its reservation failed: {exc}")
 
 
 def _reset_locked(st: _DeviceState) -> None:

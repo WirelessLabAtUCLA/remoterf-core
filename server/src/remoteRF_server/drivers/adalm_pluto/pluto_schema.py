@@ -244,6 +244,11 @@ class PlutoSchema(DeviceSchema):
             self.device.tx_destroy_buffer()
             self.device.rx_destroy_buffer()
 
+    def prepare_for_holder(self):
+        """A reservation started: a PoE Pluto boots now, not at the holder's first command."""
+        if isinstance(self.device, PoePluto):
+            self.device.power_up()
+
     @idl_expose(kind="call")
     def call_disable_dds(self):
         """Disable the internal DDS tone generator."""

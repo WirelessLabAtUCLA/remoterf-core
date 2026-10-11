@@ -23,9 +23,14 @@ def _device(dev, salt="a1", hsh="h1"):
 class _Radio:
     def __init__(self):
         self.resets = 0
+        self.log = []
 
     def reset_for_next_holder(self):
         self.resets += 1
+        self.log.append("reset")
+
+    def prepare_for_holder(self):
+        self.log.append("prepare")
 
 
 class HandoffTests(unittest.TestCase):
@@ -63,6 +68,38 @@ class HandoffTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(self.radio.resets, 1)
         self.assertEqual(self._drive(), 1)
+
+    def _wait_log(self, n):
+        for _ in range(100):
+            if len(self.radio.log) >= n:
+                break
+            time.sleep(0.01)
+        self._drive()  # any background work still holding io_lock finishes first
+        return self.radio.log
+
+    def test_a_new_reservation_prepares_the_device_once_after_the_previous_reset(self):
+        device_manager.set_device(GID, "b2", "h2")
+        self.assertEqual(self._wait_log(2), ["reset", "prepare"])
+        device_manager.set_device(GID, "b2", "h2")  # the next tick: same holder
+        self.assertEqual(self._wait_log(3), ["reset", "prepare"])
+
+    def test_a_reservation_starting_on_a_free_device_prepares_it(self):
+        device_manager.set_device(GID, "", "")
+        self._wait_log(1)
+        device_manager.set_device(GID, "b2", "h2")
+        self.assertEqual(self._wait_log(2), ["reset", "prepare"])
+
+    def test_an_ended_reservation_is_never_prepared(self):
+        device_manager.set_device(GID, "", "")
+        self.assertEqual(self._wait_log(2), ["reset"])
+        device_manager._prepare_for_holder(GID, ("a1", "h1"))  # a stale pre-warm finds it over
+        self.assertEqual(self.radio.log, ["reset"])
+
+    def test_host_devices_are_not_prepared(self):
+        device_manager._devices[GID].origin = "host"
+        with patch.object(device_manager, "_sync_host_devices"):
+            device_manager.set_device(GID, "b2", "h2")
+            self.assertEqual(self._wait_log(2), ["reset"])
 
 
 

@@ -101,6 +101,14 @@ class PoePlutoTests(unittest.TestCase):
         self.assertEqual(self.poe_calls[-1], ("ether5", True, "secret"))
         self.assertEqual(len(self.opened), 2)
 
+    def test_a_reservation_start_powers_it_up_once(self) -> None:
+        schema = self.schema(poe=True, ip="192.168.4.101", poe_port="ether5")
+        schema.prepare_for_holder()
+        schema.prepare_for_holder()
+        schema.dispatch("get_rx_lo", {})
+        self.assertEqual(self.poe_calls[1:], [("ether5", True, "secret")])
+        self.assertEqual(self.opened, ["ip:192.168.4.101"])
+
     def test_a_switch_timeout_at_reservation_end_is_retried(self) -> None:
         schema = self.schema(poe=True, ip="192.168.4.101", poe_port="ether5")
         schema.dispatch("call_power_up", {})
@@ -210,6 +218,7 @@ class PoePlutoTests(unittest.TestCase):
         schema.bind(usb)
         for name in ("call_power_up", "call_power_down", "call_power_cycle"):
             self.assertIsNone(schema.dispatch(name, {}))
+        schema.prepare_for_holder()
         self.assertEqual(self.poe_calls, [])
         self.assertIs(schema.device, usb)
 
