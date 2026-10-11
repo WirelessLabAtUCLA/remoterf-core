@@ -9,7 +9,7 @@ def test_federation_proto_source_hash_and_descriptor_are_canonical():
     proto = root / "src/remoteRF_server/common/grpc/federation.proto"
     protected = root / "src/remoteRF_server/common/grpc/grpc.proto"
     assert hashlib.sha256(proto.read_bytes()).hexdigest() == (
-        "378e2d83daadff4cf432da0c553aeac11b8facfe62f3afbd052b4997c6f69040"
+        "e890c399b61e8eb92e67762661c0ce99f3daacdb06b0139b34f26a749ff736c1"
     )
     assert hashlib.sha256(protected.read_bytes()).hexdigest() == (
         "5fce641a1dc3832a4fb1bfec0e3b4044291d6fdd575cd3abe86893af66b111c6"
@@ -24,11 +24,14 @@ def test_federation_proto_source_hash_and_descriptor_are_canonical():
         ("protocol_version", 1),
         ("grant", 2),
         ("request_json", 3),
+        ("frame", 4),
+        ("accept_detached", 5),
     ]
     response = descriptor.message_types_by_name["FederationResponse"]
     assert [(field.name, field.number) for field in response.fields] == [
         ("protocol_version", 1),
         ("signed_result", 2),
         ("error", 3),
+        ("frame", 4),
     ]
     assert response.fields_by_name["error"].message_type.full_name == "remote_rf.ErrorEnvelope"

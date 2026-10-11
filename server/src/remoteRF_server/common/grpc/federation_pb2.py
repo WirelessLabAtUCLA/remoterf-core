@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from . import grpc_pb2 as grpc__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10\x66\x65\x64\x65ration.proto\x12\tremote_rf\x1a\ngrpc.proto\"R\n\x11\x46\x65\x64\x65rationRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\r\n\x05grant\x18\x02 \x01(\t\x12\x14\n\x0crequest_json\x18\x03 \x01(\t\"n\n\x12\x46\x65\x64\x65rationResponse\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x15\n\rsigned_result\x18\x02 \x01(\t\x12\'\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x18.remote_rf.ErrorEnvelope2V\n\x0c\x46\x65\x64\x65rationV2\x12\x46\n\x07\x45xecute\x12\x1c.remote_rf.FederationRequest\x1a\x1d.remote_rf.FederationResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10\x66\x65\x64\x65ration.proto\x12\tremote_rf\x1a\ngrpc.proto\"z\n\x11\x46\x65\x64\x65rationRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\r\n\x05grant\x18\x02 \x01(\t\x12\x14\n\x0crequest_json\x18\x03 \x01(\t\x12\r\n\x05\x66rame\x18\x04 \x01(\x0c\x12\x17\n\x0f\x61\x63\x63\x65pt_detached\x18\x05 \x01(\x08\"}\n\x12\x46\x65\x64\x65rationResponse\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x15\n\rsigned_result\x18\x02 \x01(\t\x12\'\n\x05\x65rror\x18\x03 \x01(\x0b\x32\x18.remote_rf.ErrorEnvelope\x12\r\n\x05\x66rame\x18\x04 \x01(\x0c\x32V\n\x0c\x46\x65\x64\x65rationV2\x12\x46\n\x07\x45xecute\x12\x1c.remote_rf.FederationRequest\x1a\x1d.remote_rf.FederationResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,9 +33,9 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'federation_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_FEDERATIONREQUEST']._serialized_start=43
-  _globals['_FEDERATIONREQUEST']._serialized_end=125
-  _globals['_FEDERATIONRESPONSE']._serialized_start=127
-  _globals['_FEDERATIONRESPONSE']._serialized_end=237
-  _globals['_FEDERATIONV2']._serialized_start=239
-  _globals['_FEDERATIONV2']._serialized_end=325
+  _globals['_FEDERATIONREQUEST']._serialized_end=165
+  _globals['_FEDERATIONRESPONSE']._serialized_start=167
+  _globals['_FEDERATIONRESPONSE']._serialized_end=292
+  _globals['_FEDERATIONV2']._serialized_start=294
+  _globals['_FEDERATIONV2']._serialized_end=380
 # @@protoc_insertion_point(module_scope)

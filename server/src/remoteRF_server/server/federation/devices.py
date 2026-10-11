@@ -27,15 +27,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from remoterf_federation_core import (
-    DeviceProtocolError,
     canonical_json,
     canonical_uuid,
     contract_allows,
-    decode_device_b64,
     empty_device_payload,
-    encode_device_b64,
-    MAX_DEVICE_ACTION_REQUEST_BYTES,
-    MAX_DEVICE_RESULT_BYTES,
+    MAX_DEVICE_RPC_REQUEST_FRAME_BYTES,
+    MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES,
 )
 
 from ...common.grpc import grpc_pb2
@@ -43,10 +40,10 @@ from ...common.utils import map_arg
 from .destination import FINALIZE_PENDING, FederationBusinessError
 from .migrations import configure_connection, migrate_gate_h_reservations_schema
 
-# A device RPC frame must survive the base64 round trip inside the action
-# request; the raw protobuf ceiling is therefore the decoded size.
-MAX_DEVICE_RPC_REQUEST_BYTES = (MAX_DEVICE_ACTION_REQUEST_BYTES // 4) * 3
-MAX_DEVICE_RPC_RESPONSE_BYTES = (MAX_DEVICE_RESULT_BYTES // 4) * 3
+# Raw protobuf ceilings: what survives the legacy base64 round trip, and the
+# same for a detached frame.
+MAX_DEVICE_RPC_REQUEST_BYTES = MAX_DEVICE_RPC_REQUEST_FRAME_BYTES
+MAX_DEVICE_RPC_RESPONSE_BYTES = MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES
 
 # The one control-plane RPC a federated caller may run without a live
 # reservation: it returns the driver schema the Client needs to install a
@@ -390,17 +387,12 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
     IDL_FUNCTION = IDL_FUNCTION
 
     @staticmethod
-    def _parse_frame(payload):
-        raw = decode_device_b64(
-            payload["request_b64"],
-            code="invalid_device_request",
-            max_bytes=MAX_DEVICE_ACTION_REQUEST_BYTES,
-        )
-        if len(raw) > MAX_DEVICE_RPC_REQUEST_BYTES:
-            raise FederationBusinessError("request_too_large")
+    def _parse_frame(action):
+        # action.frame was decoded (legacy) or hash-checked (detached) and
+        # capped by the executor before the grant was consumed.
         try:
             request = grpc_pb2.GenericRPCRequest()
-            request.ParseFromString(raw)
+            request.ParseFromString(action.frame)
         except Exception:
             raise FederationBusinessError("invalid_device_request") from None
         function_name = str(request.function_name)
@@ -416,7 +408,7 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
         payload = action.request.value["payload"]
         device_id = int(payload["local_device_id"])
         principal_id, account_id = self._principal(tx, claims)
-        function_name, _args = self._parse_frame(payload)
+        function_name, _args = self._parse_frame(action)
 
         if function_name == self.IDL_FUNCTION:
             visible = {
@@ -459,7 +451,7 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
     def finalize(self, action, result):
         payload = action.request.value["payload"]
         device_id = int(payload["local_device_id"])
-        function_name, args = self._parse_frame(payload)
+        function_name, args = self._parse_frame(action)
 
         try:
             results = run_bound_rpc(
@@ -472,19 +464,12 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
         encoded_raw = response.SerializeToString()
         if len(encoded_raw) > MAX_DEVICE_RPC_RESPONSE_BYTES:
             raise FederationBusinessError("response_too_large")
-        try:
-            encoded = encode_device_b64(
-                encoded_raw,
-                code="response_too_large",
-                max_bytes=MAX_DEVICE_RESULT_BYTES,
-            )
-        except DeviceProtocolError:
-            raise FederationBusinessError("response_too_large") from None
+        # The executor picks the wire form: detached digest or base64.
         return {
             **result,
             "status": "ok",
             "error_code": None,
-            "payload": {"response_b64": encoded},
+            "payload": {"frame": encoded_raw},
         }
 
 

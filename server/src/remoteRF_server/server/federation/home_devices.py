@@ -36,15 +36,13 @@ from pathlib import Path
 from remoterf_federation_core import (
     DEVICE_AGGREGATION_TIMEOUT_SECONDS,
     DEVICE_READ_TIMEOUT_SECONDS,
-    MAX_DEVICE_ACTION_REQUEST_BYTES,
-    MAX_DEVICE_RESULT_BYTES,
+    MAX_DEVICE_RPC_REQUEST_FRAME_BYTES,
+    DeviceProtocolError,
     FederationError,
     OwnerSignedFailure,
     TransportFailure,
     build_device_payload,
     canonical_uuid,
-    decode_device_b64,
-    encode_device_b64,
 )
 
 from ...common.grpc import grpc_pb2
@@ -148,7 +146,7 @@ class ServerHomeDevices:
 
     # -- one forwarded action ------------------------------------------
 
-    def _forward(self, local_account_id, candidate, action, deadline=None, **payload):
+    def _forward(self, local_account_id, candidate, action, deadline=None, request_frame=None, **payload):
         return self.outbound.execute(
             local_account_id=int(local_account_id),
             destination_deployment_id=candidate["deployment_id"],
@@ -157,6 +155,7 @@ class ServerHomeDevices:
             action=action,
             device_payload=build_device_payload(action=action, **payload),
             **({"deadline": deadline} if deadline is not None else {}),
+            **({"request_frame": request_frame} if request_frame is not None else {}),
         )
 
     def _fan_out(self, local_account_id: int, action: str) -> list[tuple[dict, dict]]:
@@ -443,20 +442,16 @@ class ServerHomeDevices:
             if key in ("a", "token"):
                 continue
             request.args[key].CopyFrom(value)
-        request_b64 = encode_device_b64(
-            request.SerializeToString(), code="request_too_large", max_bytes=MAX_DEVICE_ACTION_REQUEST_BYTES
-        )
+        raw = request.SerializeToString()
+        if len(raw) > MAX_DEVICE_RPC_REQUEST_FRAME_BYTES:
+            raise DeviceProtocolError("request_too_large")
         try:
             result = self._forward(
                 local_account_id, candidate, "device_rpc",
-                local_device_id=alias["remote_device_id"], request_b64=request_b64,
+                local_device_id=alias["remote_device_id"], request_frame=raw,
             )
         except Exception as exc:  # noqa: BLE001
             raise HomeDeviceError(_failure_text(exc)) from None
-        raw = decode_device_b64(
-            result["payload"]["response_b64"], code="invalid_device_response",
-            max_bytes=MAX_DEVICE_RESULT_BYTES, allow_empty=True,
-        )
         response = grpc_pb2.GenericRPCResponse()
-        response.ParseFromString(raw)
+        response.ParseFromString(result["frame"])
         return dict(response.results)

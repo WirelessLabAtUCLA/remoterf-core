@@ -25,8 +25,11 @@ from remoterf_federation_core import (
     BROKER_REQUEST_TYP,
     DEFAULT_ACTION_RETRY_POLICIES,
     FEDERATION_GRANT_TYP,
+    FRAMED_CONTENT_TYPE,
+    MAX_DEVICE_ACTION_REQUEST_BYTES,
     MAX_DEVICE_FORWARD_REQUEST_BYTES,
     MAX_DEVICE_FORWARD_RESPONSE_BYTES,
+    MAX_DEVICE_RPC_REQUEST_FRAME_BYTES,
     MAX_PROTOCOL_INTEGER,
     PERMISSIONS_CONNECT_TIMEOUT_SECONDS,
     ActionRetryPolicy,
@@ -43,11 +46,16 @@ from remoterf_federation_core import (
     contract_terms_sha256,
     contract_allows,
     device_action_timeout,
+    device_response_frame,
+    encode_device_b64,
+    frame_digest,
     is_device_action,
     key_is_current,
+    pack_framed,
     parse_unverified_result,
     public_key_bytes,
     strict_json,
+    unpack_framed,
     validate_contract_terms,
     validate_result_claims,
     validate_transport_response,
@@ -71,6 +79,10 @@ def max_forward_response_bytes(action: str) -> int:
         if is_device_action(action)
         else MAX_FORWARD_RESPONSE_BYTES
     )
+
+
+class _FramedBodyRefused(Exception):
+    """A framed forward body answered 400: the broker cannot read framing."""
 
 
 @dataclass(frozen=True)
@@ -200,6 +212,7 @@ class ServerHomeGrantIssuer:
         code_name: str | None = None,
         device_payload: Mapping | None = None,
         enrollee: Mapping | None = None,
+        jti: str | None = None,
     ) -> IssuedGrant:
         destination = canonical_uuid(destination_deployment_id)
         request_id = canonical_uuid(request_id or str(uuid4()))
@@ -302,7 +315,7 @@ class ServerHomeGrantIssuer:
                 request_sha256=request.sha256,
                 issued_at=now,
                 expires_at=expires,
-                jti=str(uuid4()),
+                jti=jti or str(uuid4()),
             )
             token = jwt.encode(
                 claims,
@@ -375,6 +388,11 @@ class HomeFederationOutbound:
     FederationV2 listener, TLS pinned to the CA in the row. Any other
     destination goes through the broker's forward path, as before. Grant,
     envelope and result verification are the same either way.
+
+    A device_rpc frame travels beside the signed JSON (detached) once the
+    hop has proven it can carry it: a framed broker reply, or a direct peer,
+    plus a detached result from that destination. Until then, and after a
+    refusal that provably ran nothing, it is base64 inside the request.
     """
 
     def __init__(
@@ -414,6 +432,8 @@ class HomeFederationOutbound:
                 raise FederationError("invalid_retry_policy")
             policies[action] = policy
         self.retry_policies = policies
+        self._broker_framed = False
+        self._detached_destinations: set[str] = set()
 
     def _send(
         self,
@@ -421,18 +441,24 @@ class HomeFederationOutbound:
         authorization: str,
         deadline: float,
         max_response_bytes: int = MAX_FORWARD_RESPONSE_BYTES,
+        *,
+        accept_framed: bool = False,
+        framed_body: bool = False,
     ) -> dict:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError()
+        headers = {
+            "Authorization": "Bearer " + authorization,
+            "Content-Type": FRAMED_CONTENT_TYPE if framed_body else "application/json",
+            "Accept-Encoding": "identity",
+        }
+        if accept_framed:
+            headers["Accept"] = f"{FRAMED_CONTENT_TYPE}, application/json"
         with requests.post(
             self.broker_base_url + FORWARD_PATH,
             data=body,
-            headers={
-                "Authorization": "Bearer " + authorization,
-                "Content-Type": "application/json",
-                "Accept-Encoding": "identity",
-            },
+            headers=headers,
             timeout=(
                 min(self.connect_timeout, remaining),
                 # Device bodies carry a hardware call whose budget is the
@@ -444,7 +470,13 @@ class HomeFederationOutbound:
             allow_redirects=False,
             stream=True,
         ) as response:
+            if framed_body and response.status_code == 400:
+                raise _FramedBodyRefused()
             response.raise_for_status()
+            framed_reply = accept_framed and (
+                response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                == FRAMED_CONTENT_TYPE
+            )
             declared = response.headers.get("Content-Length")
             if declared is not None:
                 try:
@@ -473,6 +505,15 @@ class HomeFederationOutbound:
                 if len(raw) + len(chunk) > max_response_bytes:
                     raise TransportFailure("response_too_large", retryable=False)
                 raw.extend(chunk)
+        if framed_reply:
+            try:
+                envelope, frame = unpack_framed(bytes(raw), max_bytes=max_response_bytes)
+            except ValidationError:
+                raise TransportFailure(
+                    "invalid_transport_response", retryable=False
+                ) from None
+            self._broker_framed = True
+            return {**envelope, "frame": frame} if frame else envelope
         try:
             return strict_json(bytes(raw), max_bytes=max_response_bytes)
         except (FederationError, ValidationError):
@@ -484,7 +525,9 @@ class HomeFederationOutbound:
         """The FederationPeers row for a destination, or None (broker path)."""
         return self.peers.get(deployment_id)
 
-    def _dial(self, route: dict, grant: str, request_json: str, deadline: float) -> dict:
+    def _dial(
+        self, route: dict, grant: str, request_json: str, deadline: float, frame: bytes = b""
+    ) -> dict:
         """FederationV2.Execute on the peer's own listener, pinned to its CA."""
         from ...common.grpc import federation_pb2 as pb
         from ...common.grpc import federation_pb2_grpc as rpc
@@ -506,11 +549,16 @@ class HomeFederationOutbound:
         with grpc.secure_channel(route["endpoint"], credentials, options=options) as channel:
             response = rpc.FederationV2Stub(channel).Execute(
                 pb.FederationRequest(
-                    protocol_version="2", grant=grant, request_json=request_json
+                    protocol_version="2",
+                    grant=grant,
+                    request_json=request_json,
+                    frame=frame,
+                    accept_detached=True,
                 ),
                 timeout=remaining,
             )
         return {
+            **({"frame": response.frame} if response.frame else {}),
             "protocol_version": response.protocol_version,
             "signed_result": response.signed_result or None,
             "error": (
@@ -556,7 +604,11 @@ class HomeFederationOutbound:
         device_payload: Mapping | None = None,
         retry_ambiguous: bool = True,
         deadline: float | None = None,
+        request_frame: bytes | None = None,
     ) -> dict:
+        """Verified result; an ok device_rpc result also carries ``frame``, its
+        raw response. With ``request_frame`` the caller leaves ``request_b64``
+        out of ``device_payload`` and the wire form is chosen here."""
         logical_request_id = canonical_uuid(request_id or str(uuid4()))
         if type(retry_ambiguous) is not bool:
             raise FederationError("invalid_retry_policy")
@@ -576,15 +628,42 @@ class HomeFederationOutbound:
         own_deadline = time.monotonic() + budget
         deadline = own_deadline if deadline is None else min(float(deadline), own_deadline)
         route = None if self.sender is not None else self.peer(destination_deployment_id)
+        destination = canonical_uuid(destination_deployment_id)
         logger.info(
             "federation_transport destination=%s action=%s via=%s",
-            canonical_uuid(destination_deployment_id),
+            destination,
             action,
             "in-process" if self.sender is not None else route["via"] if route else "broker",
         )
-        for attempt in range(attempts):
+        attempt = 0
+        downgraded = False
+        resend_jti = None
+        while attempt < attempts:
             if time.monotonic() >= deadline:
                 raise TransportFailure("route_unavailable", retryable=False)
+            detached = (
+                request_frame is not None
+                and destination in self._detached_destinations
+                and (route is not None or (self.sender is None and self._broker_framed))
+            )
+            payload = device_payload
+            if request_frame is not None:
+                payload = {k: v for k, v in dict(device_payload or {}).items() if k != "request_b64"}
+                payload.update(
+                    frame_digest(
+                        request_frame,
+                        max_bytes=MAX_DEVICE_RPC_REQUEST_FRAME_BYTES,
+                        code="request_too_large",
+                    )
+                    if detached
+                    else {
+                        "request_b64": encode_device_b64(
+                            request_frame,
+                            code="request_too_large",
+                            max_bytes=MAX_DEVICE_ACTION_REQUEST_BYTES,
+                        )
+                    }
+                )
             issued = self.issuer.issue(
                 local_account_id=local_account_id,
                 destination_deployment_id=destination_deployment_id,
@@ -593,21 +672,29 @@ class HomeFederationOutbound:
                 action=action,
                 request_id=logical_request_id,
                 code_name=code_name,
-                device_payload=device_payload,
+                device_payload=payload,
+                # A downgrade resend keeps the JTI: if the refusal was forged
+                # after the first form ran, the destination answers "replayed".
+                **({"jti": resend_jti} if resend_jti else {}),
             )
+            resend_jti = None
+            frame = request_frame if detached else b""
             try:
                 if route is not None:
                     received = self._dial(
-                        route, issued.grant, issued.request.json, deadline
+                        route, issued.grant, issued.request.json, deadline, frame
                     )
                 else:
-                    body = canonical_json(
-                        {
-                            "protocol_version": "2",
-                            "grant": issued.grant,
-                            "request_json": issued.request.json,
-                        }
-                    ).encode("utf-8")
+                    envelope = {
+                        "protocol_version": "2",
+                        "grant": issued.grant,
+                        "request_json": issued.request.json,
+                    }
+                    body = (
+                        pack_framed(envelope, frame)
+                        if detached
+                        else canonical_json(envelope).encode("utf-8")
+                    )
                     outer = self._broker_token(body)
                     received = (
                         self.sender(body, outer, deadline)
@@ -615,11 +702,26 @@ class HomeFederationOutbound:
                         else self.sender(body, outer)
                         if self.sender is not None
                         else self._send(
-                            body, outer, deadline, max_forward_response_bytes(action)
+                            body,
+                            outer,
+                            deadline,
+                            max_forward_response_bytes(action),
+                            accept_framed=action == "device_rpc",
+                            framed_body=detached,
                         )
                     )
+            except _FramedBodyRefused:
+                # Refused before broker auth and forwarding: the grant never
+                # left, so the legacy form is resent once.
+                self._broker_framed = False
+                if downgraded:
+                    raise TransportFailure("route_unavailable", retryable=False) from None
+                downgraded = True
+                resend_jti = issued.claims["jti"]
+                continue
             except (requests.RequestException, grpc.RpcError, TimeoutError, ConnectionError, OSError):
-                if attempt + 1 < attempts:
+                attempt += 1
+                if attempt < attempts:
                     continue
                 raise TransportFailure("route_unavailable", retryable=False) from None
             try:
@@ -630,9 +732,21 @@ class HomeFederationOutbound:
                 raise TransportFailure("invalid_transport_response", retryable=False) from None
             if response["error"] is not None:
                 if (
+                    detached
+                    and not downgraded
+                    and response["error"]["code"] == "invalid_grant"
+                ):
+                    # An old destination refuses a detached request before it
+                    # consumes the grant; resend the legacy form once.
+                    self._detached_destinations.discard(destination)
+                    downgraded = True
+                    resend_jti = issued.claims["jti"]
+                    continue
+                if (
                     response["error"]["retryable"]
                     and attempt + 1 < attempts
                 ):
+                    attempt += 1
                     continue
                 raise TransportFailure(
                     response["error"]["code"],
@@ -648,6 +762,16 @@ class HomeFederationOutbound:
                     exc.code,
                 )
                 raise TransportFailure("invalid_signed_result", retryable=False) from None
+            if action == "device_rpc" and result["status"] == "ok":
+                try:
+                    raw = device_response_frame(result["payload"], response.get("frame", b""))
+                except ValidationError:
+                    raise TransportFailure("invalid_signed_result", retryable=False) from None
+                if "frame_sha256" in result["payload"]:
+                    self._detached_destinations.add(destination)
+                result = {**result, "frame": raw}
+            elif response.get("frame"):
+                raise TransportFailure("invalid_signed_result", retryable=False)
             if result["status"] == "error":
                 raise OwnerSignedFailure(result)
             return result

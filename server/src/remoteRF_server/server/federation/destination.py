@@ -29,6 +29,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from remoterf_federation_core import (
     ACTION_CAPABILITIES,
     FEDERATION_RESULT_TYP,
+    MAX_DEVICE_RESULT_BYTES,
+    MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES,
     MAX_GRANT_TOKEN_BYTES,
     MAX_PROTOCOL_INTEGER,
     ContractError,
@@ -38,7 +40,10 @@ from remoterf_federation_core import (
     canonical_uuid,
     contract_terms_sha256,
     contract_allows,
+    device_request_frame,
     empty_device_payload,
+    encode_device_b64,
+    frame_digest,
     is_device_action,
     key_is_current,
     max_result_token_bytes,
@@ -176,6 +181,10 @@ class VerifiedAction:
     terms: object
     state: str
     prepared: object | None = None
+    # device_rpc: the raw GenericRPCRequest, verified against the signed request.
+    frame: bytes = b""
+    # The requester takes a detached device_rpc result plus its raw frame.
+    accept_detached: bool = False
 
 
 def error_response(code: str, *, retryable: bool = False) -> dict:
@@ -307,7 +316,7 @@ class ServerFederationExecutor:
         except (ContractError, ValueError, TypeError):
             raise FederationError("invalid_public_key") from None
 
-    def _prevalidate(self, protocol_version, grant, request_json):
+    def _prevalidate(self, protocol_version, grant, request_json, frame=b""):
         if protocol_version != "2":
             raise FederationError("unsupported_version")
         try:
@@ -357,7 +366,16 @@ class ServerFederationExecutor:
             raise FederationError("invalid_grant_time")
         if key_row["valid_until"] is not None and claims["exp"] > key_row["valid_until"]:
             raise FederationError("invalid_grant_time")
-        return request, claims, terms
+        # Before the JTI is consumed: a frame that does not match the signed
+        # request (or one an old-form request cannot carry) runs nothing.
+        if claims["action"] == "device_rpc":
+            try:
+                frame = device_request_frame(request.value["payload"], frame)
+            except ValidationError:
+                raise FederationError("invalid_grant") from None
+        elif frame != b"":
+            raise FederationError("invalid_grant")
+        return request, claims, terms, frame
 
     def _fresh_authorization(self, conn, claims):
         now = int(self.clock())
@@ -580,6 +598,9 @@ class ServerFederationExecutor:
         )
 
     def _ensure_result_fits_before_commit(self, conn, claims, result, now):
+        # Handlers stamp retrieved_at with their own, later clock read; a
+        # second boundary between the two must not reject the result.
+        now = max(now, int(self.clock()))
         if not now - 60 <= result["retrieved_at"] <= now:
             raise FederationError("invalid_result_snapshot_time")
         row = conn.execute(
@@ -660,6 +681,11 @@ class ServerFederationExecutor:
         now, not at authorization time.  A finalize failure becomes a
         destination-signed error; the grant JTI is already consumed either
         way, so the outcome is never ambiguous.
+
+        Returns ``(result, frame)``. A device_rpc finalize hands back its raw
+        response as ``{"frame": raw}``; it is signed by digest (detached, the
+        raw bytes travel beside the token) when the requester accepts that,
+        else base64 inside the token as before. ``frame`` is b"" otherwise.
         """
 
         finalize = getattr(handler, "finalize", None)
@@ -667,13 +693,31 @@ class ServerFederationExecutor:
             result["status"] == "error" and result["error_code"] == FINALIZE_PENDING
         )
         if not pending:
-            return result
+            return result, b""
         if not callable(finalize):
             return self._typed_error(
                 claims, state, "finalize_failed", int(self.clock())
-            )
+            ), b""
+        frame = b""
         try:
             candidate = finalize(verified, result)
+            payload = candidate.get("payload")
+            if type(payload) is dict and set(payload) == {"frame"}:
+                raw = payload["frame"]
+                if verified.accept_detached:
+                    frame = raw
+                    payload = frame_digest(
+                        raw,
+                        max_bytes=MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES,
+                        code="response_too_large",
+                    )
+                else:
+                    payload = {
+                        "response_b64": encode_device_b64(
+                            raw, code="response_too_large", max_bytes=MAX_DEVICE_RESULT_BYTES
+                        )
+                    }
+                candidate = {**candidate, "payload": payload}
             candidate = validate_action_result(
                 {**candidate, "retrieved_at": int(self.clock())},
                 action=claims["action"],
@@ -681,19 +725,30 @@ class ServerFederationExecutor:
             if candidate["error_code"] == FINALIZE_PENDING:
                 raise FederationError("finalize_incomplete")
         except FederationBusinessError as exc:
-            return self._typed_error(claims, state, exc.code, int(self.clock()))
+            return self._typed_error(claims, state, exc.code, int(self.clock())), b""
         except Exception:
             return self._typed_error(
                 claims, state, "finalize_failed", int(self.clock())
-            )
-        return candidate
+            ), b""
+        return candidate, frame
 
-    def execute(self, protocol_version: str, grant: str, request_json: str) -> dict:
-        """Return exactly one of signed_result/error; raw tokens are never logged."""
+    def execute(
+        self,
+        protocol_version: str,
+        grant: str,
+        request_json: str,
+        frame: bytes = b"",
+        accept_detached: bool = False,
+    ) -> dict:
+        """Return exactly one of signed_result/error; raw tokens are never logged.
+
+        A detached device_rpc result also carries ``frame``, the raw response
+        its signed digest covers.
+        """
 
         try:
-            request, claims, terms = self._prevalidate(
-                protocol_version, grant, request_json
+            request, claims, terms, frame = self._prevalidate(
+                protocol_version, grant, request_json, frame
             )
         except FederationError as exc:
             safe = exc.code if exc.code in {"unsupported_version", "contract_unknown"} else "invalid_grant"
@@ -710,7 +765,7 @@ class ServerFederationExecutor:
         ):
             try:
                 prepared = handler.prepare(
-                    VerifiedAction(claims, request, terms, "active")
+                    VerifiedAction(claims, request, terms, "active", frame=frame)
                 )
             except Exception:
                 return error_response("internal_error", retryable=False)
@@ -752,6 +807,8 @@ class ServerFederationExecutor:
                                         terms=current[1],
                                         state=state,
                                         prepared=prepared,
+                                        frame=frame,
+                                        accept_detached=bool(accept_detached),
                                     )
                                     candidate = handler(
                                         FederationActionTransaction(conn), verified
@@ -804,13 +861,15 @@ class ServerFederationExecutor:
         except Exception:
             return error_response("internal_error", retryable=False)
         pending = result["status"] == "error" and result["error_code"] == FINALIZE_PENDING
+        response_frame = b""
         if verified is not None and handler is not None:
-            result = self._finalize_after_commit(
+            result, response_frame = self._finalize_after_commit(
                 handler, verified, claims, state, result
             )
         try:
             try:
-                return self._sign_after_commit(claims, result)
+                signed = self._sign_after_commit(claims, result)
+                return {**signed, "frame": response_frame} if response_frame else signed
             except FederationError as exc:
                 # Only a post-commit observation can outgrow the pre-commit
                 # size check; it degrades to a stable signed error instead of
@@ -844,7 +903,11 @@ def register_grpc_federation(server, executor: ServerFederationExecutor | None =
             try:
                 response = (
                     executor.execute(
-                        request.protocol_version, request.grant, request.request_json
+                        request.protocol_version,
+                        request.grant,
+                        request.request_json,
+                        request.frame,
+                        request.accept_detached,
                     )
                     if executor is not None
                     else error_response("federation_disabled")
@@ -853,7 +916,9 @@ def register_grpc_federation(server, executor: ServerFederationExecutor | None =
                 RELAYED.reset(token)
             if response["signed_result"] is not None:
                 return pb.FederationResponse(
-                    protocol_version="2", signed_result=response["signed_result"]
+                    protocol_version="2",
+                    signed_result=response["signed_result"],
+                    frame=response.get("frame", b""),
                 )
             error = response["error"]
             return pb.FederationResponse(
