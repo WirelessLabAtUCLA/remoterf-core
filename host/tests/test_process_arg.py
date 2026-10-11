@@ -197,6 +197,13 @@ class ProcessArgTests(unittest.TestCase):
         np.testing.assert_allclose(mixed_unmapped[1], samples)
         self.assertEqual(mixed_unmapped[2], {"error_code": "none"})
 
+    def test_lists_that_stack_to_object_dtype_use_json_value(self) -> None:
+        for value in ([{"name": "dev0"}, {"name": "dev1"}], [{"name": "dev0"}], [None, 1]):
+            with self.subTest(value=value):
+                mapped = map_arg(value)
+                self.assertTrue(mapped.HasField("json_value"))
+                self.assertEqual(unmap_arg(mapped), value)
+
 
 if __name__ == "__main__":
     unittest.main()
