@@ -658,9 +658,11 @@ def test_an_oversized_reply_is_kept_for_its_caller_to_fetch_in_pages(world):
     assert page(0, "") == "device_unavailable"  # fetched once, then dropped
     assert len(world["rpc"].device_calls) == calls  # pages never touch the hardware
 
+    world["rpc"].response = {"rx": map_arg(bytes(range(256)) * 5000)}
+    world["call"]("device_rpc", local_device_id=device, request_b64=_frame("test:x:CALL0"))  # kept, never fetched
     world["rpc"].response = {"rx": map_arg(b"x" * (5 * 1024 * 1024))}
     world["call"]("device_rpc", local_device_id=device, request_b64=_frame("test:x:CALL0"))
-    assert page(0, "") == "device_unavailable"  # past 4 MiB: refused, not kept
+    assert page(0, "") == "device_unavailable"  # past 4 MiB: refused, and the older kept reply is gone
 
 
 def test_a_device_result_is_signed_once_and_outside_the_write_lock(world):

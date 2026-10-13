@@ -496,6 +496,9 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
                     for stale in [k for k, kept in self._kept.items() if kept[0] <= now]:
                         del self._kept[stale]
                     self._kept[key] = (now + PAGE_TTL_SECONDS, secrets.token_hex(8), encoded_raw)
+            else:
+                with self._kept_lock:
+                    self._kept.pop(key, None)  # never page an older reply as this one's
             raise FederationBusinessError("response_too_large")
         # The executor picks the wire form: detached digest or base64.
         return {
@@ -525,6 +528,8 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
             page = raw[offset:offset + PAGE_BYTES]
             if offset + len(page) == len(raw):
                 del self._kept[key]
+            else:
+                self._kept[key] = (self.clock() + PAGE_TTL_SECONDS, kept_nonce, raw)
         return {
             "page": map_arg(page),
             "size": map_arg(len(raw)),
