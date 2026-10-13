@@ -87,8 +87,35 @@ class FakeRtlSdr:
         self.closed = True
 
 
-def _bound_schema():
-    native = FakeRtlSdr()
+class PyRtlSdrLikeFake(FakeRtlSdr):
+    """pyrtlsdr 0.5.0: a failed read closes the device but keeps the freed
+    handle, and librtlsdr fails a read that ends mid USB packet."""
+
+    def __init__(self):
+        super().__init__()
+        self.device_opened = True
+        self.fail_next = False
+        self.reads = []
+
+    def read_bytes(self, count):
+        assert self.device_opened, "read through a freed librtlsdr handle (crashes the lab)"
+        self.reads.append(count)
+        if count % 512 or self.fail_next:
+            self.close()
+            raise OSError(f"Could not read {count} bytes")
+        return super().read_bytes(count)
+
+    def read_samples(self, count):
+        self.read_bytes(2 * count)
+        return super().read_samples(count)
+
+    def close(self):
+        super().close()
+        self.device_opened = False
+
+
+def _bound_schema(native=None):
+    native = native or FakeRtlSdr()
     adapter = _RtlSdrAdapter(
         native,
         device_index=2,
@@ -164,6 +191,24 @@ class RtlSdrSchemaTests(unittest.TestCase):
         self.assertEqual(len(schema.dispatch("call_read_bytes", {"num_bytes": 17})), 17)
         schema.dispatch("call_reset_buffer", {})
         self.assertEqual(native.reset_count, 1)
+
+    def test_unaligned_reads_and_a_self_closed_device_never_reach_the_freed_handle(self):
+        # 2026-10-13 E2E B1: read_samples(98000) closed the device, the next read crashed rrf2.
+        native = PyRtlSdrLikeFake()
+        schema, _adapter, _native = _bound_schema(native)
+
+        self.assertEqual(schema.dispatch("call_read_samples", {"num_samples": 98000}).shape, (98000,))
+        self.assertEqual(len(schema.dispatch("call_read_bytes", {"num_bytes": 17})), 17)
+        self.assertEqual(native.reads, [196096, 512])
+
+        native.fail_next = True
+        with self.assertRaises(OSError):
+            schema.dispatch("call_read_samples", {"num_samples": 98304})
+        for call, args in (("call_read_samples", {"num_samples": 98304}), ("call_read_bytes", {"num_bytes": 512})):
+            with self.subTest(call=call), self.assertRaisesRegex(RuntimeError, "closed"):
+                schema.dispatch(call, args)
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            schema.dispatch("get_center_freq", {})
 
     def test_capture_limits_prevent_unbounded_rpc_payloads(self):
         schema, _adapter, _native = _bound_schema()
