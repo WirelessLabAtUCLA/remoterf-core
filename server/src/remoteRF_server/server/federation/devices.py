@@ -19,7 +19,9 @@ replayed because the grant's JTI was already consumed.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from datetime import datetime
@@ -36,7 +38,7 @@ from remoterf_federation_core import (
 )
 
 from ...common.grpc import grpc_pb2
-from ...common.utils import map_arg
+from ...common.utils import map_arg, unmap_arg
 from .destination import FINALIZE_PENDING, FederationBusinessError
 from .migrations import configure_connection, migrate_gate_h_reservations_schema
 
@@ -51,6 +53,15 @@ MAX_DEVICE_RPC_RESPONSE_BYTES = MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES
 # anyone who knows a device id, so gating it on local visibility is
 # strictly tighter, not looser.
 IDL_FUNCTION = "IDL:get_drivers"
+
+# A reply too large for the relay (an RX of 131072 complex64 samples is 1 MiB)
+# is kept briefly for its caller, who fetches it in pages with PAGE_FUNCTION
+# (arg1 offset, arg2 the nonce of its first page). The relay still answers the
+# original call with response_too_large, so an older Client sees no change.
+PAGE_FUNCTION = "Federation:page:CALL2"
+MAX_PAGED_RESPONSE_BYTES = 4 * 1024 * 1024 + 65536
+PAGE_BYTES = MAX_DEVICE_RPC_RESPONSE_FRAME_BYTES - 4096
+PAGE_TTL_SECONDS = 30
 
 
 def run_bound_rpc(rpc_manager, *, device_id: int, function_name: str, args) -> dict:
@@ -386,6 +397,14 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
 
     IDL_FUNCTION = IDL_FUNCTION
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # (issuer, remote subject, device) -> (expires, nonce, raw response)
+        # ponytail: one kept reply per caller and device; a second oversized
+        # call before the first is fetched replaces it (the nonce catches that).
+        self._kept = {}
+        self._kept_lock = threading.Lock()
+
     @staticmethod
     def _parse_frame(action):
         # action.frame was decoded (legacy) or hash-checked (detached) and
@@ -452,17 +471,27 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
         payload = action.request.value["payload"]
         device_id = int(payload["local_device_id"])
         function_name, args = self._parse_frame(action)
+        key = (action.claims["iss"], action.claims["sub"], device_id)
 
-        try:
-            results = run_bound_rpc(
-                self.rpc, device_id=device_id, function_name=function_name, args=args
-            )
-        except Exception:
-            raise FederationBusinessError("device_unavailable") from None
+        if function_name == PAGE_FUNCTION:
+            results = self._page(key, args)
+        else:
+            try:
+                results = run_bound_rpc(
+                    self.rpc, device_id=device_id, function_name=function_name, args=args
+                )
+            except Exception:
+                raise FederationBusinessError("device_unavailable") from None
 
         response = grpc_pb2.GenericRPCResponse(results=results)
         encoded_raw = response.SerializeToString()
         if len(encoded_raw) > MAX_DEVICE_RPC_RESPONSE_BYTES:
+            if len(encoded_raw) <= MAX_PAGED_RESPONSE_BYTES:
+                now = self.clock()
+                with self._kept_lock:
+                    for stale in [k for k, kept in self._kept.items() if kept[0] <= now]:
+                        del self._kept[stale]
+                    self._kept[key] = (now + PAGE_TTL_SECONDS, secrets.token_hex(8), encoded_raw)
             raise FederationBusinessError("response_too_large")
         # The executor picks the wire form: detached digest or base64.
         return {
@@ -470,6 +499,32 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
             "status": "ok",
             "error_code": None,
             "payload": {"frame": encoded_raw},
+        }
+
+    def _page(self, key, args):
+        try:
+            offset = unmap_arg(args["arg1"])
+            nonce = unmap_arg(args["arg2"])
+        except Exception:
+            raise FederationBusinessError("device_unavailable") from None
+        with self._kept_lock:
+            kept = self._kept.get(key)
+            if (
+                kept is None
+                or kept[0] <= self.clock()
+                or type(offset) is not int
+                or not (0 <= offset < len(kept[2]))
+                or nonce != (kept[1] if offset else "")
+            ):
+                raise FederationBusinessError("device_unavailable")
+            _expires, kept_nonce, raw = kept
+            page = raw[offset:offset + PAGE_BYTES]
+            if offset + len(page) == len(raw):
+                del self._kept[key]
+        return {
+            "page": map_arg(page),
+            "size": map_arg(len(raw)),
+            "nonce": map_arg(kept_nonce),
         }
 
 

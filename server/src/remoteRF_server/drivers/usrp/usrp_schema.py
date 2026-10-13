@@ -27,6 +27,9 @@ c = idl_client
 
 import itertools
 import os
+import subprocess
+import sys
+import threading
 
 
 def _configure_uhd_console_logging():
@@ -114,8 +117,7 @@ def _remote_transport_args(value):
     return f"{args},{setting}" if args else setting
 
 
-def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
-    uhd_module = _require_uhd()
+def _usrp_args(args=None, serial=None, addr=None, **kwargs):
     args = args or kwargs.pop("device_args", None) or kwargs.pop("init_args", None)
     type_hint = kwargs.pop("type", None) or kwargs.pop("device_type", None)
     profile_name = kwargs.pop("profile", None)
@@ -165,8 +167,53 @@ def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
         if profile.uhd_device_type and "type" not in arg_keys:
             args = f"type={profile.uhd_device_type},{arg_text}"
 
-    args = _remote_transport_args(args)
+    return _remote_transport_args(args)
+
+
+# A cold B2xx open (firmware + FPGA image) took ~68 s inside MultiUSRP(),
+# which holds the GIL, so the whole lab stopped answering. A child process
+# pays that instead while this one waits without the GIL; the open after it
+# is warm (~2.5 s).
+# ponytail: "warm" is per process; a USB replug while the Server runs makes
+# the next open cold in-process again. Clear the mark on hotplug if that bites.
+_PRELOAD_TIMEOUT = 180.0
+_preloaded = set()
+_preload_locks = {}
+_preload_guard = threading.Lock()
+
+
+def _preload_image(args):
+    if str(os.getenv("REMOTERF_USRP_PRELOAD", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return
+    with _preload_guard:
+        lock = _preload_locks.setdefault(args, threading.Lock())
+    # One device, one driver at a time: an open waits here for a pre-load.
+    with lock:
+        if args in _preloaded:
+            return
+        try:
+            done = subprocess.run(
+                [sys.executable, "-c", "import sys, uhd; uhd.usrp.MultiUSRP(sys.argv[1])", args],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_PRELOAD_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"Warning: USRP image pre-load for {args!r} failed: {exc}")
+            return
+        if done.returncode == 0:
+            _preloaded.add(args)
+        else:
+            print(f"Warning: USRP image pre-load for {args!r} exited {done.returncode}")
+
+
+def _connect_usrp(args=None, serial=None, addr=None, **kwargs):
+    uhd_module = _require_uhd()
+    args = _usrp_args(args, serial, addr, **kwargs)
+    _preload_image(args)
     dev = uhd_module.usrp.MultiUSRP(args)
+    _preloaded.add(args)
     return dev
 
 
@@ -617,6 +664,11 @@ class UsrpSchema(DeviceSchema):
 
     def open_native_device(self):
         return _connect_usrp(**self._inventory)
+
+    def prepare_for_holder(self):
+        """A reservation started: load a cold image now, not in the holder's open."""
+        if uhd is not None:
+            _preload_image(_usrp_args(**self._inventory))
 
     def create_session_schema(self):
         """Create an isolated, live adapter for one authenticated reservation."""
