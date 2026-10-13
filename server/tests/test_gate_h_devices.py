@@ -625,6 +625,44 @@ def test_finalize_failures_become_destination_signed_errors(world):
         ).fetchone() == (3,)
 
 
+
+def test_an_oversized_reply_is_kept_for_its_caller_to_fetch_in_pages(world):
+    world["enroll"](devices=[world["allowed"]])
+    start, end = _window(-5)
+    world["call"](
+        "device_reserve", local_device_id=str(world["allowed"]),
+        start_time=start, end_time=end,
+    )
+    device = str(world["allowed"])
+    world["rpc"].response = {"rx": map_arg(bytes(range(256)) * 5000)}  # 1.28 MB
+    whole = grpc_pb2.GenericRPCResponse(results=world["rpc"].response).SerializeToString()
+
+    def page(offset, nonce):
+        result, _ = world["call"](
+            "device_rpc", local_device_id=device,
+            request_b64=_frame("Federation:page:CALL2", arg1=offset, arg2=nonce),
+        )
+        return _decode(result["payload"]["response_b64"]) if result["status"] == "ok" else result["error_code"]
+
+    oversized, _ = world["call"](
+        "device_rpc", local_device_id=device, request_b64=_frame("test:x:CALL0"),
+    )
+    assert oversized["error_code"] == "response_too_large"  # unchanged for older Clients
+    calls = len(world["rpc"].device_calls)
+
+    first = page(0, "")
+    assert first["size"] == len(whole) and len(first["page"]) < len(whole)
+    assert page(len(first["page"]), "not-the-nonce") == "device_unavailable"
+    rest = page(len(first["page"]), first["nonce"])
+    assert first["page"] + rest["page"] == whole
+    assert page(0, "") == "device_unavailable"  # fetched once, then dropped
+    assert len(world["rpc"].device_calls) == calls  # pages never touch the hardware
+
+    world["rpc"].response = {"rx": map_arg(b"x" * (5 * 1024 * 1024))}
+    world["call"]("device_rpc", local_device_id=device, request_b64=_frame("test:x:CALL0"))
+    assert page(0, "") == "device_unavailable"  # past 4 MiB: refused, not kept
+
+
 def test_a_device_result_is_signed_once_and_outside_the_write_lock(world):
     world["enroll"](devices=[world["allowed"]])
     start, end = _window(-5)
