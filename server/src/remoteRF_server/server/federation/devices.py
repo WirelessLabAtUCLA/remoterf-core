@@ -19,6 +19,7 @@ replayed because the grant's JTI was already consumed.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from contextlib import closing
@@ -39,6 +40,8 @@ from ...common.grpc import grpc_pb2
 from ...common.utils import map_arg
 from .destination import FINALIZE_PENDING, FederationBusinessError
 from .migrations import configure_connection, migrate_gate_h_reservations_schema
+
+logger = logging.getLogger(__name__)
 
 # Raw protobuf ceilings: what survives the legacy base64 round trip, and the
 # same for a detached frame.
@@ -458,6 +461,7 @@ class ServerDeviceRpcHandler(_DeviceHandlerBase):
                 self.rpc, device_id=device_id, function_name=function_name, args=args
             )
         except Exception:
+            logger.warning("federated call %s on device %s failed", function_name[:200], device_id, exc_info=True)
             raise FederationBusinessError("device_unavailable") from None
 
         response = grpc_pb2.GenericRPCResponse(results=results)

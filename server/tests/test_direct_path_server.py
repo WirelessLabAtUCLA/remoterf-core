@@ -25,6 +25,7 @@ from unittest import mock
 
 from aioice import Candidate
 
+from remoteRF_server.common.grpc import grpc_pb2
 from remoteRF_server.common.utils.process_arg import unmap_arg
 from remoteRF_server.server import direct_path
 
@@ -125,6 +126,62 @@ class OfferHoldTests(unittest.TestCase):
     def test_a_racing_offer_gets_the_short_hold(self):
         self.assertEqual(self._hold_for({"ufrag": "a", "pwd": "b", "candidates": [], "race": True}), direct_path.RACE_HOLD_SECONDS)
         self.assertLess(direct_path.RACE_HOLD_SECONDS, 0.5)  # under the client's first retransmit
+
+
+class _Writer:
+    def write(self, data):
+        pass
+
+    def write_eof(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class RefusedCallTests(unittest.TestCase):
+    """A call refused on a bound path (the reservation ended) drops the path
+    from inside its own stream (2026-10-13 E2E B4)."""
+
+    def test_a_refused_call_closes_the_path_without_recursing(self):
+        class StillPunching(_FakeIce):
+            def __init__(self):
+                super().__init__()
+                self.closed = False
+
+            async def connect(self):
+                await asyncio.Event().wait()
+
+            async def close(self):
+                self.closed = True
+
+        def refuse(*args):
+            raise direct_path.PathRefused("invalid_device_token")
+
+        async def go():
+            errors = []
+            asyncio.get_running_loop().set_exception_handler(lambda loop, context: errors.append(context))
+            ice = StillPunching()
+            path = direct_path._Path("k", "tester", ice, bound={})
+            direct_path._paths["k"] = path
+            path.task = asyncio.ensure_future(path.run())
+            await asyncio.sleep(0.05)
+            reader = asyncio.StreamReader()
+            request = grpc_pb2.GenericRPCRequest(function_name="Adalm_pluto:ip:CALL0")
+            reader.feed_data(direct_path.frame(request.SerializeToString()))
+            reader.feed_eof()
+            path.peer = ("192.0.2.1", 1)
+            path._stream(reader, _Writer())
+            await asyncio.sleep(0.5)
+            return path, ice, errors
+
+        with mock.patch.object(direct_path, "_dispatch", refuse):
+            path, ice, errors = asyncio.run(go())
+        self.assertEqual(errors, [])
+        self.assertTrue(path.task.done())
+        self.assertFalse(path.streams)
+        self.assertNotIn("k", direct_path._paths)
+        self.assertTrue(ice.closed)
 
 
 if __name__ == "__main__":

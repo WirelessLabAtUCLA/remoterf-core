@@ -25,6 +25,13 @@ from remoteRF_server.common.idl import DeviceSchema, idl_expose, idl_register
 
 _MAX_REMOTE_PAYLOAD_BYTES = 4 * 1024 * 1024
 _MAX_COMPLEX64_SAMPLES = _MAX_REMOTE_PAYLOAD_BYTES // np.dtype(np.complex64).itemsize
+# librtlsdr's synchronous read fails on a partial USB packet, and pyrtlsdr then
+# closes the device but keeps its freed handle: read whole packets and slice.
+_USB_PACKET_BYTES = 512
+
+
+def _whole_packets(num_bytes: int) -> int:
+    return -(-num_bytes // _USB_PACKET_BYTES) * _USB_PACKET_BYTES
 
 def _require_rtlsdr():
     try:
@@ -151,7 +158,8 @@ class RtlSdrSchema(DeviceSchema):
     @property
     def _native(self):
         native = getattr(self.device, "native", None)
-        if native is None:
+        # pyrtlsdr closes itself on a failed read; its handle is freed then.
+        if native is None or getattr(native, "device_opened", True) is False:
             raise RuntimeError("RTL-SDR device is closed")
         return native
 
@@ -319,7 +327,8 @@ class RtlSdrSchema(DeviceSchema):
             label="num_samples",
             maximum=_MAX_COMPLEX64_SAMPLES,
         )
-        samples = np.asarray(self._native.read_samples(count), dtype=np.complex64)
+        read = _whole_packets(2 * count) // 2
+        samples = np.asarray(self._native.read_samples(read), dtype=np.complex64)[:count]
         if samples.size != count:
             raise RuntimeError(
                 f"short RTL-SDR read: requested {count}, received {samples.size}"
@@ -334,7 +343,7 @@ class RtlSdrSchema(DeviceSchema):
             label="num_bytes",
             maximum=_MAX_REMOTE_PAYLOAD_BYTES,
         )
-        payload = bytes(self._native.read_bytes(count))
+        payload = bytes(self._native.read_bytes(_whole_packets(count)))[:count]
         if len(payload) != count:
             raise RuntimeError(
                 f"short RTL-SDR byte read: requested {count}, received {len(payload)}"

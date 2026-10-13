@@ -410,8 +410,12 @@ class _Path:
         if _paths.get(self.key) is self:
             del _paths[self.key]
         task = self.task
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
+        current = asyncio.current_task()
+        if task is not None and task is not current:
+            if task.cancel() and current in self.streams:
+                # run()'s finally closes the rest; a stream awaiting run() while
+                # run() cancels the streams makes Task.cancel recurse forever.
+                return
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await cancel_tasks(list(self.streams))
