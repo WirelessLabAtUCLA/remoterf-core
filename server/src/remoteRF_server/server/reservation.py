@@ -168,6 +168,22 @@ class ReservationHandler:
         CREATE INDEX IF NOT EXISTS idx_reservations_device_id ON Reservations(device_id);
         ''')
 
+        # Cumulative reserved seconds, kept by triggers because expired rows are
+        # purged. A cancel gives back the unused remainder, so only time actually
+        # held counts. Reported to Global as `reserved_s`.
+        self.cursor.executescript('''
+        CREATE TABLE IF NOT EXISTS ReservedTotal (id INTEGER PRIMARY KEY CHECK (id = 1), seconds REAL NOT NULL);
+        INSERT OR IGNORE INTO ReservedTotal
+            SELECT 1, COALESCE(SUM((julianday(end_time) - julianday(start_time)) * 86400), 0) FROM Reservations;
+        CREATE TRIGGER IF NOT EXISTS reserved_total_ins AFTER INSERT ON Reservations BEGIN
+            UPDATE ReservedTotal SET seconds = seconds + (julianday(NEW.end_time) - julianday(NEW.start_time)) * 86400;
+        END;
+        CREATE TRIGGER IF NOT EXISTS reserved_total_del AFTER DELETE ON Reservations BEGIN
+            UPDATE ReservedTotal SET seconds = seconds - MAX(0,
+                (julianday(OLD.end_time) - julianday(MAX(OLD.start_time, datetime('now', 'localtime')))) * 86400);
+        END;
+        ''')
+
         # "Stay logged in" for the deployment protocol: a random token the
         # client keeps instead of the password. Only its hash lives here, so
         # the table reveals nothing; a row is revoked by logout or purge.

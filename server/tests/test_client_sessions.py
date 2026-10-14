@@ -98,3 +98,25 @@ class ClientSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReservedTotalTests(unittest.TestCase):
+    def test_total_survives_purge_and_refunds_unused_time_on_cancel(self):
+        import sqlite3
+        from datetime import datetime, timedelta
+        from remoteRF_server.server import reservation
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(reservation, "get_db_dir", return_value=Path(tmp)):
+            reservation.ReservationHandler()
+            db = sqlite3.connect(Path(tmp) / "reservations.db")
+            now = datetime.now()
+            add = "INSERT INTO Reservations (username, device_id, start_time, end_time, salt, hash) VALUES ('u', 1, ?, ?, '', '')"
+            total = lambda: db.execute("SELECT seconds FROM ReservedTotal").fetchone()[0]
+            db.execute(add, (now - timedelta(hours=3), now - timedelta(hours=2)))  # 1 h, past
+            db.execute(add, (now + timedelta(hours=1), now + timedelta(hours=3)))  # 2 h, future
+            self.assertAlmostEqual(total(), 3 * 3600, delta=1)
+            db.execute("DELETE FROM Reservations WHERE end_time < ?", (now,))  # purge: no change
+            self.assertAlmostEqual(total(), 3 * 3600, delta=1)
+            db.execute("DELETE FROM Reservations")  # cancel the future one: unused 2 h refunded
+            self.assertAlmostEqual(total(), 3600, delta=2)

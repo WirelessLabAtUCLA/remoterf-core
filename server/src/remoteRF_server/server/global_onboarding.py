@@ -60,8 +60,8 @@ cluster). Joining Global shares none of your hardware on its own.
 
 Once an hour it sends Global a short note: this deployment's name and
 ID, version, uptime, how many accounts (and how many visit from partner
-labs), what devices it has, how many reservations are active, and your
-LAN address. Nothing else leaves your
+labs), what devices it has, how many reservations are active, the total
+time reserved so far (a single number), and your LAN address. Nothing else leaves your
 server -- no credentials, no user or reservation details -- and the
 connection only goes outward.
 
@@ -705,6 +705,7 @@ STATUS_FIELDS = frozenset(
         "proxies",
         "devices",
         "active_reservations",
+        "reserved_s",
         "lan_address",
         "cert_sha256",
     }
@@ -781,9 +782,10 @@ def cert_sha256() -> Optional[str]:
 
 
 def status_payload() -> dict:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat()
+    # Reservations store local time as 'YYYY-MM-DD HH:MM:SS' text; compare in that form.
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     reservations = _db_dir() / "reservations.db"
     payload = {
         "server_version": server_version(),
@@ -797,6 +799,7 @@ def status_payload() -> dict:
             "SELECT COUNT(*) FROM Reservations WHERE start_time <= ? AND end_time > ?",
             (now, now),
         ),
+        "reserved_s": _count(reservations, "SELECT CAST(ROUND(seconds) AS INTEGER) FROM ReservedTotal"),
         "lan_address": lan_endpoint(),
         "cert_sha256": cert_sha256(),
     }
@@ -820,8 +823,8 @@ def send_status() -> None:
     except GlobalError as exc:
         if exc.code != "invalid_status":
             raise
-        # A Global older than `proxies` takes the note as it was before.
-        call("POST", REPORT_PATH, {"kind": "status", "status": {k: v for k, v in payload.items() if k != "proxies"}})
+        # A Global older than `proxies`/`reserved_s` takes the note as it was before.
+        call("POST", REPORT_PATH, {"kind": "status", "status": {k: v for k, v in payload.items() if k not in ("proxies", "reserved_s")}})
     update(GLOBAL_LAST_REPORT_AT=datetime.now(timezone.utc).isoformat())
 
 

@@ -66,13 +66,20 @@ def test_five_concurrent_clients_on_one_owner_and_nothing_leaks(federated):
         assert await _gone()
 
     asyncio.run(round_trip("first"))
-    gc.collect()  # the executor's error paths leave connections to the collector
-    first = _open_fds()
-    asyncio.run(round_trip("second"))
-    gc.collect()
-    second = _open_fds()
-    assert len(fed["rpc"].device_calls) == 2 * CLIENTS * CALLS
-    assert second <= first + 2, (first, second)  # nothing per round is left behind
+    # Pool threads start lazily and open their handler connections on first
+    # use, so warm-up can spill into a later round. It is bounded; a leak grows
+    # every round: some round must add (almost) nothing.
+    deltas = []
+    for tag in ("second", "third", "fourth", "fifth"):
+        gc.collect()  # the executor's error paths leave connections to the collector
+        before = _open_fds()
+        asyncio.run(round_trip(tag))
+        gc.collect()
+        deltas.append(_open_fds() - before)
+        if deltas[-1] <= 2:
+            break
+    assert len(fed["rpc"].device_calls) == (len(deltas) + 1) * CLIENTS * CALLS
+    assert deltas[-1] <= 2, deltas  # nothing per round is left behind
     direct_path.shutdown()
     deadline = time.monotonic() + 5
     while _direct_threads() and time.monotonic() < deadline:

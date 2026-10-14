@@ -467,8 +467,8 @@ class StatusReportTests(TunnelTests):
             conn.executemany(
                 "INSERT INTO Reservations VALUES (?,?,?,?)",
                 [
-                    ("a", 0, "2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00"),
-                    ("b", 1, "2000-01-01T00:00:00+00:00", "2000-01-02T00:00:00+00:00"),
+                    ("a", 0, "2000-01-01 00:00:00", "2999-01-01 00:00:00"),
+                    ("b", 1, "2000-01-01 00:00:00", "2000-01-02 00:00:00"),
                 ],
             )
         (g.cfg_dir() / "devices.yml").write_text(
@@ -525,7 +525,7 @@ class StatusReportTests(TunnelTests):
 
         with mock.patch.object(g, "call", side_effect=old_global):
             g.send_status()
-        self.assertEqual(sent, [set(g.STATUS_FIELDS), set(g.STATUS_FIELDS) - {"proxies"}])
+        self.assertEqual(sent, [set(g.STATUS_FIELDS), set(g.STATUS_FIELDS) - {"proxies", "reserved_s"}])
 
     def test_reports_only_flow_once_active(self):
         self.join()
