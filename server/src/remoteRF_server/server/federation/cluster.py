@@ -51,10 +51,11 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from remoterf_federation_core import ContractError, FederationError, TransportFailure, canonical_json
+from remoterf_federation_core import ContractError, FederationError, OwnerSignedFailure, TransportFailure, canonical_json
 
 from .. import global_onboarding as g
 from .contracts import ContractStore
+from .enrollment import UNENROLL_CODE
 from .migrations import migrate_gate_f_usergroups_schema
 from .trust import TrustedKeyStore
 
@@ -760,9 +761,9 @@ def admit_account(home, local_account_id: int) -> None:
 
 
 def forget_account(local_account_id: int | None = None) -> None:
-    """A deleted account leaves every cluster, grants and all, so the tick
-    stops trying to enrol a ghost. None: every account (a purge)."""
-    where, args = ("local_account_id=? AND kind='local'", (int(local_account_id),)) if local_account_id is not None else ("1", ())
+    """A deleted account (native or proxy) leaves every cluster, grants and
+    all, so the tick stops trying to enrol a ghost. None: every account (a purge)."""
+    where, args = ("local_account_id=?", (int(local_account_id),)) if local_account_id is not None else ("1", ())
     with _usergroups() as conn:
         rows = conn.execute(f"SELECT DISTINCT cluster_name, local_account_id FROM ClusterAccounts WHERE {where}", args).fetchall()
         for name, account in rows:
@@ -861,6 +862,33 @@ def redeem_code(local_account_id: int, code_name: str) -> Optional[str]:
 
 _ENROL_RETRY_FIRST, _ENROL_RETRY_CAP = 30.0, 600.0
 _unreachable: dict[str, tuple[float, float]] = {}  # peer -> (retry_at, delay), monotonic
+_revoke_retry: dict[str, tuple[float, float]] = {}  # same, for unenrols
+REVOCATION_TTL = 180 * 86400  # an unenrol for a partner we hold no contract with waits this long
+
+
+def _back_off(table: dict, peer: str) -> None:
+    delay = min(table.get(peer, (0.0, _ENROL_RETRY_FIRST / 2))[1] * 2, _ENROL_RETRY_CAP)
+    table[peer] = (time.monotonic() + delay, delay)
+
+
+def _forget_departed(plane) -> None:
+    """Drop enrolment records at partners we no longer hold a live contract
+    with: that partner may prune our users as "issuer gone", and on a rejoin
+    the next tick enrols everyone again (an existing proxy just stays)."""
+    if getattr(plane, "path", None) is None:
+        return
+    try:
+        with _usergroups() as conn:
+            live = {deployment for row in conn.execute(
+                "SELECT deployment_a, deployment_b FROM FederationContracts "
+                "WHERE state='active' AND superseded_by_version IS NULL") for deployment in row}
+        with closing(sqlite3.connect(plane.path, timeout=10.0)) as conn, conn:
+            peers = [row[0] for row in conn.execute("SELECT DISTINCT destination_deployment_id FROM FederatedEnrollments")]
+            for peer in peers:
+                if peer not in live:
+                    conn.execute("DELETE FROM FederatedEnrollments WHERE destination_deployment_id=?", (peer,))
+    except sqlite3.OperationalError:
+        pass  # no contracts or HOME device plane here yet
 
 
 def enroll_students(home, notify=None, *, only_account: int | None = None) -> None:
@@ -870,6 +898,7 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
     enroller, plane = getattr(home, "federation_enroller", None), getattr(home, "federation_devices", None)
     if enroller is None or plane is None:
         return
+    _forget_departed(plane)
     clusters = load()
     with _usergroups() as conn:
         rows = conn.execute(
@@ -889,6 +918,7 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
                 continue  # a lab nobody chose gets our accounts only once it shares a device
             if _unreachable.get(peer, (0.0, 0.0))[0] > time.monotonic():
                 continue  # unreachable a moment ago: back off rather than redial every tick
+            subject = _subject_of(plane, account)
             try:
                 enroller.outbound.execute(
                     local_account_id=account, destination_deployment_id=peer,
@@ -897,13 +927,76 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
                 )
             except (FederationError, OSError) as exc:
                 if isinstance(exc, TransportFailure) and exc.code == "route_unavailable":
-                    delay = min(_unreachable.get(peer, (0.0, _ENROL_RETRY_FIRST / 2))[1] * 2, _ENROL_RETRY_CAP)
-                    _unreachable[peer] = (time.monotonic() + delay, delay)
+                    _back_off(_unreachable, peer)
                 notify(f"[cluster] {name}: could not enrol account {account} at "
                        f"{party.get('display_name') or peer}: {getattr(exc, 'code', exc)}")
                 continue
             _unreachable.pop(peer, None)
             plane.record_enrollment(local_account_id=account, destination_deployment_id=peer)
+            if subject and _subject_of(plane, account) is None:
+                # Deleted while the enrolment was in flight: its delete queued
+                # nothing for this peer, so queue the unenrol here.
+                with closing(sqlite3.connect(plane.path, timeout=10.0)) as conn, conn:
+                    conn.execute("INSERT OR IGNORE INTO FederatedRevocations VALUES (?,?,?)",
+                                 (subject, peer, int(time.time())))
+                    conn.execute("DELETE FROM FederatedEnrollments WHERE local_account_id=?", (account,))
+
+
+def _subject_of(plane, account: int) -> str | None:
+    if getattr(plane, "path", None) is None:
+        return None
+    with closing(sqlite3.connect(plane.path, timeout=10.0)) as conn:
+        row = conn.execute("SELECT subject_id FROM LocalAccountSubjects WHERE local_account_id=?",
+                           (account,)).fetchone()
+    return row[0] if row else None
+
+
+def deliver_revocations(home, notify=None) -> None:
+    """HOME: tell each partner a deleted account was enrolled at to drop its
+    proxy. A row stays until the partner answers; an older partner answers
+    code_invalid (keeps its orphan). A partner we hold no contract with right
+    now (left, kicked, past the candidate cap) keeps its row until it is back
+    or REVOCATION_TTL runs out."""
+    notify = notify or (lambda text: None)
+    enroller, plane = getattr(home, "federation_enroller", None), getattr(home, "federation_devices", None)
+    if enroller is None or plane is None:
+        return
+    path = _db_path().with_name("reservations.db")
+    try:
+        with closing(sqlite3.connect(path, timeout=10.0)) as conn:
+            rows = conn.execute("SELECT subject_id, destination_deployment_id, queued_at FROM FederatedRevocations").fetchall()
+    except sqlite3.OperationalError:
+        return  # no HOME device plane here yet
+    if not rows:
+        return
+    contracts = {}
+    for candidate in plane.permissions._candidates(int(plane.clock()), "FEDERATED_ENROLL")[0]:
+        contracts.setdefault(candidate["deployment_id"], candidate)
+    now = time.time()
+    for subject, peer, queued_at in rows:
+        contract = contracts.get(peer)
+        if contract is None:
+            if int(queued_at) > now - REVOCATION_TTL:
+                continue  # no contract right now: wait for one, the TTL lets go of a partner that is gone
+        else:
+            if _revoke_retry.get(peer, (0.0, 0.0))[0] > time.monotonic():
+                continue  # failed a moment ago: skip this peer's rows until the backoff runs out
+            try:
+                enroller.outbound.execute(
+                    local_account_id=None, revoked_subject_id=subject, destination_deployment_id=peer,
+                    contract_id=contract["contract_id"], contract_version=contract["contract_version"],
+                    action="federated_enroll", code_name=UNENROLL_CODE,
+                )
+            except (FederationError, OSError) as exc:
+                # code_invalid (signed): a partner too old to know the code keeps its orphan.
+                if not (isinstance(exc, OwnerSignedFailure) and exc.code == "code_invalid"):
+                    _back_off(_revoke_retry, peer)
+                    notify(f"[cluster] could not remove a deleted account at {peer}: {getattr(exc, 'code', exc)}")
+                    continue
+            _revoke_retry.pop(peer, None)
+        with closing(sqlite3.connect(path, timeout=10.0)) as conn, conn:
+            conn.execute("DELETE FROM FederatedRevocations WHERE subject_id=? AND destination_deployment_id=?",
+                         (subject, peer))
 
 
 # -----------------------------
@@ -1183,6 +1276,8 @@ def tick(notify=None, home=None) -> None:
     """One agent pass: move every cluster and member one step closer to active,
     then (given the HOME runtime) enrol students wherever they are missing."""
     notify = notify or (lambda text: None)
+    if home is not None:
+        deliver_revocations(home, notify)
     # Rosters, status notes and the public clusters: one GET for the whole pass.
     board = g.call("GET", "/v2/broker/clusters/roster")
     _walk_in(board.get("pools", []), notify)

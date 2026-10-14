@@ -27,6 +27,9 @@ from remoterf_federation_core import (
 from .destination import ActionRegistry, FederationBusinessError, ServerFederationExecutor
 
 CLUSTER_CODE = "cluster"
+# A HOME that deleted the account tells each partner to drop its proxy. The
+# `cluster.` prefix is reserved and minted codes are uppercase: no collision.
+UNENROLL_CODE = "cluster.unenroll"
 from .migrations import configure_connection, migrate_gate_f_usergroups_schema
 from .principals import PreparedFederatedAccount, prepare_federated_account
 
@@ -310,6 +313,7 @@ class ServerFederatedEnrollHandler:
         perms_path=None,
         clock=None,
         account_preparer=prepare_federated_account,
+        account_remover=None,
     ):
         self.usergroups_path = Path(usergroups_path)
         self.reservations_path = Path(reservations_path)
@@ -318,6 +322,7 @@ class ServerFederatedEnrollHandler:
         self.display_name = str(display_name)
         self.clock = clock or (lambda: int(time.time()))
         self.account_preparer = account_preparer
+        self.account_remover = account_remover or _remove_account
         with sqlite3.connect(self.usergroups_path) as conn:
             migrate_gate_f_usergroups_schema(conn)
 
@@ -325,6 +330,18 @@ class ServerFederatedEnrollHandler:
         """Never mutates owner authorization; invalid cases wait for owner tx."""
         claims = action.claims
         payload = action.request.value["payload"]
+        if payload["code_name"] == UNENROLL_CODE:
+            # Runs only for a verified, current grant, and only ever touches
+            # the grant's own (iss, sub): a lab can revoke nobody else's users.
+            with sqlite3.connect(self.reservations_path) as conn:
+                row = conn.execute(
+                    "SELECT a.username FROM FederatedAccountBindings b JOIN Accounts a ON a.acc_id=b.local_account_id "
+                    "WHERE b.issuer_deployment_id=? AND b.remote_subject_id=? AND a.auth_type='federated'",
+                    (claims["iss"], claims["sub"]),
+                ).fetchone()
+            if row is not None:
+                self.account_remover(row[0])
+            return None
         if payload["code_name"] == CLUSTER_CODE:
             # No code to check: the home lab's signature under an active
             # cluster contract is the vouching. Prepare a proxy only once.
@@ -431,10 +448,29 @@ class ServerFederatedEnrollHandler:
             membership_present=True, groups=[{"group_id": "0", "group_name": f"cluster {name}"}], now=now,
         )
 
+    def _unenroll(self, tx, action, now):
+        """The proxy (and its reservations) went in prepare(); drop whatever
+        rows here still name it. Unknown subjects are fine: idempotent."""
+        claims = action.claims
+        principal = get_principal_tx(tx, claims["iss"], claims["sub"])
+        if principal is not None:
+            for table, column in (("UsersLookup", "user_id"), ("ClusterMemberships", "local_account_id"),
+                                  ("ClusterAccounts", "local_account_id")):
+                tx.execute(f"DELETE FROM {table} WHERE {column}=?", (int(principal[3]),))
+            tx.execute("DELETE FROM FederatedPrincipals WHERE id=?", (principal[0],))
+        self._audit(tx, action, code="ok", principal_id=None,
+                    metadata={"unenrolled": principal is not None})
+        return self._result(
+            action, redemption_id=str(uuid5(NAMESPACE_URL, f"remoterf-unenroll:{claims['iss']}:{claims['sub']}")),
+            membership_present=False, groups=[], now=now,
+        )
+
     def __call__(self, tx, action):
         claims = action.claims
         payload = action.request.value["payload"]
         now = int(self.clock())
+        if payload["code_name"] == UNENROLL_CODE:
+            return self._unenroll(tx, action, now)
         if payload["code_name"] == CLUSTER_CODE:
             return self._cluster_enroll(tx, action, now)
         receipt = lookup_redemption_tx(
@@ -577,6 +613,12 @@ class ServerFederatedEnrollHandler:
             groups=[{"group_id": str(group[0]), "group_name": group[1]}],
             now=now,
         )
+
+
+def _remove_account(username: str) -> None:
+    from ..reservation import reservation_handler
+
+    reservation_handler.remove_user(username=username)
 
 
 class ServerFederatedEnrollmentHome:

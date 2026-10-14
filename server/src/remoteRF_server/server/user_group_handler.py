@@ -769,11 +769,14 @@ class UserGroupHandler:
 
     @db_connection
     def forget_user(self, *, uid: int | None = None) -> None:
-        """Drop an account's group memberships; None drops everyone's (a purge)."""
-        if uid is None:
-            self.cursor.execute("DELETE FROM UsersLookup")
-        else:
-            self.cursor.execute("DELETE FROM UsersLookup WHERE user_id = ?", (int(uid),))
+        """Drop an account's group memberships, and the principal a proxy
+        hangs off; None drops everyone's (a purge)."""
+        where, args = ("", ()) if uid is None else (" WHERE {} = ?", (int(uid),))
+        self.cursor.execute("DELETE FROM UsersLookup" + where.format("user_id"), args)
+        try:
+            self.cursor.execute("DELETE FROM FederatedPrincipals" + where.format("local_account_id"), args)
+        except sqlite3.OperationalError:
+            pass  # no federation tables on this deployment
 
     @db_connection
     def group_exists(self, *, group_name: str) -> bool:

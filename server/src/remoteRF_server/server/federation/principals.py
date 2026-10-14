@@ -267,3 +267,64 @@ class FederatedPrincipalStore:
             ).fetchone()
             assert final is not None
             return self._decode(final)
+
+
+def orphan_proxies(reservations_path, usergroups_path, *, stale_days: int | None = None, now: int | None = None) -> list[dict]:
+    """Federated proxies nothing else will clean up: their home is no longer a
+    partner (left Global, kicked, contract revoked), half their rows are gone,
+    or -- only when asked -- inactive for ``stale_days``: no device action,
+    reservation or enrolment in that time and nothing booked ahead. A pruned
+    proxy whose home still lists it loses access here until that home re-enrols it."""
+    from contextlib import closing
+
+    now = int(time.time() if now is None else now)
+    with closing(sqlite3.connect(usergroups_path, timeout=10.0)) as conn:
+        principals = conn.execute(
+            "SELECT id, local_account_id, issuer_deployment_id, last_seen_at FROM FederatedPrincipals"
+        ).fetchall()
+        partners = {deployment for row in conn.execute(
+            "SELECT deployment_a, deployment_b FROM FederationContracts "
+            "WHERE state='active' AND superseded_by_version IS NULL") for deployment in row}
+    with closing(sqlite3.connect(reservations_path, timeout=10.0)) as conn:
+        accounts = dict(conn.execute("SELECT acc_id, username FROM Accounts WHERE auth_type='federated'").fetchall())
+        homes = dict(conn.execute("SELECT local_account_id, issuer_deployment_id FROM FederatedAccountBindings").fetchall())
+        ahead = dict(conn.execute(
+            "SELECT username, COUNT(*) FROM Reservations WHERE end_time > ? GROUP BY username", (datetime.now(),)
+        ).fetchall())
+        # Activity beyond the principal's own last_seen_at: past bookings not yet swept, and booking times.
+        active = {}
+        for username, end in conn.execute("SELECT username, MAX(end_time) FROM Reservations GROUP BY username"):
+            try:
+                active[username] = int(datetime.fromisoformat(str(end)).timestamp())
+            except ValueError:
+                pass
+        try:
+            booked = dict(conn.execute(
+                "SELECT local_account_id, MAX(created_at) FROM FederatedReservations GROUP BY local_account_id"))
+        except sqlite3.OperationalError:
+            booked = {}
+    out, seen = [], set()
+
+    def add(account, username, issuer, last_active, reason, principal_id=None):
+        out.append({"username": username, "local_account_id": account, "principal_id": principal_id,
+                    "issuer": issuer, "last_active": last_active, "reservations": ahead.get(username, 0),
+                    "reason": reason})
+
+    for principal_id, account, issuer, last_seen in principals:
+        account = int(account)
+        seen.add(account)
+        username = accounts.get(account)
+        last_active = max(int(last_seen or 0), active.get(username, 0), int(booked.get(account) or 0)) or None
+        if username is None:
+            reason = "dangling"
+        elif issuer not in partners:
+            reason = "issuer gone"
+        elif stale_days is not None and not ahead.get(username) and (last_active or 0) < now - stale_days * 86400:
+            reason = "stale"
+        else:
+            continue
+        add(account, username, issuer, last_active, reason, principal_id)
+    for account, username in accounts.items():
+        if int(account) not in seen:
+            add(int(account), username, homes.get(account), None, "dangling")
+    return out

@@ -612,11 +612,27 @@ class ReservationHandler:
             )
         self.cursor.execute('SELECT acc_id FROM Accounts WHERE username = ?', (username,))
         row = self.cursor.fetchone()
+        if row:
+            self._queue_revocations(int(row[0]))
         self.cursor.execute('DELETE FROM ClientSessions WHERE username = ?', (username,))
         self.cursor.execute('DELETE FROM Accounts WHERE username = ?', (username,))
         self._forget_account_rows(int(row[0]) if row else None)
         perms.delete_user_from_reservation_handler(username)
         return {"UC": map_arg(f'Removed {username}')}
+
+    def _queue_revocations(self, uid: int | None) -> None:
+        """Before the account (and, by cascade, its subject) goes: every partner
+        it was enrolled at is owed an unenrol, which the cluster tick delivers."""
+        where, args = ("WHERE s.local_account_id = ?", (uid,)) if uid is not None else ("", ())
+        try:
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO FederatedRevocations(subject_id,destination_deployment_id,queued_at) "
+                "SELECT s.subject_id, e.destination_deployment_id, ? FROM LocalAccountSubjects s "
+                f"JOIN FederatedEnrollments e ON e.local_account_id = s.local_account_id {where}",
+                (int(time.time()), *args),
+            )
+        except sqlite3.OperationalError:
+            pass  # no HOME device plane on this deployment
 
     def _forget_account_rows(self, uid: int | None) -> None:
         """Everything else keyed by the account (None: by any account), so a
@@ -650,6 +666,7 @@ class ReservationHandler:
         if input("Drop Tables? (y/n): ") == 'y' and input("Are you sure? This deletes ALL data stored on the server. (y/n): ") == 'y':
             time.sleep(1)
             if input("Last chance. Are you sure? (y/n): ") == 'y':
+                self._queue_revocations(None)
                 self.cursor.execute('DROP TABLE IF EXISTS Accounts')
                 self.cursor.execute('DROP TABLE IF EXISTS Reservations')
                 self.cursor.execute('DROP TABLE IF EXISTS ClientSessions')
@@ -658,6 +675,7 @@ class ReservationHandler:
     
     @db_connection 
     def remove_all_users(self):
+        self._queue_revocations(None)
         self.cursor.execute('DELETE FROM ClientSessions')
         self.cursor.execute('DELETE FROM Accounts')
         self._forget_account_rows(None)
@@ -1199,7 +1217,11 @@ class ReservationHandler:
                 "created_at": created_at,
             })
         cursor.close()
+        rows.sort(key=lambda r: r["auth"] == "federated")  # this lab's own accounts first, then visitors
         print_table("Accounts", rows, ["username", "name", "role", "email", "auth", "created_at"], empty="No accounts found.")
+        if rows:
+            proxies = sum(r["auth"] == "federated" for r in rows)
+            print(f"{len(rows) - proxies} accounts, {proxies} visiting from partner labs (federated proxies)")
 
     @staticmethod
     def _federated_names() -> dict:

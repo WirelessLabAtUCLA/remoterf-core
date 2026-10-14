@@ -454,9 +454,11 @@ class StatusReportTests(TunnelTests):
         db = g.cfg_dir() / "db" / "reservations.db"
         db.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE Accounts (username TEXT)")
+            conn.execute("CREATE TABLE Accounts (username TEXT, auth_type TEXT)")
             conn.executemany(
-                "INSERT INTO Accounts VALUES (?)", [("a",), ("b",), ("c",)]
+                "INSERT INTO Accounts VALUES (?,?)",
+                [("a", "local_password"), ("b", "local_password"), ("c", "local_password"),
+                 ("fed-x", "federated")],
             )
             conn.execute(
                 "CREATE TABLE Reservations "
@@ -486,7 +488,8 @@ class StatusReportTests(TunnelTests):
         payload = g.status_payload()
 
         self.assertEqual(set(payload), g.STATUS_FIELDS)
-        self.assertEqual(payload["users"], 3)
+        self.assertEqual(payload["users"], 3)  # a partner's visitor is not one of ours
+        self.assertEqual(payload["proxies"], 1)
         self.assertEqual(payload["active_reservations"], 1)
         self.assertEqual(
             sorted(entry["type"] for entry in payload["devices"]),
@@ -507,8 +510,22 @@ class StatusReportTests(TunnelTests):
         payload = g.status_payload()
         self.assertEqual(set(payload), g.STATUS_FIELDS)
         self.assertEqual(payload["users"], 0)
+        self.assertEqual(payload["proxies"], 0)
         self.assertEqual(payload["devices"], [])
         self.assertIsNone(payload["cert_sha256"])
+
+    def test_status_falls_back_for_a_global_that_predates_proxies(self):
+        self.activate()
+        sent = []
+
+        def old_global(method, path, body):
+            sent.append(set(body["status"]))
+            if "proxies" in body["status"]:
+                raise g.GlobalError("invalid_status")
+
+        with mock.patch.object(g, "call", side_effect=old_global):
+            g.send_status()
+        self.assertEqual(sent, [set(g.STATUS_FIELDS), set(g.STATUS_FIELDS) - {"proxies"}])
 
     def test_reports_only_flow_once_active(self):
         self.join()
