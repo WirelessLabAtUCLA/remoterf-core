@@ -1269,6 +1269,18 @@ def cmd_stats_purge(argv):
 def cmd_devices_list(argv): get_devices()
 
 
+def cmd_diag(argv):
+    from . import diag
+
+    flags = {a.lower() for a in argv}
+    unknown = flags - {"--force", "-f", "--copy", "-c"}
+    if unknown:
+        printf(f"Unknown option {sorted(unknown)[0]}. Usage: diag [--force] [--copy]", Sty.RED)
+        return 2
+    return diag.run(force=bool(flags & {"--force", "-f"}), copy=bool(flags & {"--copy", "-c"}),
+                    ask=lambda q: session.prompt(q))
+
+
 def cmd_reload_devices(argv):
     from . import device_manager
 

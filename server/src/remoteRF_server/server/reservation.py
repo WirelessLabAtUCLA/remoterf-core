@@ -35,6 +35,7 @@ from remoterf_federation_core import (
 )
 from .device_manager import (
     device_inventory_snapshot,
+    diag_blocks,
     find_device_id_by_handle,
     get_all_devices,
     reservation_bridge_token,
@@ -987,6 +988,9 @@ class ReservationHandler:
         if validation[0] == False:
             return {"ace": map_arg(validation[1])}
         
+        if diag_blocks(device_id, start_time.timestamp()):
+            return {"ace": map_arg("Device is under diagnostics. Please try again in a few minutes.")}
+
         # Check if the time slot is already reserved
         self.cursor.execute('SELECT * FROM Reservations WHERE device_id = ? AND start_time < ? AND end_time > ?', (device_id, end_time, start_time))
         
@@ -1102,6 +1106,14 @@ class ReservationHandler:
             return {str(k): map_arg(str(v)) for k, v in devices.items() if k in str_to_list(perm[5])}
         
     
+    @db_connection
+    def reservation_windows(self, device_id) -> list:
+        """(start, end) datetimes of every reservation on the device."""
+        rows = self.cursor.execute(
+            "SELECT start_time, end_time FROM Reservations WHERE device_id = ?", (int(device_id),)
+        ).fetchall()
+        return [(_parse_reservation_datetime(a), _parse_reservation_datetime(b)) for a, b in rows]
+
     @db_connection 
     def print_all_reservations(self):
         from ..common.utils.panel import print_table
@@ -1513,6 +1525,9 @@ class ReservationHandler:
             ).fetchone()[0]
             if held >= int(lab_max_reservations):
                 return {"error": "lab_reservation_limit"}
+
+        if diag_blocks(device_id, start_time.timestamp()):
+            return {"error": "reservation_refused", "detail": "the device is under diagnostics"}
 
         self.cursor.execute(
             "SELECT 1 FROM Reservations WHERE device_id = ? AND start_time < ? AND end_time > ?",

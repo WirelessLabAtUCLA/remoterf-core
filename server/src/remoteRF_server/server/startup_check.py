@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -174,12 +175,12 @@ def _wait(display: _Display, fut: Future, until: float, text):
             display.spin(text() if callable(text) else text)
 
 
-def _new_log(cfg_dir: Path) -> Path:
+def _new_log(cfg_dir: Path, prefix: str = "startup") -> Path:
     logs = cfg_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    for old in sorted(logs.glob("startup-*.log"))[: -(KEEP_LOGS - 1)]:
+    for old in sorted(logs.glob(f"{prefix}-*.log"))[: -(KEEP_LOGS - 1)]:
         old.unlink(missing_ok=True)
-    return logs / f"startup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.log"
+    return logs / f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.log"
 
 
 def _flush_all() -> None:
@@ -212,20 +213,13 @@ def run(open_devices, *, cfg_dir: Path | None = None) -> None:
         return
 
     _flush_all()
-    saved = (os.dup(1), os.dup(2))
-    out = os.fdopen(os.dup(saved[0]), "w", encoding=getattr(sys.stdout, "encoding", None) or "utf-8",
-                    errors="replace")
-    display = _Display(out)
+    display = _Display(_terminal())
     results = None
     try:
-        os.dup2(log_fd, 1)
-        os.dup2(log_fd, 2)
         try:
-            results = _run_captured(open_devices, display, log_fd, log_path)
+            with _redirected(log_fd):
+                results = _run_captured(open_devices, display, log_fd, log_path)
         finally:
-            _flush_all()
-            os.dup2(saved[0], 1)
-            os.dup2(saved[1], 2)
             display.clear()
             if results:
                 display.summary(results, "operational" if enabled() else "opened")
@@ -233,8 +227,30 @@ def run(open_devices, *, cfg_dir: Path | None = None) -> None:
                 display._print("No local devices opened", Sty.YELLOW)
             display._print(f"log: {log_path}", Sty.GRAY)
     finally:
-        out.close()
-        for fd in (*saved, log_fd):
+        display.out.close()
+        os.close(log_fd)
+
+
+def _terminal():
+    """A writer on the real fd 1, which keeps reaching the terminal while _redirected() runs."""
+    return os.fdopen(os.dup(1), "w", encoding=getattr(sys.stdout, "encoding", None) or "utf-8",
+                     errors="replace")
+
+
+@contextmanager
+def _redirected(log_fd: int):
+    """fd 1/2 (prints, C libraries) into log_fd for the block."""
+    _flush_all()
+    saved = (os.dup(1), os.dup(2))
+    try:
+        os.dup2(log_fd, 1)
+        os.dup2(log_fd, 2)
+        yield
+    finally:
+        _flush_all()
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        for fd in saved:
             os.close(fd)
 
 
