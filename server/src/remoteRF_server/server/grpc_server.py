@@ -500,6 +500,9 @@ def welcome():
     try:
         from . import global_onboarding as g
 
+        lan = g.lan_endpoint()
+        if lan and lan != f"{local_ip}:{local_port}":
+            rows.append(f"lan     {lan}")
         if g.participating() and g.state() == "active" and g.hostname():
             rows.append(f"global  {g.hostname()}")
     except Exception:  # noqa: BLE001 - the banner never fails on Global state
