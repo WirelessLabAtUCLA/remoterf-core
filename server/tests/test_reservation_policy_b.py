@@ -180,6 +180,13 @@ def test_reservation_beyond_the_groups_horizon_is_rejected(test_user, fake_devic
     assert "Token" not in result and "7 days ahead" in str({k: unmap_arg(v) for k, v in result.items()})
 
 
+def test_a_full_group_quota_names_the_limit(test_user, fake_devices):
+    for hour in range(1, 6):
+        assert "Token" in reservation_handler.reserve_device(test_user["username"], fake_devices["connected"], *_slot(hour))
+    refused = reservation_handler.reserve_device(test_user["username"], fake_devices["connected"], *_slot(6))
+    assert unmap_arg(refused["ace"]) == "You already have the maximum of 5 reservations."
+
+
 def test_nonexistent_device_reservation_rejected(test_user, fake_devices):
     start, end = _slot(3)
     result = reservation_handler.reserve_device(test_user["username"], fake_devices["missing"], start, end)

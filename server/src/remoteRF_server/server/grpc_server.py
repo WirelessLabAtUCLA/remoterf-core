@@ -617,6 +617,9 @@ def set_acc():
                         start_time = session.prompt(stylize("Enter start time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
                         end_time = session.prompt(stylize("Enter end time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
                         token = reservation_handler.reserve_device(username=username, device_id=device_id, start_time=datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S'), end_time=datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S'), is_server=True)
+                        if 'Token' not in token:
+                            printf(unmap_arg(token['ace']), Sty.GRAY)
+                            continue
                         api = unmap_arg(token['Token'])
                         printf("Reservation added. TOKEN -> ", Sty.GREEN, f"{api}", Sty.MAGENTA)
                         break
@@ -1266,11 +1269,7 @@ def cmd_users_prune_proxies(argv):
             printf("Usage: users prune-proxies [--stale DAYS] [-y]", Sty.RED)
             return 2
     orphans = orphan_proxies(reservation_handler.filepath, user_group_handler.filepath, stale_days=stale)
-    names = {}
-    for item in cluster.load().values():
-        for peer, party in cluster._parties(item):
-            names.setdefault(peer, party.get("display_name"))
-    rows = [{"username": o["username"] or "(no account)", "home": names.get(o["issuer"]) or o["issuer"] or "?",
+    rows = [{"username": o["username"] or "(no account)", "home": cluster.peer_name(o["issuer"]) if o["issuer"] else "?",
              "last_active": datetime.fromtimestamp(o["last_active"]).strftime("%Y-%m-%d") if o["last_active"] else "",
              "reservations": o["reservations"], "reason": o["reason"]} for o in orphans]
     print_table("Orphaned federated proxies", rows, ["username", "home", "last_active", "reservations", "reason"],
@@ -1279,7 +1278,7 @@ def cmd_users_prune_proxies(argv):
         return 0
     if any(o["reason"] == "stale" for o in orphans):
         printf("A 'stale' visitor may still be real: removing one ends their access here until "
-               "their home lab enrols them again.", Sty.YELLOW)
+               "their home deployment enrols them again.", Sty.YELLOW)
     if not ("-y" in argv or "--yes" in argv):
         printf(f"{len(orphans)} orphaned proxies. Nothing removed; run `users prune-proxies"
                f"{f' --stale {stale}' if stale is not None else ''} -y` to remove them.", Sty.GRAY)

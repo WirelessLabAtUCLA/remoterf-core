@@ -670,7 +670,7 @@ def _load_all_drivers() -> None:
             if not seen_libiio:
                 seen_libiio = True
                 print(f"Warning: libiio is not installed, so this server cannot host a Pluto of its own. "
-                      f"Plutos shared by other labs still work for your users. To host one here: {_LIBIIO_FIX}")
+                      f"Plutos shared by other deployments still work for your users. To host one here: {_LIBIIO_FIX}")
             return
         print(line)
 

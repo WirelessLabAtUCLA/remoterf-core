@@ -188,7 +188,7 @@ def make_user_group_local(session) -> None:
 
     public = not lan_only and _prompt_yes_no("Public: open to anyone on RemoteRF Global? (y/N): ", default_no=True)
     if public:
-        public = _prompt_yes_no("Are you sure? Anyone with a RemoteRF Global account, and the users of every lab in the "
+        public = _prompt_yes_no("Are you sure? Anyone with a RemoteRF Global account, and the users of every deployment in the "
                                 "public cluster, can then see and reserve this group's devices. (Y/n): ", default_no=False)
     partners = [name for name in _clusters_here() if name != "global"] if not lan_only else []
     if partners:
@@ -234,7 +234,7 @@ def make_user_group_local(session) -> None:
                 cluster.attach_group(name, str(group_id))
                 print(f"Shared with {name}; `groups share {group_name} {name} off` takes it back.")
             except (cluster.ClusterError, RuntimeError, OSError) as exc:
-                print(f"Not shared with {name} ({exc}); `groups share {group_name} {name} on` once this lab is in it.")
+                print(f"Not shared with {name} ({exc}); `groups share {group_name} {name} on` once this deployment is in it.")
     else:
         print("Failed to create user group.")
 
@@ -520,7 +520,7 @@ def make_enrollment_codes_local(session) -> None:
     # A cluster code enrols the user at every lab in a partner cluster; `global` needs none.
     partners = [name for name in _clusters_here() if name != "global"]
     if partners and _prompt_yes_no(f"For a partner cluster instead of a group ({', '.join(partners)})? "
-                                   "Users join every lab in it. (y/N): ", default_no=True):
+                                   "Users join every deployment in it. (y/N): ", default_no=True):
         name = partners[0] if len(partners) == 1 else _prompt_raw(f"Which cluster? [{partners[0]}] (c to cancel): ")
         if name is None:
             return
@@ -670,6 +670,7 @@ def list_enrollment_codes_local(session) -> None:
     import textwrap
 
     from ..common.utils.panel import content_width, print_panel
+    from .federation import cluster
 
     rows = _invites(user_group_handler.get_all_enrollment_codes() or [])
     if not rows:
@@ -706,7 +707,7 @@ def list_enrollment_codes_local(session) -> None:
             _plural(len(items), "code"),
         ] + (["LAN only"] if group.get("lan_only") else []))
         if contract:
-            head += f" · federated: contract {contract} v{version}, issuer {issuer}"
+            head += f" · federated: contract {contract} v{version}, issuer {cluster.peer_name(issuer)}"
         if lines:
             lines.append("")
         lines += textwrap.wrap(head, width=width) or [head]

@@ -190,7 +190,7 @@ def world(tmp_path):
         rpc_manager=rpc,
     )
 
-    def enroll(*, devices, admin=False):
+    def enroll(*, devices, admin=False, max_reservations=5):
         prepared = prepare_federated_account(
             root / "reservations.db",
             issuer_deployment_id=HOME,
@@ -215,7 +215,7 @@ def world(tmp_path):
                 group_name=f"gate-h-{uuid.uuid4().hex[:6]}",
                 devices_whitelist=list(devices),
                 max_reservation_time_sec=3600,
-                max_reservations=5,
+                max_reservations=max_reservations,
                 lifetime_sec=0,
             )
             with sqlite3.connect(dest_db) as conn:
@@ -394,7 +394,7 @@ def test_reserve_is_idempotent_per_request_and_authorizes_device_rpc(world):
         start_time=start + 7200, end_time=end + 7200,
     )
     assert refused["status"] == "error"
-    assert refused["error_code"] == "reservation_refused"
+    assert refused["error_code"] == "device_not_permitted"
 
     # The plaintext bearer token never appears in any signed result.
     for result in (first, again):
@@ -471,6 +471,53 @@ def test_a_lab_at_its_cap_is_refused_whatever_its_users_quotas_allow(world):
         fourth, _ = world["call"]("device_reserve", local_device_id=str(world["allowed"]),
                                   start_time=more[0], end_time=more[1])
         assert fourth["status"] == "ok", fourth
+
+
+def test_refusal_text_maps_to_its_code():
+    from remoteRF_server.server.reservation import refusal_code
+
+    for text, code in (
+        ("Start time must be before end time", "reservation_refused"),
+        ("End time must not be in the past", "reservation_in_past"),
+        ("Invalid device ID. Device does not exist.", "device_not_visible"),
+        ("Minimum reservation time is 10 minutes.", "reservation_too_short"),
+        ("Invalid device ID. Device either does not exist or is disconnected.", "device_not_permitted"),
+        ("You already have the maximum of 3 reservations.", "reservation_limit"),
+        ("Max Reservation Duration allowed is 60.0 minutes.", "reservation_too_long"),
+        ("Reservations may start at most 7 days ahead.", "reservation_too_far_ahead"),
+        ("Max Reservations allowed is 3.", "reservation_limit"),
+        ("Perms could not be found. Access Denied.", "reservation_refused"),
+        ("User has reached max reservations.", "reservation_refused"),
+    ):
+        assert refusal_code(text) == code, text
+
+
+def test_each_refusal_reason_is_its_own_signed_code(world):
+    """The caller learns why: one [a-z_] code per reason, nothing else signed."""
+    world["enroll"](devices=[world["allowed"]], max_reservations=3)
+
+    def reserve(window, device=world["allowed"]):
+        result, _ = world["call"]("device_reserve", local_device_id=str(device),
+                                  start_time=window[0], end_time=window[1])
+        return result
+
+    for window, device, code in (
+        (_window(-60), world["allowed"], "reservation_in_past"),
+        (_window(60), world["offline"] + 50, "device_not_visible"),
+        (_window(60, 5), world["allowed"], "reservation_too_short"),
+        (_window(60), world["hidden"], "device_not_permitted"),
+        (_window(60, 90), world["allowed"], "reservation_too_long"),
+        (_window(8 * 24 * 60), world["allowed"], "reservation_too_far_ahead"),
+    ):
+        refused = reserve(window, device)
+        assert (refused["status"], refused["error_code"], refused["payload"]) == ("error", code, {"reservation": None})
+    with patch("remoteRF_server.server.reservation.diag_blocks", return_value=True):
+        assert reserve(_window(60))["error_code"] == "device_in_diagnostics"
+
+    # A group capped at 3 with 3 held refuses the 4th as reservation_limit.
+    for hour in (1, 2, 3):
+        assert reserve(_window(60 * hour))["status"] == "ok"
+    assert reserve(_window(60 * 4))["error_code"] == "reservation_limit"
 
 
 def test_device_rpc_without_live_reservation_or_capability_is_refused(world):

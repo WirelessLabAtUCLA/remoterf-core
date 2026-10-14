@@ -206,7 +206,7 @@ def test_owner_refusals_surface_as_ace_and_leave_no_home_rows(home):
     refused = _acc(
         home, "reserve_device", dd=ALIAS_BASE + 77, st=int(start.timestamp()), et=int(end.timestamp())
     )
-    assert refused["ace"].startswith("Partner refused:")
+    assert refused["ace"] == "Partner refused: device_not_permitted"
     with sqlite3.connect(home["root"] / "reservations.db") as conn:
         assert conn.execute("SELECT COUNT(*) FROM HomeFederatedReservations").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM FederatedReservations").fetchone()[0] == 0

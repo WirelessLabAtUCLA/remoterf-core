@@ -153,6 +153,26 @@ def contract_cluster(contract_id: str) -> tuple[str, dict] | None:
     return None
 
 
+def peer_name(deployment_id: str) -> str:
+    """A partner deployment's name for the console; its id only when nothing here names it."""
+    for cluster in load().values():
+        for peer, party in _parties(cluster):
+            if peer == deployment_id and (party.get("display_name") or party.get("peer_name")):
+                return party.get("display_name") or party["peer_name"]
+    from . import global_home
+
+    if (global_home.load().get("identity") or {}).get("deployment_id") == deployment_id:
+        return global_home.LABEL
+    from .peers import PeerStore
+
+    try:
+        # Outlives the cluster: a kicked or removed partner is still named here.
+        known = PeerStore(_db_path()).get(deployment_id)
+    except (sqlite3.Error, OSError, ValueError):
+        known = None
+    return (known or {}).get("display_name") or deployment_id
+
+
 # -----------------------------
 # Identity and stores
 # -----------------------------
@@ -266,7 +286,7 @@ def decode_code(code: str) -> tuple[str, bytes]:
 
 def create(name: str) -> dict:
     if not _NAME.match(name or ""):
-        raise ClusterError("cluster names are short lowercase slugs, e.g. ucla-lab")
+        raise ClusterError("cluster names are short lowercase slugs, e.g. ucla-shared")
     clusters = load()
     if name in clusters:
         raise ClusterError(f"cluster {name} already exists")
@@ -367,10 +387,14 @@ def accept(name: str, peer: str | None = None) -> dict:
     if not pending:
         raise ClusterError(f"{name} has no join waiting for approval")
     if peer is None and len(pending) > 1:
-        raise ClusterError(f"{name} has several joins waiting; name one: " + ", ".join(sorted(pending)))
+        raise ClusterError(f"{name} has several joins waiting; accept one with `cluster accept {name} <deployment>`: "
+                           + ", ".join(sorted(m.get("display_name") or pid for pid, m in pending.items())))
     peer = peer or next(iter(pending))
     if peer not in pending:
-        raise ClusterError(f"{peer} is not waiting to join {name}")
+        try:
+            peer = _member({"members": pending}, peer)
+        except ClusterError:
+            raise ClusterError(f"{peer} is not waiting to join {name}") from None
     _propose(cluster, pending[peer], peer)
     save(clusters)
     return cluster
@@ -394,14 +418,14 @@ def remove(name: str) -> str:
     cluster = _find(clusters, name)
     if name == GLOBAL:
         # Its contract is the standing one with Global; stop sharing instead.
-        raise ClusterError(f"every lab is in {GLOBAL}; `groups public <group> off` stops sharing a group")
+        raise ClusterError(f"every deployment is in {GLOBAL}; `groups public <group> off` stops sharing a group")
     outcome = "removed"
     for _, party in _parties(cluster):
         _revoke(party.get("contract_id"))
         try:
             _publish(party)
         except g.GlobalError:
-            outcome = "removed locally; could not reach Global to tell the other lab"
+            outcome = "removed locally; could not reach Global to tell the other deployment"
     _forget_accounts(name, cluster)
     del clusters[name]
     save(clusters)
@@ -442,13 +466,15 @@ def join_public(pool: dict, party: dict) -> str:
 
 
 def _member(cluster: dict, lab: str) -> str:
-    """A member lab by deployment id, the id prefix `cluster list` shows, or display name."""
+    """A member deployment by display name (what `cluster list` shows), deployment id or id prefix."""
     lab = (lab or "").strip().rstrip("…")
     hits = [peer for peer, member in cluster["members"].items()
             if peer == lab or (len(lab) >= 8 and peer.startswith(lab))
             or (member.get("display_name") or "").lower() == lab.lower()]
-    if len(hits) != 1:
-        raise ClusterError(f"{lab or 'that'} is not one lab in this cluster; `cluster list` shows them")
+    if len(hits) > 1:
+        raise ClusterError(f"several deployments are named {lab}; use an id: " + ", ".join(sorted(hits)))
+    if not hits:
+        raise ClusterError(f"{lab or 'that'} is not a deployment in this cluster; `cluster list` shows them")
     return hits[0]
 
 
@@ -460,7 +486,7 @@ def kick(name: str, lab: str) -> str:
     clusters = load()
     cluster = _find(clusters, name)
     if cluster["role"] != "owner":
-        raise ClusterError(f"{name} is owned by another deployment; only the owner puts a lab out")
+        raise ClusterError(f"{name} is owned by another deployment; only the owner puts a deployment out")
     peer = _member(cluster, lab)
     member = cluster["members"].pop(peer)
     _revoke(member.get("contract_id"))
@@ -991,7 +1017,7 @@ def deliver_revocations(home, notify=None) -> None:
                 # code_invalid (signed): a partner too old to know the code keeps its orphan.
                 if not (isinstance(exc, OwnerSignedFailure) and exc.code == "code_invalid"):
                     _back_off(_revoke_retry, peer)
-                    notify(f"[cluster] could not remove a deleted account at {peer}: {getattr(exc, 'code', exc)}")
+                    notify(f"[cluster] could not remove a deleted account at {peer_name(peer)}: {getattr(exc, 'code', exc)}")
                     continue
             _revoke_retry.pop(peer, None)
         with closing(sqlite3.connect(path, timeout=10.0)) as conn, conn:
@@ -1087,7 +1113,7 @@ def _advance(party: dict, peer: str, directory: list[dict], *, label: str, notif
     if state == "active" and before != "active":
         notify(f"[cluster] {label} is active")
     if state == "revoked" and before != "revoked":
-        notify(f"[cluster] {label} was ended by the other lab")
+        notify(f"[cluster] {label} was ended by the other deployment")
 
 
 def _publish_roster(name: str, cluster: dict) -> None:
@@ -1233,7 +1259,7 @@ def _collect_joins(name: str, cluster: dict, broker_invites: list[dict], notify)
         if invite.get("auto", True):
             _propose(cluster, member, peer)
         else:
-            notify(f"[cluster] {peer} wants to join {name}: run `cluster accept {name}`")
+            notify(f"[cluster] {member.get('display_name') or peer} wants to join {name}: run `cluster accept {name}`")
 
 
 _said: set[str] = set()
@@ -1267,7 +1293,7 @@ def _walk_in(pools: list[dict], notify) -> None:
         except (ClusterError, ContractError, g.GlobalError, KeyError, TypeError) as exc:
             _once(f"join:{GLOBAL}", f"[cluster] could not join {GLOBAL}: {getattr(exc, 'code', exc)}", notify)
             return
-        notify(f"[cluster] joined {GLOBAL}: every account here can reserve what the labs on Global share. "
+        notify(f"[cluster] joined {GLOBAL}: every account here can reserve what the deployments on Global share. "
                "`groups public <group> on` shares one of yours.")
         return
 

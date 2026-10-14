@@ -45,27 +45,27 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
 RELAY_KEY_FILENAME = "relay_ed25519"
 
 CONSENT_TEXT = """\
-Joining RemoteRF Global gives your lab a public address,
+Joining RemoteRF Global gives your deployment a public address,
 <name>.{domain}, so your users can reach it from anywhere
 instead of only from your network. When they are on your network the
 client still prefers the LAN, so nothing local gets slower.
 
-It is also how labs work together. Once you and another deployment sign
+It is also how deployments work together. Once you and another deployment sign
 an agreement, your users can reserve instruments there and theirs can
-reserve yours, whether that lab is down the hall or on another
+reserve yours, whether that deployment is down the hall or on another
 continent. Each partnership is arranged deliberately, one at a time,
-with one exception: instruments a lab has opened to everyone on Global
+with one exception: instruments a deployment has opened to everyone on Global
 reach your users as soon as you are in (`cluster remove` leaves such a
 cluster). Joining Global shares none of your hardware on its own.
 
 Once an hour it sends Global a short note: this deployment's name and
 ID, version, uptime, how many accounts (and how many visit from partner
-labs), what devices it has, how many reservations are active, the total
+deployments), what devices it has, how many reservations are active, the total
 time reserved so far (a single number), and your LAN address. Nothing else leaves your
 server -- no credentials, no user or reservation details -- and the
 connection only goes outward.
 
-A RemoteRF admin reviews each new lab by hand, so there is a short wait
+A RemoteRF admin reviews each new deployment by hand, so there is a short wait
 before your address goes live. You can join or leave whenever you like:
 
     serverrf global join
@@ -593,7 +593,7 @@ def is_offsite(host: str) -> bool:
 def lan_only_hint(what: str) -> str:
     """The refusal a relayed caller sees for LAN-only material."""
     return (
-        f"{what} only works from the lab network. Connect directly instead: "
+        f"{what} only works from the deployment's own network. Connect directly instead: "
         f"remoterf -c -a {lan_endpoint() or '<server LAN address>'}"
     )
 

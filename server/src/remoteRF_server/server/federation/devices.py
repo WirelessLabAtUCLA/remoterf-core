@@ -125,9 +125,9 @@ def path_authorizer(*, reservations, usergroups_path, claims, reservation_id, de
                 terms, row["state"], "DEVICE_CONTROL", now=int(clock()),
                 superseded=row["superseded_by_version"] is not None,
             ):
-                return "the agreement with your home lab is no longer active"
+                return "the agreement with your home deployment is no longer active"
             if principal is None or principal["status"] != "active":
-                return "your account at this lab is disabled"
+                return "your account at this deployment is disabled"
             account_id = int(principal["local_account_id"])
         if function_name == IDL_FUNCTION and account_id is not None:
             visible = {
