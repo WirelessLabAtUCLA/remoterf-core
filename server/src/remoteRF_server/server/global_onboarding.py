@@ -179,14 +179,17 @@ def account_name(username: str) -> str:
 def invite(code_name: str, *, lan_only: bool = False) -> str:
     """What to hand a new user: the form `remoterf --register` accepts.
 
-    On a live Global deployment that is `<public hostname>/<code>`, which the
-    client resolves to this server from anywhere. A LAN-only group's code (or
+    On a live Global deployment that is `<deployment>/<code>` (e.g. `ucla/AB12C`),
+    which the client expands to `<deployment>.global.remoterf.net` from anywhere;
+    a lab on its own domain keeps the full `<hostname>/<code>`. A LAN-only group's code (or
     a deployment that is not on Global) is the bare code, entered after
     `remoterf -c -a <lan address>`.
     """
-    if state() == "active" and not lan_only and hostname():
-        return f"{hostname()}/{code_name}"
-    return code_name
+    host = hostname() if state() == "active" and not lan_only else None
+    if not host:
+        return code_name
+    slug, _, domain = host.partition(".")
+    return f"{slug if domain == 'global.remoterf.net' else host}/{code_name}"
 
 
 # -----------------------------

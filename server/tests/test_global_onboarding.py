@@ -708,7 +708,7 @@ class InviteTests(unittest.TestCase):
 
     def test_live_global_deployment_hands_out_the_full_form(self):
         g.update(GLOBAL_CONSENT="yes", GLOBAL_STATE="active", GLOBAL_FINAL_NAME="ucla-dev0")
-        self.assertEqual(g.invite("RERGSOQ5"), "ucla-dev0.global.remoterf.net/RERGSOQ5")
+        self.assertEqual(g.invite("RERGSOQ5"), "ucla-dev0/RERGSOQ5")
         # LAN-only groups never get a Global invite: it would not work there.
         self.assertEqual(g.invite("RERGSOQ5", lan_only=True), "RERGSOQ5")
 
