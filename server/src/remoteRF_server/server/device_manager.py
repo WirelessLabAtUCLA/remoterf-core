@@ -924,6 +924,34 @@ def get_local_device_context(device_id: int) -> dict[str, Any] | None:
         }
 
 
+# `diag` (server/diag.py): gid -> estimated end (epoch s) of a test holding that
+# device; key None is `diag --force`, which holds every device.
+_diag_until: Dict[Optional[int], float] = {}
+
+
+def diag_hold(gid: Optional[int], until: float) -> None:
+    with _state_lock:
+        _diag_until[gid] = float(until)
+
+
+def diag_release(gid: Optional[int]) -> None:
+    with _state_lock:
+        _diag_until.pop(gid, None)
+
+
+def diag_blocks(gid, start: Optional[float] = None) -> bool:
+    """A diagnostic holds the device: refuse its calls and sessions. With `start`
+    (epoch s), only a reservation starting before the diagnostic should end."""
+    with _state_lock:
+        held = [u for k, u in _diag_until.items() if k is None or k == int(gid)]
+    return bool(held) and (start is None or start < max(held))
+
+
+def _refuse_if_diag(gid: int) -> None:
+    if diag_blocks(gid):
+        raise RuntimeError("the device is under diagnostics (serverrf diag); try again in a few minutes")
+
+
 def token_matches_device(api_token: str, device_id: int) -> bool:
     return resolve_gid_for_token(api_token) == int(device_id)
 
@@ -1224,6 +1252,7 @@ def acquire_device(api_token: str) -> Iterator[Tuple[int, object]]:
 
     if gid is None:
         raise RuntimeError("no device available / invalid token")
+    _refuse_if_diag(gid)
 
     with _state_lock:
         st = _devices.get(int(gid))
@@ -1251,6 +1280,7 @@ def acquire_device_by_gid(gid: int) -> Iterator[Tuple[int, object]]:
     """
 
     _sync_host_devices()
+    _refuse_if_diag(int(gid))
 
     with _state_lock:
         st = _devices.get(int(gid))

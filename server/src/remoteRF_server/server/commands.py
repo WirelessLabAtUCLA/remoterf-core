@@ -109,6 +109,7 @@ def _table() -> list[Command]:
         Command(("devices add",), "Add a device (asks type, name, serial)", _shell("cmd_devices_add"), "Devices", after="reload_devices", hidden=True),
         Command(("devices remove",), "Remove a device by id", _shell("cmd_devices_remove"), "Devices", after="reload_devices"),
         Command(("devices rename",), "Rename a device: devices rename <id> <name>", _shell("cmd_devices_rename"), "Devices", after="reload_devices"),
+        Command(("diag",), "Test every device in depth, skipping reserved ones: diag [--force] [--copy]", _daemon("cmd_diag"), "Devices", where=D, interactive=True),
         Command(("devices wipe",), "Remove ALL devices [-y]", _shell("cmd_devices_wipe"), "Devices", after="reload_devices"),
         # ---- users ----
         Command(("users list",), "List accounts", _daemon("cmd_users_list"), "Users", where=D),

@@ -47,6 +47,7 @@ from ..drivers.usrp.uhd_manifest import (
     HANDLE_RETURN_METHODS,
 )
 from .device_manager import (
+    diag_blocks,
     get_local_device_context,
     register_reservation_end_callback,
     resolve_gid_for_token,
@@ -554,6 +555,11 @@ class SessionManager:
             self._generation += 1
             return self._generation
 
+    def busy(self, gid: int) -> bool:
+        """A live or opening session holds this device."""
+        with self._lock:
+            return gid in self._opening_gids or self._session_by_gid.get(gid) in self._sessions
+
     def metrics(self) -> dict[str, int]:
         """Return bounded-resource counters for server status/monitoring hooks."""
         with self._lock:
@@ -619,6 +625,9 @@ class SessionManager:
             )
 
         with self._lock:
+            # Under the lock diag's busy() takes after its hold: one of the two sees the other.
+            if diag_blocks(gid):
+                raise RemoteRFReservationError("the device is under diagnostics; try again in a few minutes")
             if gid in self._opening_gids:
                 raise RemoteRFReservationError(
                     "the reserved USRP is already being opened by another Dynamic v2 session"
@@ -705,6 +714,8 @@ class SessionManager:
             raise RemoteRFSessionExpiredError(
                 "reservation ended; the device session and all handles are stale"
             )
+        if validate_reservation and diag_blocks(session.gid):
+            raise RemoteRFReservationError("the device is under diagnostics; try again in a few minutes")
         return session
 
     def get_handle(

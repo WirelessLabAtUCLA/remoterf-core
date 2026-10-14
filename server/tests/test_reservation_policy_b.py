@@ -302,3 +302,15 @@ def test_offline_device_is_listed_by_get_dev_and_is_now_reservable(test_user, fa
     start, end = _slot(8)
     result = reservation_handler.reserve_device(test_user["username"], fake_devices["offline"], start, end)
     assert "Token" in result, {k: unmap_arg(v) for k, v in result.items()}
+
+
+def test_reservation_overlapping_a_diagnostic_is_refused(test_user, fake_devices):
+    start, end = _slot(9)
+    gid = fake_devices["connected"]
+    device_manager.diag_hold(gid, start.timestamp() + 60)
+    try:
+        refused = reservation_handler.reserve_device(test_user["username"], gid, start, end)
+    finally:
+        device_manager.diag_release(gid)
+    assert "under diagnostics" in unmap_arg(refused["ace"])
+    assert "Token" in reservation_handler.reserve_device(test_user["username"], gid, start, end)
