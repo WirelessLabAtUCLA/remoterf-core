@@ -178,8 +178,11 @@ def _wait(display: _Display, fut: Future, until: float, text):
 def _new_log(cfg_dir: Path, prefix: str = "startup") -> Path:
     logs = cfg_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    for old in sorted(logs.glob(f"{prefix}-*.log"))[: -(KEEP_LOGS - 1)]:
-        old.unlink(missing_ok=True)
+    # A run's .log/.json/.txt share a stem: keep the newest runs whole.
+    stems = sorted({path.name.split(".")[0] for path in logs.glob(f"{prefix}-*")})
+    for stem in stems[: -(KEEP_LOGS - 1)]:
+        for old in logs.glob(f"{stem}.*"):
+            old.unlink(missing_ok=True)
     return logs / f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.log"
 
 

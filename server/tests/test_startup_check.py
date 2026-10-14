@@ -207,3 +207,14 @@ def test_tty_spinner_redraws_in_place():
     os.close(master)
     assert "\r\x1b[2K" in text and "testing…" in text and "operational" in text
     assert text.index("testing…") < text.rindex("\r\x1b[2K") < text.index("✓")
+
+
+def test_diag_reports_rotate_with_their_log(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for i in range(12):
+        for ext in ("log", "json", "txt"):
+            (logs / f"diag-20260101T0000{i:02d}Z.{ext}").write_text("x")
+    sc._new_log(tmp_path, prefix="diag")
+    stems = {p.name.split(".")[0] for p in logs.glob("diag-*")}
+    assert len(stems) == sc.KEEP_LOGS - 1 and len(list(logs.glob("diag-*"))) == 3 * (sc.KEEP_LOGS - 1)
