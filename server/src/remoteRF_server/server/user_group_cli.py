@@ -187,6 +187,9 @@ def make_user_group_local(session) -> None:
     lan_only = not _prompt_yes_no("Reachable from outside your network (via Global)? (Y/n): ", default_no=False)
 
     public = not lan_only and _prompt_yes_no("Public: open to anyone on RemoteRF Global? (y/N): ", default_no=True)
+    if public:
+        public = _prompt_yes_no("Are you sure? Anyone with a RemoteRF Global account, and the users of every lab in the "
+                                "public cluster, can then see and reserve this group's devices. (Y/n): ", default_no=False)
     partners = [name for name in _clusters_here() if name != "global"] if not lan_only else []
     if partners:
         raw = _prompt_str(f"Also share with partner clusters ({', '.join(partners)}; comma-separated, "
