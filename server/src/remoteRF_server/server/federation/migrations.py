@@ -478,12 +478,19 @@ _GATE_H_RESERVATIONS_CHECKSUM = hashlib.sha256(
 # HOME side of the device plane: which partners a native account is enrolled
 # at, a HOME-local integer id for each partner device the Client has seen, and
 # the HOME-minted reservation rows that route a device token to the owner.
+# FederatedRevocations: deleted accounts' partners still to be told (the tick drains it).
 _HOME_DEVICES_RESERVATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS FederatedEnrollments (
     local_account_id INTEGER NOT NULL,
     destination_deployment_id TEXT NOT NULL CHECK(length(destination_deployment_id)=36),
     enrolled_at INTEGER NOT NULL,
     PRIMARY KEY(local_account_id,destination_deployment_id)
+);
+CREATE TABLE IF NOT EXISTS FederatedRevocations (
+    subject_id TEXT NOT NULL CHECK(length(subject_id)=36),
+    destination_deployment_id TEXT NOT NULL CHECK(length(destination_deployment_id)=36),
+    queued_at INTEGER NOT NULL,
+    PRIMARY KEY(subject_id,destination_deployment_id)
 );
 CREATE TABLE IF NOT EXISTS FederatedDeviceAliases (
     alias_id INTEGER PRIMARY KEY,

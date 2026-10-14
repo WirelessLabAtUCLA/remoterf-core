@@ -850,10 +850,11 @@ After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. 
 
 ### Users
 
-* `users list` — List all accounts
+* `users list` — List all accounts (this lab's own first, then visitors from partner labs)
 * `users manage` — Manage a specific user (perms / delete / reservations)
 * `users purge` — Delete **all** users
 * `users perms` — Show permissions table
+* `users prune-proxies [--stale DAYS] [-y]` — List federated proxies whose home lab is gone (dry run); `-y` removes them
 
 ---
 

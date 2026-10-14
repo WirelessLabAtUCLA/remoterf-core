@@ -210,6 +210,10 @@ class _DeviceHandlerBase:
             raise FederationBusinessError("principal_unknown")
         if row[2] != "active":
             raise FederationBusinessError("principal_disabled")
+        # At most hourly: `users prune-proxies --stale` reads it as the visitor's last activity.
+        now = int(time.time())
+        tx.execute("UPDATE FederatedPrincipals SET last_seen_at=? WHERE id=? AND last_seen_at<?",
+                   (now, row[0], now - 3600))
         return str(row[0]), int(row[1])
 
     # -- result shaping ------------------------------------------------
@@ -669,6 +673,8 @@ def build_server_gate_h_executor(
         signing_kid=signing_kid,
         display_name=display_name,
         clock=clock,
+        account_remover=(lambda username: reservation_handler.remove_user(username=username))
+        if reservation_handler is not None else None,
     )
     for action, handler in build_device_handlers(
         reservations_path=reservations_path,

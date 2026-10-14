@@ -1245,6 +1245,54 @@ def cmd_users_manage(argv): set_acc()
 def cmd_users_perms(argv): perms.print_perms()
 def cmd_users_purge(argv): reservation_handler.remove_all_users()
 def cmd_reservations_list(argv): reservation_handler.print_all_reservations()
+
+
+def cmd_users_prune_proxies(argv):
+    """Dry run unless -y: proxies whose home left, half-deleted ones, and with
+    --stale DAYS those unseen that long with nothing booked."""
+    import sqlite3
+    from contextlib import closing
+
+    from ..common.utils.panel import print_table
+    from .federation import cluster
+    from .federation.principals import orphan_proxies
+    from .user_group_handler import user_group_handler
+
+    stale = None
+    if "--stale" in argv:
+        try:
+            stale = int(argv[argv.index("--stale") + 1])
+        except (IndexError, ValueError):
+            printf("Usage: users prune-proxies [--stale DAYS] [-y]", Sty.RED)
+            return 2
+    orphans = orphan_proxies(reservation_handler.filepath, user_group_handler.filepath, stale_days=stale)
+    names = {}
+    for item in cluster.load().values():
+        for peer, party in cluster._parties(item):
+            names.setdefault(peer, party.get("display_name"))
+    rows = [{"username": o["username"] or "(no account)", "home": names.get(o["issuer"]) or o["issuer"] or "?",
+             "last_active": datetime.fromtimestamp(o["last_active"]).strftime("%Y-%m-%d") if o["last_active"] else "",
+             "reservations": o["reservations"], "reason": o["reason"]} for o in orphans]
+    print_table("Orphaned federated proxies", rows, ["username", "home", "last_active", "reservations", "reason"],
+                empty="No orphaned proxies.")
+    if not orphans:
+        return 0
+    if any(o["reason"] == "stale" for o in orphans):
+        printf("A 'stale' visitor may still be real: removing one ends their access here until "
+               "their home lab enrols them again.", Sty.YELLOW)
+    if not ("-y" in argv or "--yes" in argv):
+        printf(f"{len(orphans)} orphaned proxies. Nothing removed; run `users prune-proxies"
+               f"{f' --stale {stale}' if stale is not None else ''} -y` to remove them.", Sty.GRAY)
+        return 0
+    for o in orphans:
+        if o["username"]:
+            reservation_handler.remove_user(username=o["username"])
+        else:
+            with closing(sqlite3.connect(user_group_handler.filepath, timeout=10.0)) as conn, conn:
+                conn.execute("DELETE FROM FederatedPrincipals WHERE id=?", (o["principal_id"],))
+            cluster.forget_account(o["local_account_id"])
+    printf(f"Removed {len(orphans)} orphaned proxies.", Sty.GRAY)
+    return 0
 def cmd_reservations_purge(argv): reservation_handler.remove_all_reservations()
 def cmd_db_purge(argv): reservation_handler.rm_db()
 def cmd_stats_purge(argv):

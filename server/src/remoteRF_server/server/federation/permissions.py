@@ -393,6 +393,7 @@ def build_server_gate_g_executor(
     display_name,
     perms_path=None,
     clock=None,
+    account_remover=None,
 ):
     """Final Phase-1 destination registry: enroll plus permissions read."""
 
@@ -406,6 +407,7 @@ def build_server_gate_g_executor(
         local_deployment_id=local_deployment_id,
         display_name=display_name,
         clock=clock,
+        account_remover=account_remover,
     )
     permissions = ServerPermissionsReadHandler(
         local_deployment_id=local_deployment_id,

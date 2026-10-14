@@ -116,6 +116,7 @@ def _table() -> list[Command]:
         Command(("users manage",), "Change a user's role (interactive)", _daemon("cmd_users_manage"), "Users", where=D, interactive=True),
         Command(("users perms",), "Show permissions", _daemon("cmd_users_perms"), "Users", where=D),
         Command(("users purge",), "Remove ALL accounts", _daemon("cmd_users_purge"), "Users", where=D),
+        Command(("users prune-proxies",), "Partner-lab visitors whose home is gone: list them, -y removes [--stale DAYS]", _daemon("cmd_users_prune_proxies"), "Users", where=D),
         # ---- reservations ----
         Command(("reservations list",), "List reservations", _daemon("cmd_reservations_list"), "Reservations", where=D),
         Command(("reservations purge",), "Remove ALL reservations", _daemon("cmd_reservations_purge"), "Reservations", where=D),

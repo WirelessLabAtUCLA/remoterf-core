@@ -59,8 +59,9 @@ reach your users as soon as you are in (`cluster remove` leaves such a
 cluster). Joining Global shares none of your hardware on its own.
 
 Once an hour it sends Global a short note: this deployment's name and
-ID, version, uptime, how many accounts, what devices it has, how many
-reservations are active, and your LAN address. Nothing else leaves your
+ID, version, uptime, how many accounts (and how many visit from partner
+labs), what devices it has, how many reservations are active, and your
+LAN address. Nothing else leaves your
 server -- no credentials, no user or reservation details -- and the
 connection only goes outward.
 
@@ -701,6 +702,7 @@ STATUS_FIELDS = frozenset(
         "server_version",
         "uptime_s",
         "users",
+        "proxies",
         "devices",
         "active_reservations",
         "lan_address",
@@ -786,7 +788,9 @@ def status_payload() -> dict:
     payload = {
         "server_version": server_version(),
         "uptime_s": _uptime_seconds(),
-        "users": _count(reservations, "SELECT COUNT(*) FROM Accounts"),
+        # A partner's user visiting here is counted at their own lab, not again here.
+        "users": _count(reservations, "SELECT COUNT(*) FROM Accounts WHERE auth_type != 'federated'"),
+        "proxies": _count(reservations, "SELECT COUNT(*) FROM Accounts WHERE auth_type = 'federated'"),
         "devices": device_summary(),
         "active_reservations": _count(
             reservations,
@@ -810,7 +814,14 @@ def send_liveness() -> None:
 def send_status() -> None:
     from datetime import datetime, timezone
 
-    call("POST", REPORT_PATH, {"kind": "status", "status": status_payload()})
+    payload = status_payload()
+    try:
+        call("POST", REPORT_PATH, {"kind": "status", "status": payload})
+    except GlobalError as exc:
+        if exc.code != "invalid_status":
+            raise
+        # A Global older than `proxies` takes the note as it was before.
+        call("POST", REPORT_PATH, {"kind": "status", "status": {k: v for k, v in payload.items() if k != "proxies"}})
     update(GLOBAL_LAST_REPORT_AT=datetime.now(timezone.utc).isoformat())
 
 

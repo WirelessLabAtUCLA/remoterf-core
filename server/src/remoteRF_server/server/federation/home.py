@@ -64,6 +64,7 @@ from remoterf_federation_core import (
     verify_eddsa_jwt,
 )
 
+from .enrollment import UNENROLL_CODE
 from .migrations import configure_connection, migrate_gate_e_usergroups_schema
 from .peers import PeerStore
 
@@ -202,6 +203,28 @@ class ServerHomeGrantIssuer:
             raise FederationError("native_account_required")
         return canonical_uuid(row["subject_id"])
 
+    def _subject(self, conn, local_account_id, revoked_subject_id, destination, action, code_name) -> str:
+        """The native account's subject; or, for an unenrol only, a deleted
+        account's subject still queued for that partner."""
+        if revoked_subject_id is None:
+            if code_name == UNENROLL_CODE:
+                raise FederationError("native_account_required")
+            return self._native_subject(local_account_id, conn=conn)
+        subject = canonical_uuid(revoked_subject_id)
+        if local_account_id is not None or action != "federated_enroll" or code_name != UNENROLL_CODE:
+            raise FederationError("native_account_required")
+        try:
+            queued = conn.execute(
+                "SELECT 1 FROM FederatedRevocations WHERE subject_id=? AND destination_deployment_id=?",
+                (subject, destination),
+            ).fetchone()
+            live = conn.execute("SELECT 1 FROM LocalAccountSubjects WHERE subject_id=?", (subject,)).fetchone()
+        except sqlite3.OperationalError:
+            queued = None
+        if queued is None or live is not None:
+            raise FederationError("native_account_required")
+        return subject
+
     def issue(
         self,
         *,
@@ -215,6 +238,7 @@ class ServerHomeGrantIssuer:
         device_payload: Mapping | None = None,
         enrollee: Mapping | None = None,
         jti: str | None = None,
+        revoked_subject_id: str | None = None,
     ) -> IssuedGrant:
         destination = canonical_uuid(destination_deployment_id)
         request_id = canonical_uuid(request_id or str(uuid4()))
@@ -239,7 +263,7 @@ class ServerHomeGrantIssuer:
         try:
             configure_connection(subject_conn)
             subject_conn.execute("BEGIN IMMEDIATE")
-            subject = self._native_subject(local_account_id, conn=subject_conn)
+            subject = self._subject(subject_conn, local_account_id, revoked_subject_id, destination, action, code_name)
         except Exception:
             conn.rollback()
             conn.close()
@@ -304,7 +328,7 @@ class ServerHomeGrantIssuer:
             issuance_hook = getattr(self, "_issuance_lock_hook", None)
             if issuance_hook is not None:
                 issuance_hook()
-            subject = self._native_subject(local_account_id, conn=subject_conn)
+            subject = self._subject(subject_conn, local_account_id, revoked_subject_id, destination, action, code_name)
             claims = build_grant_claims(
                 issuer_deployment_id=self.local_deployment_id,
                 subject_id=subject,
@@ -627,6 +651,7 @@ class HomeFederationOutbound:
         retry_ambiguous: bool = True,
         deadline: float | None = None,
         request_frame: bytes | None = None,
+        revoked_subject_id: str | None = None,
     ) -> dict:
         """Verified result; an ok device_rpc result also carries ``frame``, its
         raw response. With ``request_frame`` the caller leaves ``request_b64``
@@ -698,6 +723,7 @@ class HomeFederationOutbound:
                 # A downgrade resend keeps the JTI: if the refusal was forged
                 # after the first form ran, the destination answers "replayed".
                 **({"jti": resend_jti} if resend_jti else {}),
+                **({"revoked_subject_id": revoked_subject_id} if revoked_subject_id else {}),
             )
             resend_jti = None
             frame = request_frame if detached else b""
