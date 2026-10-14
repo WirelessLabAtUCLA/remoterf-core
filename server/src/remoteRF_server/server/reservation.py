@@ -13,6 +13,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import math
+import os
 import sqlite3
 from contextlib import closing
 from datetime import datetime
@@ -110,6 +112,31 @@ def _clear_failures(key: str) -> None:
         _failures.pop(key, None)
 
 
+# ACC:availability: at most one call per interval per account.
+AVAILABILITY_WINDOW_SEC = 6 * 3600
+try:
+    _AVAIL_INTERVAL = float(os.getenv("REMOTERF_AVAILABILITY_INTERVAL_SEC", "10"))
+except ValueError:
+    _AVAIL_INTERVAL = 10.0
+_AVAIL_INTERVAL = max(1.0, _AVAIL_INTERVAL) if math.isfinite(_AVAIL_INTERVAL) else 10.0
+_avail_last: dict[str, float] = {}
+
+
+def _avail_wait(key: str) -> int:
+    """Seconds until `key` may call again (0 = allowed now, and recorded).
+    A refusal does not restart the window."""
+    now = time.monotonic()
+    with _failures_lock:
+        last = _avail_last.get(key)
+        if last is not None and now - last < _AVAIL_INTERVAL:
+            return max(1, math.ceil(_AVAIL_INTERVAL - (now - last)))
+        if len(_avail_last) > 1000:
+            for k in [k for k, t in _avail_last.items() if now - t >= _AVAIL_INTERVAL]:
+                del _avail_last[k]
+        _avail_last[key] = now
+        return 0
+
+
 class ReservationHandler:
     def __init__(self):
         self.federation_enroller = None
@@ -199,6 +226,25 @@ class ReservationHandler:
                     return result
                 else:
                     return {"ace": map_arg("Invalid login credentials.")}
+            elif function_name == 'availability':
+                username = unmap_arg(args['un'])
+                password = unmap_arg(args['pw'])
+                if self.login_user(username, password) != {"UC": map_arg(f'{username}')}:
+                    return {"ace": map_arg("Invalid login credentials.")}
+                wait = _avail_wait(username)
+                if wait:
+                    return {"ace": map_arg(f"Too many availability requests; try again in {wait} s."),
+                            "retry_after": map_arg(wait)}
+                devices = self.federated_visible_devices(local_account_id=self.get_uid(username))
+                occ = self.occupancy(username)
+                for d in devices:
+                    o = occ.get(int(d["local_device_id"]), {})
+                    d.pop("max_reservation_time_sec", None)
+                    d["state"] = ("mine" if o.get("mine") else "busy") if o.get("until") else "free"
+                    d["until"] = o.get("until")
+                    d["next"] = o.get("next")
+                return {"UC": map_arg(json.dumps({"now": int(time.time()), "interval": _AVAIL_INTERVAL,
+                                                   "window": AVAILABILITY_WINDOW_SEC, "devices": devices}))}
             elif function_name == 'login':
                 username = unmap_arg(args['un'])
                 result = self.login_user(username, unmap_arg(args['pw']))
@@ -1402,6 +1448,31 @@ class ReservationHandler:
         except RuntimeError:
             return why
         return {"Token": map_arg(token), "res_id": map_arg(int(row[0]))}
+
+    @db_connection
+    def occupancy(self, username=None) -> dict[int, dict]:
+        """Per device: `until` (end of the reservation live now), `mine`
+        (that one is `username`'s) and `next` (first start within the
+        window). Every row counts, whoever owns it; no names leave here."""
+        now = datetime.now()
+        horizon = now + timedelta(seconds=AVAILABILITY_WINDOW_SEC)
+        out: dict[int, dict] = {}
+        for owner, device_id, start, end in self.cursor.execute(
+            "SELECT username, device_id, start_time, end_time FROM Reservations"
+        ).fetchall():
+            try:
+                st, et = _parse_reservation_datetime(start), _parse_reservation_datetime(end)
+            except ValueError:
+                continue
+            if et <= now or st >= horizon:
+                continue
+            o = out.setdefault(int(device_id), {"until": None, "mine": False, "next": None})
+            if st <= now:
+                o["until"] = max(o["until"] or 0, int(et.timestamp()))
+                o["mine"] = o["mine"] or (username is not None and owner == username)
+            else:
+                o["next"] = min(o["next"] or 2**62, int(st.timestamp()))
+        return out
 
     @db_connection
     def federated_visible_devices(self, *, local_account_id: int) -> list[dict]:

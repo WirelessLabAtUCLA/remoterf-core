@@ -594,16 +594,29 @@ def groups(name: str) -> list[dict]:
     return out
 
 
-def _sharing(name: str) -> dict:
+def _sharing(name: str, home=None) -> dict:
     """What the other labs in the cluster get told about what we share:
-    counts, plus each shared group's limits and devices (`cluster info`)."""
+    counts, plus each shared group's limits and devices (`cluster info`).
+    Given `home`, each device also carries busy_until / next_start (epoch,
+    0 = none), anonymous occupancy for Global's availability listing."""
     from ..device_manager import describe_devices
 
     shared = groups(name)
+    occ = home.occupancy() if home is not None else None
+
+    def devices(ids):
+        out = describe_devices(ids)
+        if occ is not None:
+            for d in out:
+                o = occ.get(d["id"], {})
+                d["busy_until"] = o.get("until") or 0
+                d["next_start"] = o.get("next") or 0
+        return out
+
     detail = [{
         "name": g["group_name"], "max_reservation_time_sec": g["max_reservation_time_sec"],
         "max_reservations": g["max_reservations"], "lifetime_sec": g["lifetime_sec"],
-        "max_horizon_sec": g["max_horizon_sec"], "devices": describe_devices(g["devices"]),
+        "max_horizon_sec": g["max_horizon_sec"], "devices": devices(g["devices"]),
     } for g in shared]
     return {"groups": len(shared), "devices": len({d for g in shared for d in g["devices"]}), "detail": detail}
 
@@ -1002,12 +1015,12 @@ def _publish_roster(name: str, cluster: dict) -> None:
     cluster["roster"] = active
 
 
-def _publish_status(name: str, cluster: dict) -> None:
+def _publish_status(name: str, cluster: dict, home=None) -> None:
     """Any lab: post our counts for this cluster, and the route the other
     labs may dial us on directly, when either changes."""
     from .peers import own_route
 
-    note = _sharing(name)
+    note = _sharing(name, home)
     route = own_route()
     if route is not None:
         note["route"] = route
@@ -1205,7 +1218,7 @@ def tick(notify=None, home=None) -> None:
         if cluster["role"] != "owner":
             _mesh(name, cluster, board["rosters"], directory, notify)
         try:
-            _publish_status(name, cluster)
+            _publish_status(name, cluster, home)
         except g.GlobalError as exc:
             notify(f"[cluster] {name}: could not publish what we share: {exc}")
         _take_statuses(name, cluster, board.get("statuses", []))
