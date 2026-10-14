@@ -576,3 +576,17 @@ def test_command_table_and_flags(capfd, monkeypatch):
     assert grpc_server.cmd_diag(["--bogus"]) == 2
     assert grpc_server.cmd_diag(["-c"]) == 0 and grpc_server.cmd_diag(["--FORCE", "--copy"]) == 0
     assert [(c["force"], c["copy"]) for c in calls] == [(False, True), (True, True)]
+
+
+def test_device_under_diag_lists_offline_with_time_left(monkeypatch):
+    monkeypatch.setattr(dm, "_sync_host_devices", lambda: None)
+    dm._devices[7] = state("RTL", FakeRtl(), "rtl_sdr")
+    assert dm._local_devices_str_snapshot()[7] == "RTL (online)"
+    dm.diag_hold(7, time.time() + 150)
+    assert dm._local_devices_str_snapshot()[7] == "RTL (offline: in diag, ~2m left)"
+    assert dm.device_inventory_snapshot()[7]["online"] is False
+    assert dm.describe_devices([7])[0]["online"] is False
+    dm.diag_hold(7, float("inf"))
+    assert dm._local_devices_str_snapshot()[7] == "RTL (offline: in diag)"
+    dm.diag_release(7)
+    assert dm.device_inventory_snapshot()[7]["online"] is True

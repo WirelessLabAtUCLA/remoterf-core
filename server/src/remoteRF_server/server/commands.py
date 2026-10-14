@@ -211,7 +211,7 @@ def resolve(argv: list[str]) -> tuple[Optional[Command], list[str]]:
 
 _SECTION_BLURB = {
     "Server": "status, restart, stop",
-    "Devices": "the radios this server offers",
+    "Devices": "the radios this server offers, and diag",
     "Users": "accounts and roles",
     "Reservations": "who has what, and until when",
     "Groups": "user groups: devices, quotas, time limits",

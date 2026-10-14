@@ -222,7 +222,10 @@ def _local_devices_str_snapshot(power_state: bool = True) -> Dict[int, str]:
             status = "online" if _is_connected(st) else "offline"
             fault = _poe_fault(st)
             power = getattr(getattr(st.dev, "device", None), "power_state", None)
-            if fault:
+            diag_note = _diag_note_locked(gid)
+            if diag_note:
+                status = f"offline: {diag_note}"
+            elif fault:
                 status = f"offline: {fault}"
             elif power and power_state:
                 status = f"{status}, {power}"
@@ -763,7 +766,8 @@ def describe_devices(ids) -> list[dict]:
             if st is None:
                 continue
             out.append({"id": int(gid), "name": (st.name or f"device-{gid}").strip(),
-                        "type": st.dtype or "", "online": _is_connected(st) and not _poe_fault(st)})
+                        "type": st.dtype or "",
+                        "online": _is_connected(st) and not _poe_fault(st) and not _diag_note_locked(gid)})
             if st.handle and owners.get(st.handle) == int(gid):
                 out[-1]["handle"] = st.handle
     return out
@@ -946,6 +950,21 @@ def diag_blocks(gid, start: Optional[float] = None) -> bool:
     with _state_lock:
         held = [u for k, u in _diag_until.items() if k is None or k == int(gid)]
     return bool(held) and (start is None or start < max(held))
+
+
+def _diag_left_locked(gid) -> Optional[float]:
+    """Seconds until a diagnostic holding `gid` should end (inf when unknown), or
+    None when none holds it. The caller holds _state_lock."""
+    held = [u for k, u in _diag_until.items() if k is None or k == int(gid)]
+    return max(0.0, max(held) - time.time()) if held else None
+
+
+def _diag_note_locked(gid) -> str:
+    """'in diag, ~3m left' for a device a diagnostic holds, else ''."""
+    left = _diag_left_locked(gid)
+    if left is None:
+        return ""
+    return "in diag" if left == float("inf") else f"in diag, ~{max(1, round(left / 60))}m left"
 
 
 def _refuse_if_diag(gid: int) -> None:
@@ -1315,7 +1334,7 @@ def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
             gid: {
                 "name": st.name or f"device {gid}",
                 "device_type": st.dtype or None,
-                "online": _is_connected(st) and not _poe_fault(st),
+                "online": _is_connected(st) and not _poe_fault(st) and not _diag_note_locked(gid),
                 "origin": st.origin,
                 "handle": st.handle if st.handle and owners.get(st.handle) == gid else "",
             }
