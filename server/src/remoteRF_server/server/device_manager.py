@@ -1294,23 +1294,24 @@ def device_inventory_snapshot() -> Dict[int, Dict[str, object]]:
 
 # Optional: reload device definitions (atomic swap)
 
-def reload_devices() -> None:
+def reload_devices(on_device=None) -> None:
     """
     Open the local devices in devices.yml: once at server startup
     (start_server_runtime), and again after `devices add/remove/rename/wipe`.
     Preserves existing salt/hash for devices that remain (same gid),
     and preserves host virtual devices + their auth state.
+    on_device(gid, name) is called as each local device starts opening.
     """
     # The console and the control socket can both reload; two at once would
     # each make every device and leave one set open.
     with _reload_lock:
-        _reload_devices_locked()
+        _reload_devices_locked(on_device)
 
 
 _reload_lock = threading.Lock()
 
 
-def _reload_devices_locked() -> None:
+def _reload_devices_locked(on_device=None) -> None:
     # ponytail: reconnects every local device, not just the changed one;
     # diff against the current table if a reload mid-session ever hurts.
     records = _load_device_records()
@@ -1343,6 +1344,8 @@ def _reload_devices_locked() -> None:
         name = (rec.get("NAME") or f"device-{gid}").strip()
         ident = (rec.get("IDENT") or "").strip()
 
+        if on_device is not None:
+            on_device(int(gid), name)
         dev, ident2, dtype2 = _connect_from_record(rec)
 
         tmp_info[int(gid)] = name

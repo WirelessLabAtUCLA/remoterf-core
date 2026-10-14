@@ -405,8 +405,15 @@ def start_server_runtime(
             ca_path=cert_dir / "ca.crt",
         )
         # The one place local hardware is opened: importing device_manager does not.
-        reload_devices()
-        reservation_handler.update_devices()
+        # The startup check runs before server.start(): no call reaches a
+        # Pluto it is power-cycling.
+        def open_devices(on_device):
+            reload_devices(on_device=on_device)
+            reservation_handler.update_devices()
+
+        from . import startup_check
+
+        startup_check.run(open_devices)
         server.start()
         if direct_path is not None:
             direct_path.start_listener()
@@ -424,7 +431,7 @@ def start_server_runtime(
             start_usergroup_cleanup_loop(interval_sec=60)
         if publish_status:
             start_status_publisher()
-    except Exception:
+    except BaseException:  # Ctrl-C during the startup check too: close_local_devices powers Plutos down
         stop_event.set()
         server.stop(0)
         session_manager.close_all()
