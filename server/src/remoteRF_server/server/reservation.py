@@ -1084,7 +1084,7 @@ class ReservationHandler:
         return result
     
     def grab_all_devices(self, username:str):
-        devices = get_all_devices_str()
+        devices = get_all_devices_str(power_state=False)
         perm = perms.get_perms(username)[0]
         if perm[0] == 'Admin':
             return {str(k): map_arg(str(v)) for k, v in devices.items()}

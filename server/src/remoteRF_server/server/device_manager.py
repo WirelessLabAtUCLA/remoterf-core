@@ -210,7 +210,7 @@ def forget_host_devices(device_ids) -> None:
                 devices_info.pop(gid, None)
                 device_serialization.pop(gid, None)
 
-def _local_devices_str_snapshot() -> Dict[int, str]:
+def _local_devices_str_snapshot(power_state: bool = True) -> Dict[int, str]:
     out: Dict[int, str] = {}
     with _state_lock:
         for gid, st in _devices.items():
@@ -224,7 +224,7 @@ def _local_devices_str_snapshot() -> Dict[int, str]:
             power = getattr(getattr(st.dev, "device", None), "power_state", None)
             if fault:
                 status = f"offline: {fault}"
-            elif power:
+            elif power and power_state:
                 status = f"{status}, {power}"
             if st.salt or st.hsh:
                 status = f"{status}, reserved"
@@ -769,10 +769,11 @@ def describe_devices(ids) -> list[dict]:
     return out
 
 
-def get_all_devices_str() -> Dict[int, str]:
+def get_all_devices_str(power_state: bool = True) -> Dict[int, str]:
+    """power_state=False: no PoE on/standby, for users' device lists."""
     _sync_host_devices()
 
-    out = _local_devices_str_snapshot()
+    out = _local_devices_str_snapshot(power_state)
     host_out = _host_devices_str_snapshot()
 
     # merge with collision handling (shouldn't happen; keeps UI stable if it does)
