@@ -325,6 +325,22 @@ def test_rtl_pass_and_short_read():
     assert tests["byte reads"]["status"] == "fail"
 
 
+class FakeRtlBlogV4(FakeRtl):
+    """R828D on the installed librtlsdr: gain reads back 0 and there is no reset_buffer."""
+
+    def get_gain(self):
+        return 0
+
+    def call_reset_buffer(self):
+        raise RuntimeError("the installed PyRtlSdr/librtlsdr runtime does not support reset_buffer")
+
+
+def test_rtl_blog_v4_unreported_gain_and_no_reset_buffer_pass():
+    row, tests = run_one(state("RTLSDR 0", FakeRtlBlogV4(), "rtl_sdr"))
+    assert row["status"] == "ok", tests
+    assert "does not report gain" in tests["gain"]["detail"]
+
+
 def test_usrp_rx_only_preloads_then_closes():
     schema = FakeUsrpSchema()
     row, tests = run_one(state("B205", schema, "usrp"))

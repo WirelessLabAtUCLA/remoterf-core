@@ -55,17 +55,26 @@ def gains(ctx):
     valid = sorted(float(g) for g in schema.get_valid_gains_db())
     if not valid:
         raise RuntimeError("tuner reports no gains")
+    unreported = 0
     for gain in (valid[0], valid[len(valid) // 2], valid[-1]):
         schema.set_gain(gain)
-        _close(schema.get_gain(), gain, 1, "gain")
-    return f"{len(valid)} gains, {valid[0]:g}-{valid[-1]:g} dB set", {"gains": len(valid)}
+        got = schema.get_gain()
+        if gain and not float(got):  # RTL-SDR Blog V4 (R828D) reads 0 for any manual gain
+            unreported += 1
+            continue
+        _close(got, gain, 1, "gain")
+    note = ", tuner does not report gain" if unreported else ""
+    return f"{len(valid)} gains, {valid[0]:g}-{valid[-1]:g} dB set{note}", {"gains": len(valid)}
 
 
 def byte_reads(ctx):
     schema = ctx["schema"]
     schema.set_sample_rate(2_048_000)
     schema.set_center_freq(100_000_000)
-    schema.call_reset_buffer()
+    try:
+        schema.call_reset_buffer()
+    except Exception:  # noqa: BLE001 - optional in pyrtlsdr; the server's reads never need it
+        pass
     for n in (512, 512 * 32, 512 * 256):
         data = np.frombuffer(bytes(schema.call_read_bytes(n)), dtype=np.uint8)
         if data.size != n or data.size % 512:

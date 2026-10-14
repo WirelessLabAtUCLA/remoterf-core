@@ -324,7 +324,7 @@ def run(*, force: bool = False, copy: bool = False, ask=None, cfg_dir: Path | No
     interrupted = False
     try:
         display._print(f"Diagnosing {len(todo)} of {len(rows)} devices", Sty.BOLD,
-                       f" · ETA ~{_fmt(total)}" if todo else "", Sty.GRAY)
+                       f" · ETA ~{_fmt(total)} · Ctrl-C cancels" if todo else "", Sty.GRAY)
         left = total
         try:
             if force:
