@@ -32,6 +32,7 @@ import getpass
 import yaml
 
 from remoteRF_server.drivers.usrp.profiles import (
+    USRP_PROFILES,
     get_usrp_profile,
     inventory_for_profile,
 )
@@ -1091,7 +1092,9 @@ def _read_device_records() -> Dict[int, Dict[str, Any]]:
     return recs
 
 
-def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
+def _write_device_records(recs: Dict[int, Dict[str, Any]], *, backup: bool = False) -> Optional[Path]:
+    """Rewrite devices.yml atomically; backup=True first copies the current file to
+    devices.yml.<timestamp>.bak and returns that path."""
     devices: List[Dict[str, Any]] = []
     for gid in sorted(recs.keys()):
         fields = recs[gid]
@@ -1131,13 +1134,25 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
         entry["init"] = init
         devices.append(entry)
     _cfg_dir().mkdir(parents=True, exist_ok=True)
-    _devices_yaml_path().write_text(
-        yaml.safe_dump({"devices": devices}, sort_keys=False),
-        encoding="utf-8",
-    )
+    path = _devices_yaml_path()
+    saved = None
+    if backup and path.exists() and path.stat().st_size:
+        saved = path.with_name(f"{path.name}.{datetime.now():%Y%m%d-%H%M%S}.bak")
+        shutil.copy2(path, saved)
+    target = path.resolve()  # a symlinked devices.yml keeps its link
+    tmp = target.with_name(f".{target.name}.tmp")
+    try:
+        tmp.write_text(yaml.safe_dump({"devices": devices}, sort_keys=False), encoding="utf-8")
+        if target.exists():
+            shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     # Once a legacy inventory has been migrated successfully, remove it so
     # there is exactly one authoritative device manifest.
     _devices_env_path().unlink(missing_ok=True)
+    return saved
 
 
 def _device_add_pluto(spec: str) -> int:
@@ -1635,9 +1650,490 @@ def cmd_devices_list(argv: List[str]) -> int:
     return _device_show()
 
 
+# -----------------------------
+# `devices add` with no arguments: a guided wizard that writes one devices.yml
+# record per driver type, with exactly the init: keys that driver's make_device /
+# bind_inventory reads.
+# -----------------------------
+
+# device_type: (one-line description, default name stem)
+_WIZARD_TYPES: Dict[str, Tuple[str, str]] = {
+    "adalm_pluto": ("ADALM-Pluto SDR over USB, Ethernet or PoE", "pluto"),
+    "adalm_pluto_mimo": ("Pluto in 2x2 MIMO mode over USB (AD9361 boards)", "pluto-mimo"),
+    "rtl_sdr": ("RTL-SDR receive-only dongle (USB)", "rtl-sdr"),
+    "hackrf": ("HackRF One (USB)", "hackrf"),
+    "usrp": ("Ettus/NI USRP: B2xx/2901 over USB, N2xx/X3xx/N3xx over Ethernet", "usrp"),
+    "usrp_phaser": ("USRP driving an ADI CN0566 Phaser", "phaser"),
+    "ti_mmwave": ("TI xWR68xx mmWave radar (CP2105 USB bridge)", "mmwave"),
+    "gps": ("USB GPS receiver, NMEA serial (contrib driver)", "gps"),
+    "bluetooth": ("Bluetooth adapter through BlueZ (contrib driver)", "bluetooth"),
+}
+# The argv type names `devices add` has always taken.
+_WIZARD_ALIASES = {"pluto": "adalm_pluto", "pluto-mimo": "adalm_pluto_mimo", "rtl-sdr": "rtl_sdr",
+                   "ti-mmwave": "ti_mmwave", "usrp-2901": "usrp", "usrp-b205-mini": "usrp",
+                   "usrp-n210": "usrp", "usrp-profile": "usrp"}
+_USRP_ALIAS_PROFILES = {"usrp-2901": "usrp2901", "usrp-b205-mini": "b205mini", "usrp-n210": "n210"}
+_PLUTO_USB_IDS = ("0456:b673",)
+_USB_IDS = {
+    "rtl_sdr": ("0bda:2838", "0bda:2832"),
+    "hackrf": ("1d50:6089", "1d50:cc15"),
+    "usrp": ("2500:0020", "2500:0021", "2500:0022", "3923:7813", "3923:7814"),
+    "ti_mmwave": ("10c4:ea70",),
+}
+_SYSFS_USB = Path("/sys/bus/usb/devices")
+_SYSFS_BT = Path("/sys/class/bluetooth")
+_SERIAL_BY_ID = Path("/dev/serial/by-id")
+_POE_DEFAULTS = {"poe_switch": "192.168.88.1", "poe_user": "admin"}  # poe_pluto_from_init's
+
+
+class _Cancel(Exception):
+    pass
+
+
+def _wask(prompt: str, default: Any = "", *, check=None, blank_ok: bool = False, secret: bool = False) -> str:
+    """One wizard answer: 'c' cancels, blank takes the default, check(value) -> problem re-asks."""
+    shown = f" [{default}]" if str(default) and not secret else ""
+    while True:
+        try:
+            raw = (getpass.getpass if secret else input)(f"  {prompt}{shown}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise _Cancel
+        if raw.lower() == "c":
+            raise _Cancel
+        value = raw or str(default)
+        problem = None if (blank_ok and not value) else ("required" if not value else check(value) if check else None)
+        if not problem:
+            return value
+        print(f"    {problem}")
+
+
+def _wyes(prompt: str, default: bool) -> bool:
+    answer = _wask(f"{prompt} (y/n)", "y" if default else "n",
+                   check=lambda v: None if v.lower() in ("y", "yes", "n", "no") else "answer y or n")
+    return answer.lower().startswith("y")
+
+
+def _wpick(prompt: str, options: List[Tuple[str, str]], *, default: str = "1", typed=None, blank_ok: bool = False) -> str:
+    """A numbered menu of (value, label). typed(value) -> problem also accepts a
+    typed value (manual entry); without it only the listed values are accepted."""
+    for i, (_, label) in enumerate(options, 1):
+        print(f"    {i}) {label}")
+    numbers = {str(i): value for i, (value, _) in enumerate(options, 1)}
+
+    def check(v):
+        if v in numbers or any(v == value for value, _ in options):
+            return None
+        return typed(v) if typed else f"pick 1-{len(options)}"
+
+    answer = _wask(prompt, default if options else "", check=check, blank_ok=blank_ok)
+    return numbers.get(answer, answer)
+
+
+def _usb_devices(ids) -> List[Tuple[str, str]]:
+    """(USB port path, serial) of attached devices with these vendor:product ids,
+    read from Linux sysfs: nothing is opened."""
+    found = []
+    for d in sorted(_SYSFS_USB.glob("*")):
+        try:
+            vid_pid = f"{(d / 'idVendor').read_text().strip()}:{(d / 'idProduct').read_text().strip()}"
+        except OSError:
+            continue
+        if vid_pid in ids:
+            try:
+                serial = (d / "serial").read_text().strip()
+            except OSError:
+                serial = ""
+            found.append((d.name, serial))
+    return found
+
+
+def _iio_scan() -> List[Tuple[str, str]]:
+    """(uri, serial) of every libiio context `iio_info -s` finds (it opens no device)."""
+    try:
+        out = subprocess.run(["iio_info", "-s"], capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in out.splitlines():
+        uri = re.search(r"\[((?:usb|ip):[^\]]+)\]", line)
+        if uri:
+            serial = re.search(r"serial=(\w+)", line)
+            found.append((uri.group(1), serial.group(1) if serial else ""))
+    return found
+
+
+def _used_values(recs: Dict[int, Dict[str, Any]], key: str) -> Dict[str, int]:
+    return {str(r.get("INIT", {}).get(key)): gid for gid, r in recs.items()
+            if r.get("INIT", {}).get(key) not in (None, "")}
+
+
+def _not_used(recs, key, label):
+    used = _used_values(recs, key)
+    return lambda v: f"{label} {v} is already device #{used[v]}" if v in used else None
+
+
+def _both(*checks):
+    return lambda v: next((p for p in (c(v) for c in checks) if p), None)
+
+
+def _ip_check(v):
+    return None if _is_ip_address(v) else "enter an IPv4 or IPv6 address, e.g. 192.168.4.50"
+
+
+def _int_check(lo=0):
+    return lambda v: None if v.lstrip("-").isdigit() and int(v) >= lo else f"enter a whole number >= {lo}"
+
+
+def _wserial(recs, label: str, candidates: List[Tuple[str, str]], *, key: str = "serial") -> str:
+    """Pick a detected serial (already configured ones hidden) or type one."""
+    used = _used_values(recs, key)
+    fresh = [(s, f"{s}  ({where})") for s, where in candidates if s and s not in used]
+    if fresh:
+        print(f"  Detected (number to pick, or type a {label}):")
+        return _wpick(label, fresh, typed=_not_used(recs, key, label))
+    return _wask(label, check=_not_used(recs, key, label))
+
+
+def _serial_or_index(recs, dtype: str, label: str) -> Dict[str, Any]:
+    by = _wpick("Select it by", [("serial", "USB serial (stable across replugs)"),
+                                 ("device_index", "index among attached ones (0 = first)")])
+    if by == "device_index":
+        used = {str(r["INIT"]["device_index"]): gid for gid, r in recs.items()
+                if r.get("TYPE") == dtype and "device_index" in r.get("INIT", {})}
+        free = next(str(i) for i in range(len(used) + 1) if str(i) not in used)
+        taken = lambda v: f"index {int(v)} is already device #{used[str(int(v))]}" if str(int(v)) in used else None
+        return {"device_index": int(_wask("Index", free, check=_both(_int_check(), taken)))}
+    return {"serial": _wserial(recs, label, [(s, f"USB {p}") for p, s in _usb_devices(_USB_IDS[dtype])])}
+
+
+def _poe_switch(recs) -> Dict[str, str]:
+    """Switch host/user: reuse the existing PoE Plutos', else ask."""
+    for _, r in sorted(recs.items()):
+        init = r.get("INIT", {})
+        if str(init.get("poe", "")).strip().lower() in ("true", "yes", "1"):
+            sw = {k: str(init.get(k) or d) for k, d in _POE_DEFAULTS.items()}
+            print(f"  PoE switch: {sw['poe_switch']} as {sw['poe_user']} (same as the other PoE Plutos)")
+            return sw
+    print("  No PoE Pluto is configured yet: which MikroTik switch powers it (RouterOS API, TCP 8728)?")
+    return {"poe_switch": _wask("Switch address", _POE_DEFAULTS["poe_switch"], check=_ip_check),
+            "poe_user": _wask("Switch API user", _POE_DEFAULTS["poe_user"])}
+
+
+def _poe_password_file() -> Path:
+    from remoteRF_server.common.utils import get_remoterf_root
+
+    return get_remoterf_root() / "poe_switch_password"  # where poe_pluto_from_init reads it
+
+
+def _ask_pluto(recs, extra: Dict[str, Any]) -> Dict[str, Any]:
+    reach = _wpick("How is it reached", [
+        ("usb", "USB cable to this server"),
+        ("ip", "Ethernet / static IP, always powered"),
+        ("poe", "PoE: powered from a MikroTik switch port"),
+    ])
+    scan: List[Tuple[str, str]] = []
+    if reach != "poe":  # a power-cycled PoE Pluto is off, so not listed
+        print("  Looking for Plutos (iio_info -s) ...")
+        scan = _iio_scan()
+    if reach == "usb":
+        usb = [(s, uri) for uri, s in scan if uri.startswith("usb:")]
+        return {"serial": _wserial(recs, "iio serial", usb)}
+    used_ips = _used_values(recs, "ip")
+    ips = [(uri[3:], f"{uri[3:]}  (serial {s or '?'})") for uri, s in scan
+           if uri.startswith("ip:") and _is_ip_address(uri[3:]) and uri[3:] not in used_ips]
+    if ips:
+        print("  Detected on the network (number to pick, or type an address):")
+    ip_ok = _both(_ip_check, _not_used(recs, "ip", "address"))
+    ip = _wpick("Pluto IP address (its ipaddr_eth)", ips, typed=ip_ok) if ips else _wask(
+        "Pluto IP address (its ipaddr_eth)", check=ip_ok)
+    seen = next((s for uri, s in scan if uri == f"ip:{ip}"), "")
+    if seen in _used_values(recs, "serial"):
+        seen = ""
+    serial_used = _not_used(recs, "serial", "serial")
+    serial = _wask(f"iio serial, checked on connect ({'-' if seen else 'blank'}: don't check)", seen, blank_ok=True,
+                   check=lambda v: None if v == "-" else serial_used(v))
+    serial = "" if serial == "-" else serial
+    init: Dict[str, Any] = {"ip": ip, **({"serial": serial} if serial else {})}
+    if reach == "ip":
+        return init
+    switch = _POE_DEFAULTS["poe_switch"]
+    for r in recs.values():
+        if str(r.get("INIT", {}).get("poe", "")).strip().lower() in ("true", "yes", "1"):
+            switch = str(r["INIT"].get("poe_switch") or switch)
+            break
+    taken = {str(r["INIT"].get("poe_port")): gid for gid, r in recs.items()
+             if r.get("INIT", {}).get("poe_port")
+             and str(r["INIT"].get("poe_switch") or _POE_DEFAULTS["poe_switch"]) == switch}
+    port = _wask("Switch port it is plugged into, e.g. ether7",
+                 check=lambda v: (f"port {v} is already device #{taken[v]}" if v in taken
+                                  else None if re.fullmatch(r"[\w./-]+", v) else "a RouterOS interface name, e.g. ether7"))
+    print("  Power cycling: the server keeps the port off while the Pluto is idle, powers it on when")
+    print("  a reservation starts (boot takes up to ~45 s) and off again when it ends.")
+    if not _wyes("Let the server power-cycle it", True):
+        print("  The server will not switch this port: keep its PoE output on.")
+        return {**init, "poe": False, "poe_port": port}
+    init = {**init, "poe": True, "poe_port": port, **_poe_switch(recs)}
+    if not _poe_password_file().exists():
+        pw = _wask(f"Switch password for {init['poe_user']} (saved to {_poe_password_file()}, blank: none)",
+                   blank_ok=True, secret=True)
+        extra["poe_password"] = pw
+    return init
+
+
+def _ask_pluto_mimo(recs, extra) -> Dict[str, Any]:
+    by = _wpick("Select it by", [("serial", "iio serial"), ("usb_port", "USB port path (boards without a serial)")])
+    if by == "serial":
+        sel = {"serial": _wserial(recs, "iio serial", [(s, uri) for uri, s in _iio_scan() if uri.startswith("usb:")])}
+    else:
+        ports = [(p, f"serial {s or '-'}") for p, s in _usb_devices(_PLUTO_USB_IDS)]
+        sel = {"usb_port": _wserial(recs, "USB port path, e.g. 1-2.3", ports, key="usb_port")}
+    return {**sel, "rx_enabled_channels": [0, 1], "tx_enabled_channels": [0, 1]}
+
+
+def _ask_usrp(recs, extra) -> Dict[str, Any]:
+    default = next((str(i) for i, p in enumerate(USRP_PROFILES, 1) if p.profile_id == extra.get("usrp_profile")), "1")
+    profile = get_usrp_profile(_wpick("Model", [(p.profile_id, f"{p.display_name} ({p.transport})") for p in USRP_PROFILES],
+                                      default=default))
+    if profile.selector == "serial":
+        selector = _wserial(recs, "UHD serial", [(s, f"USB {p}") for p, s in _usb_devices(_USB_IDS["usrp"])])
+    elif profile.selector == "address":
+        selector = _wask("IP address, e.g. 192.168.10.2", check=_both(_ip_check, _not_used(recs, "addr", "address")))
+    else:
+        selector = _wask("UHD device args, e.g. type=x300,addr=192.168.40.2", check=_not_used(recs, "args", "args"))
+    return inventory_for_profile(profile.profile_id, selector)
+
+
+def _ask_usrp_phaser(recs, extra) -> Dict[str, Any]:
+    init = _ask_usrp(recs, extra)
+    init["phaser_uri"] = _wask("Phaser IIO URI", "ip:localhost",
+                               check=lambda v: None if re.match(r"(ip|usb|local):", v) else "e.g. ip:phaser.local")
+    return init
+
+
+def _ask_ti_mmwave(recs, extra) -> Dict[str, Any]:
+    serial = _wserial(recs, "CP2105 serial", [(s, f"USB {p}") for p, s in _usb_devices(_USB_IDS["ti_mmwave"])])
+    return {"serial": serial, "firmware_profile": "xwr68xx_oob_sdk3", "cli_baud": 115200,
+            "data_baud": 921600, "frame_queue_depth": 8}  # as `devices add ti-mmwave` writes
+
+
+def _ask_gps(recs, extra) -> Dict[str, Any]:
+    try:
+        ports = sorted(str(p) for p in _SERIAL_BY_ID.iterdir())
+    except OSError:
+        ports = []
+    used = _used_values(recs, "port")
+    options = [(p, p) for p in ports if p not in used]
+    print("  Serial port (a /dev/serial/by-id path survives replugs; blank: auto-detect a u-blox):")
+    check = _both(lambda v: None if v.startswith("/dev/") else "a /dev/... path", _not_used(recs, "port", "port"))
+    port = _wpick("Port", options, default="", typed=check, blank_ok=True)
+    baud = int(_wask("Baud", "9600", check=_int_check(1)))
+    return {**({"port": port} if port else {}), "baud": baud}
+
+
+def _ask_bluetooth(recs, extra) -> Dict[str, Any]:
+    try:
+        adapters = sorted(p.name for p in _SYSFS_BT.iterdir() if re.fullmatch(r"hci\d+", p.name))
+    except OSError:
+        adapters = []
+    used = _used_values(recs, "adapter")
+    print("  Adapter (blank: look up the CSR dongle each time it opens; its hciN changes on replug):")
+    adapter = _wpick("Adapter", [(a, a) for a in adapters if a not in used], default="", blank_ok=True,
+                     typed=_both(lambda v: None if re.fullmatch(r"hci\d+", v) else "e.g. hci1",
+                                 _not_used(recs, "adapter", "adapter")))
+    if adapter:
+        return {"adapter": adapter}
+    other = next((gid for gid, r in sorted(recs.items()) if r.get("TYPE") == "bluetooth"
+                  and not r.get("INIT", {}).get("adapter")), None)
+    if other is not None:
+        print(f"  Warning: device #{other} already looks up the CSR dongle; both would share it.")
+    return {"allow_fallback": True} if _wyes("No CSR dongle: take any other adapter instead", False) else {}
+
+
+def _ask_generic(recs, extra) -> Dict[str, Any]:
+    print("  init: fields for this driver as key=value, blank line to finish (none is fine).")
+    init: Dict[str, Any] = {}
+    while True:
+        line = _wask("key=value", blank_ok=True, check=lambda v: None if re.fullmatch(r"\w+=.*", v) else "key=value")
+        if not line:
+            return init
+        key, _, value = line.partition("=")
+        init[key] = value
+        if key not in ("serial", "port", "addr", "ip", "args", "uri") and value.strip():
+            try:
+                init[key] = yaml.safe_load(value)  # numbers, booleans, lists
+            except yaml.YAMLError:
+                pass
+
+
+def _driver_dir_types() -> Dict[str, str]:
+    """device_type -> file for the drivers installed in the drivers directory."""
+    from remoteRF_server.common.utils import get_drivers_dir
+
+    found: Dict[str, str] = {}
+    for f in sorted(get_drivers_dir().glob("*.py")):
+        try:
+            text = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for t in re.findall(r"(?:idl_register|register_driver)\(\s*['\"]([^'\"]+)['\"]\s*\)", text):
+            found.setdefault(t.strip().lower(), f.name)
+    return found
+
+
+def _active_reservations() -> int:
+    """Reservations running now, read-only from the server's reservations.db."""
+    import sqlite3
+    from contextlib import closing
+    from remoteRF_server.common.utils import get_db_dir
+
+    db = get_db_dir() / "reservations.db"
+    if not db.exists():
+        return 0
+    now = datetime.now().isoformat(" ")
+    try:
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)) as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM Reservations WHERE start_time <= ? AND end_time > ?",
+                                    (now, now)).fetchone()[0])
+    except sqlite3.Error as exc:
+        return 0 if "no such table" in str(exc) else -1  # -1: could not tell
+
+
+def _reload_ok(yes: bool) -> bool:
+    n = _active_reservations()
+    if not n or yes:
+        return True
+    if n < 0:
+        print("  Could not read reservations.db to check for running reservations.")
+    else:
+        print(f"  {n} reservation(s) are running now.")
+    print("  Reloading devices reconnects EVERY local device, which interrupts running reservations.")
+    try:
+        return input("  Type 'reload' to go ahead (-y skips this): ").strip().lower() == "reload"
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Refused: no answer. Pass -y to reload anyway.")
+        return False
+
+
+def _test_pluto(init: Dict[str, Any], password: Optional[str]) -> bool:
+    import time
+    from remoteRF_server.drivers.adalm_pluto import poe
+
+    ip = init.get("ip")
+    if not ip:
+        found = any(s == init["serial"] for uri, s in _iio_scan() if uri.startswith("usb:"))
+        print(f"  iio_info -s {'lists' if found else 'does not list'} serial {init['serial']}.")
+        return found
+    if not poe.is_poe(init):
+        up = poe._iiod_up(ip)
+        print(f"  {ip}:{poe.IIOD_PORT} {'answers' if up else 'does not answer'}.")
+        return up
+    if password is None:
+        password = _poe_password_file().read_text().strip() if _poe_password_file().exists() else ""
+    sw = {"switch": init["poe_switch"], "user": init["poe_user"], "password": password, "port": init["poe_port"]}
+    print(f"  Powering {init['poe_port']} on; waiting up to {poe.BOOT_TIMEOUT_S} s for {ip} ...")
+    up = False
+    try:
+        poe.set_poe(on=True, **sw)
+        deadline = time.monotonic() + poe.BOOT_TIMEOUT_S
+        while not (up := poe._iiod_up(ip)) and time.monotonic() < deadline:
+            time.sleep(1)
+    except Exception as exc:
+        print(f"  Switch error: {exc}")
+    finally:
+        try:
+            poe.set_poe(on=False, **sw)
+            print(f"  Powered {init['poe_port']} off again.")
+        except Exception as exc:
+            print(f"  Could not power {init['poe_port']} off: {exc}")
+    print(f"  {ip} {'booted and answered' if up else 'did not answer'}.")
+    return up
+
+
+def _device_add_wizard(dtype: str = "", *, yes: bool = False, gid_default: Optional[str] = None) -> int:
+    try:
+        recs = _read_device_records()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    installed = _driver_dir_types()
+    types = {t: d for t, (d, _) in _WIZARD_TYPES.items()}
+    for t, fname in installed.items():
+        types.setdefault(t, f"driver {fname} in the drivers directory")
+    askers = {"adalm_pluto": _ask_pluto, "adalm_pluto_mimo": _ask_pluto_mimo, "usrp": _ask_usrp,
+              "usrp_phaser": _ask_usrp_phaser, "ti_mmwave": _ask_ti_mmwave, "gps": _ask_gps,
+              "bluetooth": _ask_bluetooth,
+              "rtl_sdr": lambda r, e: _serial_or_index(r, "rtl_sdr", "RTL-SDR serial"),
+              "hackrf": lambda r, e: _serial_or_index(r, "hackrf", "HackRF serial")}
+    extra: Dict[str, Any] = {"usrp_profile": _USRP_ALIAS_PROFILES.get(dtype)}
+    dtype = _WIZARD_ALIASES.get(dtype, dtype)
+    if dtype and dtype not in types:
+        print(f"ERROR: unknown device type {dtype!r}; one of: {', '.join(types)}", file=sys.stderr)
+        return 2
+    print("Add a device (type c at any prompt to cancel).")
+    try:
+        if not dtype:
+            picked = _wpick("Type", [(t, f"{t:<17} {d}") for t, d in types.items()],
+                            typed=lambda v: None if v in types or v in _WIZARD_ALIASES else f"pick 1-{len(types)}")
+            extra["usrp_profile"] = _USRP_ALIAS_PROFILES.get(picked)
+            dtype = _WIZARD_ALIASES.get(picked, picked)
+        if dtype in ("gps", "bluetooth") and dtype not in installed:
+            from remoteRF_server.common.utils import get_drivers_dir
+
+            print(f"  Note: the {dtype} driver is not installed: copy contrib/drivers/{dtype}_schema.py into")
+            print(f"  {get_drivers_dir()} and restart the server (contrib/drivers/README.md).")
+            print("  Until then the device is listed offline.")
+        free = max(recs) + 1 if recs else 0
+        gid = int(_wask("Device id", gid_default or free, check=lambda v: _int_check()(v) or (
+            f"id {v} is taken by {recs[int(v)].get('NAME')!r}" if int(v) in recs else None)))
+        name = _wask("Name (also its handle)", f"{_WIZARD_TYPES.get(dtype, ('', dtype))[1]}-{gid}",
+                     check=_name_problem)
+        init = askers.get(dtype, _ask_generic)(recs, extra)
+        entry = {"device_id": gid, "device_type": dtype, "name": name, "init": init}
+        print("\n  " + yaml.safe_dump(entry, sort_keys=False).strip().replace("\n", "\n  ") + "\n")
+        if dtype == "adalm_pluto" and _wyes(
+                "Test it now" + (" (powers the switch port on, then off)" if init.get("poe") is True else ""), False):
+            if not _test_pluto(init, extra.get("poe_password")) and not _wyes("Add it anyway", False):
+                raise _Cancel
+        if not _wyes(f"Add device #{gid} to {_devices_yaml_path()}", True):
+            raise _Cancel
+    except (_Cancel, KeyboardInterrupt):  # Ctrl-C during the iio scan or the PoE boot wait too
+        print("\nCancelled; nothing written.")
+        return 1
+    if not _reload_ok(yes):
+        print("Cancelled; nothing written.")
+        return 1
+    if extra.get("poe_password"):
+        path = _poe_password_file()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(extra["poe_password"] + "\n")
+        print(f"Saved the switch password to {path}.")
+    recs = _read_device_records()  # the file may have changed while the questions were asked
+    if gid in recs or _name_problem(name):
+        print(f"ERROR: id {gid} or name {name!r} was taken meanwhile; nothing written.", file=sys.stderr)
+        return 2
+    recs[gid] = {"TYPE": dtype, "NAME": name, "INIT": init}
+    saved = _write_device_records(recs, backup=True)
+    print(f"Added device: {gid} type={dtype} name={name}" + (f" (backup: {saved})" if saved else ""))
+    if init.get("poe") is True and not _poe_password_file().exists():
+        print(f"No switch password saved: the server logs in with an empty one unless {_poe_password_file()} is created.")
+    return 0
+
+
 def cmd_devices_add(argv: List[str]) -> int:
+    """`devices add [type]`: the guided wizard. `devices add <type> <name> --serial S`
+    (--addr A, --index N, --profile P --selector S, or a third positional): no questions."""
+    if "-h" in argv or "--help" in argv:
+        print("devices add [type] [--id N] [-y]      guided: pick the type, answer its questions\n"
+              "devices add <type> <name> <identifier> | --serial S | --addr A | --index N | --profile P --selector S\n"
+              "                                      no questions (pluto, pluto-mimo, rtl-sdr, ti-mmwave, usrp-*)\n"
+              "-y: reload even while reservations are running")
+        return 0
     pos = _positional(argv)
-    dtype = (pos[0] if pos else _ask(f"Type ({', '.join(_DEVICE_TYPES)})")).lower()
+    if len(pos) <= 1 and not any(_flag(argv, f) for f in ("serial", "addr", "index", "profile")):
+        return _device_add_wizard(pos[0].lower() if pos else "", yes=_yes(argv), gid_default=_flag(argv, "id"))
+    dtype = pos[0].lower()
     if dtype not in _DEVICE_TYPES:
         print(f"ERROR: unknown device type {dtype!r}; one of: {', '.join(_DEVICE_TYPES)}", file=sys.stderr)
         return 2
@@ -1661,6 +2157,9 @@ def cmd_devices_add(argv: List[str]) -> int:
     if gid is None:
         recs = _read_device_records()
         gid = str(max(recs) + 1 if recs else 0)
+    if not _reload_ok(_yes(argv)):
+        print("Cancelled; nothing written.")
+        return 1
     return int(add(f"{gid}:{name}:{ident}"))
 
 

@@ -106,7 +106,7 @@ def _table() -> list[Command]:
         Command(("reload devices",), "", _daemon("cmd_reload_devices"), "Server", where=D, hidden=True),
         # ---- devices ----
         Command(("devices list",), "Devices, with the host each is on", _shell("cmd_devices_list"), "Devices"),
-        Command(("devices add",), "Add a device (asks type, name, serial)", _shell("cmd_devices_add"), "Devices", after="reload_devices", hidden=True),
+        Command(("devices add",), "Add a device: guided (any type; Pluto USB/IP/PoE), or devices add <type> <name> --serial S [-y]; -h for all forms", _shell("cmd_devices_add"), "Devices", after="reload_devices"),
         Command(("devices remove",), "Remove a device by id", _shell("cmd_devices_remove"), "Devices", after="reload_devices"),
         Command(("devices rename",), "Rename a device: devices rename <id> <name>", _shell("cmd_devices_rename"), "Devices", after="reload_devices"),
         Command(("devices wipe",), "Remove ALL devices [-y]", _shell("cmd_devices_wipe"), "Devices", after="reload_devices"),
@@ -310,7 +310,7 @@ def dispatch(argv: list[str], *, in_daemon: bool) -> int:
     if command.where == "daemon" and not in_daemon:
         return _run_in_daemon(command, rest)
     rc = int(command.run(rest) or 0)
-    if rc == 0 and command.after:
+    if rc == 0 and command.after and not {"-h", "--help"} & set(rest):
         _after(command.after, in_daemon=in_daemon)
     return rc
 

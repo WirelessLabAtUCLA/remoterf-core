@@ -46,8 +46,24 @@ def _normalize_channels(value):
 
 # == PLUTO Connection Logic ==
 
-def connect_pluto(*, serial: str):
+def connect_pluto(*, serial: str, ip: str = ""):
     serial = (serial or "").strip()
+    ip = (ip or "").strip()
+    if ip:
+        # An always-powered Pluto on the network (its static ipaddr_eth).
+        try:
+            dev = adi.Pluto(f"ip:{ip}")
+            found = str(dev._ctx.attrs.get("hw_serial", "")).strip()
+            if serial and found.lower() != serial.lower():
+                print(f"ip:{ip} is Pluto {found}, expected {serial}")
+                return None
+            from remoteRF_server.common.utils.ansi_codes import Sty, printf
+
+            printf(f"Connected to Pluto via ip:{ip}", Sty.GRAY)
+            return dev
+        except Exception as e:
+            print(f"Failed to connect to Pluto ip:{ip}: {e}")
+            return None
     if not serial:
         print("A Pluto serial must be provided")
         return None
@@ -88,7 +104,7 @@ class PlutoSchema(DeviceSchema):
 
     device_type = "adalm_pluto"
     client_class = "Pluto"
-    driver_version = "0.0.3"
+    driver_version = "0.0.4"
     _fir_rate = None  # the rate whose pyadi FIR this schema last loaded
 
     @staticmethod
@@ -96,8 +112,7 @@ class PlutoSchema(DeviceSchema):
         # init.poe: true -> the Pluto is powered from a PoE switch port and starts off.
         if is_poe(kwargs):
             return poe_pluto_from_init(kwargs)
-        serial = kwargs.get("serial")
-        return connect_pluto(serial=serial)
+        return connect_pluto(serial=kwargs.get("serial"), ip=kwargs.get("ip"))
 
     # region ad9364
 
