@@ -374,6 +374,9 @@ def start_server_runtime(
         _print_tls_credentials_error(cert_dir, e)
         raise SystemExit(2)
 
+    from . import remote_admin_ssh
+
+    remote_admin_ssh.register(server)
     if include_host_tunnel:
         reg = hts.get_tunnel_registry()
         if reg is None:
@@ -522,13 +525,25 @@ def welcome():
     print_panel("RemoteRF Server", rows, literal=True)
     print()
 
+def ask(text, *, secret: bool = False) -> str:
+    """Every prompt inside a console command: the console's own prompt, or the
+    caller's terminal when the command came over the control socket."""
+    from . import control
+
+    if control.bridged():
+        from prompt_toolkit.formatted_text import fragment_list_to_text, to_formatted_text
+
+        return control.ask(fragment_list_to_text(to_formatted_text(text)), secret=secret)
+    return session.prompt(text, is_password=secret)
+
+
 def clear():
     os.system('clear')
     welcome()
     
 def set_acc():
     while True:
-        username = session.prompt("Enter username to manage (c to cancel): ")
+        username = ask("Enter username to manage (c to cancel): ")
         if username == 'exit' or username == 'c' or username == 'e':
             return
         perm = perms.get_perms(username)
@@ -543,9 +558,9 @@ def set_acc():
     printf(f"'r'", Sty.MAGENTA, " - Manage reservations", Sty.DEFAULT)
     printf(f"'c'", Sty.MAGENTA, " - Cancel", Sty.DEFAULT)
     
-    inpu = session.prompt(stylize("Enter command: ", Sty.DEFAULT))
+    inpu = ask(stylize("Enter command: ", Sty.DEFAULT))
     if inpu == 's':
-        inpu2 = session.prompt(stylize("Setting perms: ", Sty.DEFAULT, " (U{User}/P{PowerUser}/A{Admin}) ", Sty.GRAY, ": ", Sty.DEFAULT))
+        inpu2 = ask(stylize("Setting perms: ", Sty.DEFAULT, " (U{User}/P{PowerUser}/A{Admin}) ", Sty.GRAY, ": ", Sty.DEFAULT))
         if inpu2 == 'U':
             perms.set_user(username)
             printf("Set to User. ", Sty.GREEN)
@@ -554,34 +569,34 @@ def set_acc():
             printf("Setting PowerUser perms. ", Sty.BOLD, "Input 'c' to cancel anytime.", Sty.DEFAULT)
             
             while True: # Allowed Devices
-                device_ids = session.prompt(stylize("Enter device ids allowed ", Sty.DEFAULT, 'int,int,int,...', Sty.GRAY, ": ", Sty.DEFAULT))
+                device_ids = ask(stylize("Enter device ids allowed ", Sty.DEFAULT, 'int,int,int,...', Sty.GRAY, ": ", Sty.DEFAULT))
                 if device_ids == 'c':
                     return
                 try:
                     device_list = [int(x) for x in device_ids.split(',')]
-                    if session.prompt(stylize(f"Confirm that this is the correct list of devices: {device_list} ", Sty.DEFAULT, "(y/n)", Sty.GRAY, ": ", Sty.DEFAULT)) == 'y':   
+                    if ask(stylize(f"Confirm that this is the correct list of devices: {device_list} ", Sty.DEFAULT, "(y/n)", Sty.GRAY, ": ", Sty.DEFAULT)) == 'y':   
                         break
                 except ValueError:
                     printf("Invalid input. Try Again.", Sty.RED)
                     
             while True: # Max Reservations
-                max_res = session.prompt(stylize("Enter max reservations allowed ", Sty.DEFAULT, 'int', Sty.GRAY, ": ", Sty.DEFAULT))
+                max_res = ask(stylize("Enter max reservations allowed ", Sty.DEFAULT, 'int', Sty.GRAY, ": ", Sty.DEFAULT))
                 if max_res == 'c':
                     return
                 try:
                     max_res = int(max_res)
-                    if session.prompt(stylize(f"Confirm that this is the correct number of max reservations: {max_res} ", Sty.DEFAULT, "(y/n)", Sty.GRAY, ": ", Sty.DEFAULT)) == 'y':
+                    if ask(stylize(f"Confirm that this is the correct number of max reservations: {max_res} ", Sty.DEFAULT, "(y/n)", Sty.GRAY, ": ", Sty.DEFAULT)) == 'y':
                         break
                 except ValueError:
                     printf("Invalid input. Try Again.", Sty.RED)
                     
             while True: # Max Reservation Time
-                max_res_time = session.prompt(stylize("Enter max length of a single reservation ", Sty.DEFAULT, 'int [seconds]', Sty.GRAY, ": ", Sty.DEFAULT))
+                max_res_time = ask(stylize("Enter max length of a single reservation ", Sty.DEFAULT, 'int [seconds]', Sty.GRAY, ": ", Sty.DEFAULT))
                 if max_res_time == 'c':
                     return
                 try:
                     max_res_time = int(max_res_time)
-                    if session.prompt(stylize(f"Confirm that this is the correct max reservation time in SECONDS: {max_res_time} ", Sty.DEFAULT, "(y/n)", Sty.GRAY, ": ", Sty.DEFAULT)) == 'y':
+                    if ask(stylize(f"Confirm that this is the correct max reservation time in SECONDS: {max_res_time} ", Sty.DEFAULT, "(y/n)", Sty.GRAY, ": ", Sty.DEFAULT)) == 'y':
                         break
                 except ValueError:
                     printf("Invalid input. Try Again.", Sty.RED)
@@ -601,12 +616,12 @@ def set_acc():
     elif inpu == 'r':
         print("Managing reservations:")
         while True:
-            inpu = session.prompt(stylize("Enter command: ", Sty.DEFAULT, "'a' to add, 'c' to cancel, 'e' to exit (anytime), 'v' to view. : ", Sty.GRAY))
+            inpu = ask(stylize("Enter command: ", Sty.DEFAULT, "'a' to add, 'c' to cancel, 'e' to exit (anytime), 'v' to view. : ", Sty.GRAY))
             if inpu == 'e':
                 break
             elif inpu == 'a':
                 while True:
-                    device_id = session.prompt(stylize("Enter device id: ", Sty.DEFAULT))
+                    device_id = ask(stylize("Enter device id: ", Sty.DEFAULT))
                     if device_id == 'c' or device_id == 'e':
                         break
                     try:
@@ -614,8 +629,8 @@ def set_acc():
                         if device_id not in get_registered_devices():
                             printf("Invalid device id.", Sty.GRAY)
                             continue
-                        start_time = session.prompt(stylize("Enter start time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
-                        end_time = session.prompt(stylize("Enter end time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
+                        start_time = ask(stylize("Enter start time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
+                        end_time = ask(stylize("Enter end time: ", Sty.DEFAULT, "YYYY-MM-DD HH:MM:SS -> ", Sty.GRAY))
                         token = reservation_handler.reserve_device(username=username, device_id=device_id, start_time=datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S'), end_time=datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S'), is_server=True)
                         if 'Token' not in token:
                             printf(unmap_arg(token['ace']), Sty.GRAY)
@@ -635,7 +650,7 @@ def set_acc():
             elif inpu == 'c':
                 while True:
                     try:
-                        inpu2 = session.prompt(stylize("Enter reservation id to cancel: ", Sty.DEFAULT))
+                        inpu2 = ask(stylize("Enter reservation id to cancel: ", Sty.DEFAULT))
                         if inpu2 == 'c' or inpu2 == 'e':
                             break
                         reservation_handler.remove_reservation(res_id=int(inpu2))
@@ -974,7 +989,7 @@ def _try_clear_registry_in_memory(reg: object) -> list[str]:
 def _cmd_hosts_wipe(*, yes: bool = False) -> None:
     if not yes:
         try:
-            resp = session.prompt(stylize("Type 'wipe-hosts' to confirm wiping host state: ", Sty.RED))
+            resp = ask(stylize("Type 'wipe-hosts' to confirm wiping host state: ", Sty.RED))
         except KeyboardInterrupt:
             printf("Cancelled.", Sty.GRAY)
             return
@@ -1299,7 +1314,7 @@ def cmd_stats_purge(argv):
 
     if not ("-y" in argv or "--yes" in argv):
         try:
-            resp = session.prompt(stylize("Type 'purge-stats' to confirm deleting the activity log: ", Sty.RED))
+            resp = ask(stylize("Type 'purge-stats' to confirm deleting the activity log: ", Sty.RED))
         except KeyboardInterrupt:
             printf("Cancelled.", Sty.GRAY)
             return
@@ -1325,7 +1340,7 @@ def cmd_diag(argv):
         printf(f"Unknown option {sorted(unknown)[0]}. Usage: diag [--force] [--copy]", Sty.RED)
         return 2
     return diag.run(force=bool(flags & {"--force", "-f"}), copy=bool(flags & {"--copy", "-c"}),
-                    ask=lambda q: session.prompt(q))
+                    ask=ask)
 
 
 def cmd_reload_devices(argv):

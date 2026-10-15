@@ -27,6 +27,7 @@ dependencies = [
   "cryptography>=42,<44",
   "aioice>=0.10,<0.11",
   "aioquic>=1.2,<2.0",
+  "paramiko>=3.4,<6",
 ]
 readme = "README.md"
 classifiers = [

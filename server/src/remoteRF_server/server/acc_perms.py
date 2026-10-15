@@ -245,7 +245,9 @@ class perms_db:
     @db_connection
     def set_admin(self, username:str):
         print(f"Setting {username} as an admin")
-        inpu = input(f"Are you sure you want to set {username} as an admin? \nThis gives them unrestricted access. (Y/N): ") 
+        from .control import prompt
+
+        inpu = prompt(f"Are you sure you want to set {username} as an admin? \nThis gives them unrestricted access. (Y/N): ") 
         if inpu != 'Y' and inpu != 'y':
             print(f"Admin set is canceled for user: {username}.")
             return
