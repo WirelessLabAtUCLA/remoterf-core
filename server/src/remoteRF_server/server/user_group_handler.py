@@ -293,10 +293,20 @@ class UserGroupHandler:
             if self.cursor.fetchone() is None:
                 return False
 
+            members = [row[0] for row in self.cursor.execute(
+                "SELECT user_id FROM UsersLookup WHERE group_id = ?", (group_id,)).fetchall()]
             # cleanup
             self.cursor.execute("DELETE FROM EnrollmentCodes WHERE group_id = ?", (group_id,))
             self.cursor.execute("DELETE FROM UsersLookup WHERE group_id = ?", (group_id,))
             self.cursor.execute("DELETE FROM UserGroups WHERE group_id = ?", (group_id,))
+            self.db.commit()
+            try:
+                # A RemoteRF Global account's login here lives as long as a group it joined.
+                from .reservation import reservation_handler
+
+                reservation_handler.drop_orphans(members)
+            except Exception:  # noqa: BLE001 - the group is gone either way
+                pass
 
             return True
         except Exception:
@@ -773,10 +783,11 @@ class UserGroupHandler:
         hangs off; None drops everyone's (a purge)."""
         where, args = ("", ()) if uid is None else (" WHERE {} = ?", (int(uid),))
         self.cursor.execute("DELETE FROM UsersLookup" + where.format("user_id"), args)
-        try:
-            self.cursor.execute("DELETE FROM FederatedPrincipals" + where.format("local_account_id"), args)
-        except sqlite3.OperationalError:
-            pass  # no federation tables on this deployment
+        for table in ("FederatedPrincipals", "GlobalAccountLinks"):
+            try:
+                self.cursor.execute(f"DELETE FROM {table}" + where.format("local_account_id"), args)
+            except sqlite3.OperationalError:
+                pass  # no federation tables on this deployment
 
     @db_connection
     def group_exists(self, *, group_name: str) -> bool:

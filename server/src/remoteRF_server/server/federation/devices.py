@@ -18,6 +18,8 @@ replayed because the grant's JTI was already consumed.
 
 from __future__ import annotations
 
+from . import links
+
 import json
 import logging
 import secrets
@@ -201,6 +203,11 @@ class _DeviceHandlerBase:
         so it is serialized with the authorization decision that admitted it.
         """
 
+        # A Global account with a login here acts as that account: reservations
+        # made from Global and over the LAN are the same rows.
+        linked = links.account_for(tx, claims["iss"], claims["sub"])
+        if linked is not None:
+            return links.principal_id(claims["sub"]), linked
         row = tx.execute(
             "SELECT id, local_account_id, status FROM FederatedPrincipals "
             "WHERE issuer_deployment_id = ? AND remote_subject_id = ?",

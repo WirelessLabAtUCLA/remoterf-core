@@ -170,10 +170,15 @@ def hostname() -> Optional[str]:
     return f"{name}.{domain()}" if name else None
 
 
+def lab_slug() -> str | None:
+    """This lab's name on Global (`ucla`), if it has one."""
+    kv = load()
+    return kv.get("GLOBAL_FINAL_NAME") or kv.get("GLOBAL_NAME") or None
+
+
 def account_name(username: str) -> str:
     """A local account's full name: `alice@ucla` on Global, else just `alice`."""
-    kv = load()
-    name = kv.get("GLOBAL_FINAL_NAME") or kv.get("GLOBAL_NAME")
+    name = lab_slug()
     return f"{username}@{name}" if name and state() == "active" else username
 
 

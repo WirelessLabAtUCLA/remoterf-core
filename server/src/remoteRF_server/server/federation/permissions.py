@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from . import links
+
 import sqlite3
 import threading
 import time
@@ -64,7 +66,8 @@ class ServerPermissionsReadHandler:
     def __call__(self, tx, action):
         claims = action.claims
         now = int(self.clock())
-        principal = tx.execute(
+        linked = links.account_for(tx, claims["iss"], claims["sub"])
+        principal = (links.principal_id(claims["sub"]), linked, "active") if linked is not None else tx.execute(
             "SELECT id,local_account_id,status FROM FederatedPrincipals "
             "WHERE issuer_deployment_id=? AND remote_subject_id=?",
             (claims["iss"], claims["sub"]),

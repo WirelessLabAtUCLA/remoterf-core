@@ -700,7 +700,19 @@ def detach_group(name: str, ref: str) -> str:
             raise ClusterError(f"{group_name} is not attached to {name}")
         cluster["groups"].remove(group_id)
         _take_back(conn, name, group_id)
+        # Global's walk-ins are here for public groups; one with none left goes,
+        # reservations too ("as long as the group is globally accessible").
+        gone = [row[0] for row in conn.execute(
+            "SELECT a.local_account_id FROM ClusterAccounts a WHERE a.cluster_name=? AND a.kind='proxy' "
+            "AND NOT EXISTS (SELECT 1 FROM UsersLookup u WHERE u.user_id=a.local_account_id)", (name,))]
     save(clusters)
+    if name == GLOBAL and gone:
+        from ..reservation import reservation_handler
+
+        for account in gone:
+            username = reservation_handler.get_username_by_acc_id(int(account))
+            if username:
+                reservation_handler.remove_user(username=username)
     return group_name
 
 
@@ -908,7 +920,9 @@ def enroll_students(home, notify=None, *, only_account: int | None = None) -> No
         ).fetchall()
     for name, account in rows:
         cluster = clusters.get(name)
-        if cluster is None:
+        if cluster is None or name == GLOBAL:
+            # Global itself enrols its accounts at sharing labs; a lab's own
+            # users are seen at other labs only through their Global account.
             continue
         enrolled = plane.enrolled(account)
         for peer, party in _parties(cluster):
