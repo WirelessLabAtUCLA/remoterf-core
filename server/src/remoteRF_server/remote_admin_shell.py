@@ -48,7 +48,7 @@ TIERS = {
     "reservations list": READ, "groups list": READ, "codes list": READ, "hosts status": READ,
     "hosts tokens": READ, "certs list": READ, "config list": READ, "global status": READ,
     "cluster list": READ, "cluster info": READ, "gist list": READ, "users prune-proxies": READ,
-    "cluster codes list": READ,
+    "cluster codes list": READ, "schema browse": READ,
     # write
     "devices add": WRITE, "devices remove": WRITE, "devices rename": WRITE, "groups create": WRITE,
     "groups edit": WRITE, "groups public": WRITE, "groups share": WRITE, "codes create": WRITE,
@@ -56,6 +56,7 @@ TIERS = {
     "cluster create": WRITE, "cluster invite": WRITE, "cluster join": WRITE, "cluster kick": WRITE,
     "cluster cap": WRITE, "cluster peers": WRITE, "restart": WRITE, "reload devices": WRITE,
     "db export": WRITE, "cluster groups": WRITE, "cluster codes create": WRITE, "cluster accept": WRITE,
+    "schema download": WRITE,
     # write, interactive in the daemon: through the control socket's prompt bridge
     "users manage": WRITE, "diag": WRITE,
     # destructive: password again, a typed word, an automatic backup, then -y
