@@ -1,7 +1,7 @@
 # Contributed device drivers
 
 Drivers maintained here but **not** shipped or seeded by `remoteRF-server`:
-nothing in this folder is installed automatically. A lab that has the hardware
+nothing in this folder is installed automatically. A deployment that has the hardware
 copies the file it needs into its drivers directory and restarts the server.
 
 | File | `device_type` | Hardware | Host packages |

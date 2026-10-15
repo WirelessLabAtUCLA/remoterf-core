@@ -218,6 +218,11 @@ class ClusterFlowTests(unittest.TestCase):
             self.assertEqual(self.state("lab"), "revoked")
             self.assertEqual(cluster.remove("lab"), "removed")
             self.assertEqual(cluster.load(), {})
+            # Gone from every cluster, still named from the peers table.
+            self.assertEqual(cluster.peer_name(self.A), self.A)
+            with mock.patch("remoteRF_server.server.federation.peers.PeerStore.get",
+                            return_value={"display_name": "Lab A"}):
+                self.assertEqual(cluster.peer_name(self.A), "Lab A")
 
 
     C = "8a2e3f10-0000-4000-8000-00000000000c"
@@ -246,6 +251,9 @@ class ClusterFlowTests(unittest.TestCase):
         with self.server(self.B):
             (item,) = cluster.list_clusters()
             self.assertEqual((item["peer_name"], item["state"]), ("Lab A", "active"))
+            # The console names partners, never by id; an unknown one falls back to its id.
+            self.assertEqual((cluster.peer_name(self.A), cluster.peer_name(self.C)), ("Lab A", "Lab C"))
+            self.assertEqual(cluster.peer_name("unknown-id"), "unknown-id")
             # Only the owner hands out codes.
             with self.assertRaises(cluster.ClusterError):
                 cluster.invite("lab")
@@ -458,6 +466,23 @@ class ClusterFlowTests(unittest.TestCase):
         self.assertEqual(clusters["pending"]["invites"], {"ab" * 5: {"secret": "00" * 20, "auto": False, "created_at": 6}})
         for cluster_state in clusters.values():
             self.assertNotIn("peer", cluster_state)
+
+
+class MemberNameTests(unittest.TestCase):
+    def test_a_member_is_found_by_name_and_a_shared_name_asks_for_an_id(self):
+        members = {"aa" * 4 + "-1": {"display_name": "Lab B", "state": "pending"},
+                   "bb" * 4 + "-2": {"display_name": "Lab B", "state": "pending"},
+                   "cc" * 4 + "-3": {"display_name": "Lab C", "state": "pending"}}
+        self.assertEqual(cluster._member({"members": members}, "lab c"), "cc" * 4 + "-3")
+        with self.assertRaisesRegex(cluster.ClusterError, "several deployments are named Lab B; use an id"):
+            cluster._member({"members": members}, "Lab B")
+        state = {"lab": {"role": "owner", "members": members}}
+        with mock.patch.object(cluster, "load", return_value=state), mock.patch.object(cluster, "save"), \
+                mock.patch.object(cluster, "_propose") as propose:
+            with self.assertRaisesRegex(cluster.ClusterError, "cluster accept lab <deployment>"):
+                cluster.accept("lab")
+            cluster.accept("lab", "Lab C")
+        self.assertEqual(propose.call_args.args[2], "cc" * 4 + "-3")
 
 
 if __name__ == "__main__":

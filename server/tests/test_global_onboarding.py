@@ -954,6 +954,7 @@ class FederationRuntimeTests(unittest.TestCase):
         with create_app_session(output=PlainTextOutput(out)), contextlib.redirect_stdout(out):
             self.assertEqual(federation_main(["clusters"]), 0)
         text = out.getvalue()
-        self.assertIn(self.DEPLOYMENT, text)
+        self.assertIn("UCLA Wireless Lab", text)
+        self.assertNotIn(self.DEPLOYMENT, text)
         self.assertIn("No clusters", text)
         self.assertEqual(federation_main([]), 2)

@@ -226,7 +226,7 @@ You most likely will need to port forward, etc.
 Troubleshooting:
 Some distros come with default firewall settings that block traffic on specific ports. Make sure that your firewall settings permit traffic to and from the server. Depending on the setup, you may also have ISP firewalls.
 
-## RemoteRF federation v2 Phase 1
+## RemoteRF federation Phase 1
 
 The `global-dev` branch implements the development-only Phase-1 federation
 boundary. A Server can issue and verify participant-signed
@@ -850,11 +850,11 @@ After running `serverrf --serve`, you’ll enter the **RemoteRF Server Shell**. 
 
 ### Users
 
-* `users list` — List all accounts (this lab's own first, then visitors from partner labs)
+* `users list` — List all accounts (this deployment's own first, then visitors from partner deployments)
 * `users manage` — Manage a specific user (perms / delete / reservations)
 * `users purge` — Delete **all** users
 * `users perms` — Show permissions table
-* `users prune-proxies [--stale DAYS] [-y]` — List federated proxies whose home lab is gone (dry run); `-y` removes them
+* `users prune-proxies [--stale DAYS] [-y]` — List federated proxies whose home deployment is gone (dry run); `-y` removes them
 
 ---
 

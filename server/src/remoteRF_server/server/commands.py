@@ -116,7 +116,7 @@ def _table() -> list[Command]:
         Command(("users manage",), "Change a user's role (interactive)", _daemon("cmd_users_manage"), "Users", where=D, interactive=True),
         Command(("users perms",), "Show permissions", _daemon("cmd_users_perms"), "Users", where=D),
         Command(("users purge",), "Remove ALL accounts", _daemon("cmd_users_purge"), "Users", where=D),
-        Command(("users prune-proxies",), "Partner-lab visitors whose home is gone: list them, -y removes [--stale DAYS]", _daemon("cmd_users_prune_proxies"), "Users", where=D),
+        Command(("users prune-proxies",), "Partner-deployment visitors whose home is gone: list them, -y removes [--stale DAYS]", _daemon("cmd_users_prune_proxies"), "Users", where=D),
         # ---- reservations ----
         Command(("reservations list",), "List reservations", _daemon("cmd_reservations_list"), "Reservations", where=D),
         Command(("reservations purge",), "Remove ALL reservations", _daemon("cmd_reservations_purge"), "Reservations", where=D),
@@ -151,20 +151,20 @@ def _table() -> list[Command]:
         Command(("global join",), "Request a public address", _global("join"), "Global"),
         Command(("global verify",), "Redeem the emailed code [code]", _global("verify"), "Global"),
         Command(("global leave",), "Stop participating", _global("leave"), "Global"),
-        # ---- clusters (sharing devices with other labs) ----
-        Command(("cluster list",), "Clusters shared with other labs", _federation("list"), "Clusters"),
-        Command(("cluster info",), "Every lab, shared group and device in a cluster", _federation("info"), "Clusters"),
+        # ---- clusters (sharing devices with other deployments) ----
+        Command(("cluster list",), "Clusters shared with other deployments", _federation("list"), "Clusters"),
+        Command(("cluster info",), "Every deployment, shared group and device in a cluster", _federation("info"), "Clusters"),
         Command(("cluster create",), "Start a cluster: cluster create <name>", _federation("create"), "Clusters"),
-        Command(("cluster invite",), "Invite code for a lab: cluster invite <name>", _federation("invite"), "Clusters"),
+        Command(("cluster invite",), "Invite code for a deployment: cluster invite <name>", _federation("invite"), "Clusters"),
         Command(("cluster join",), "Join with a code: cluster join <code>", _federation("join"), "Clusters"),
         Command(("cluster remove",), "Leave or disband: cluster remove <name>", _federation("remove"), "Clusters"),
-        Command(("cluster kick",), "Put one lab out of your cluster: cluster kick <name> <lab>", _federation("kick"), "Clusters"),
-        Command(("cluster cap",), "Reservations one lab may hold here at a time: cluster cap <name> <n> (0 = no cap)", _federation("cap"), "Clusters"),
+        Command(("cluster kick",), "Put one deployment out of your cluster: cluster kick <name> <deployment>", _federation("kick"), "Clusters"),
+        Command(("cluster cap",), "Reservations one deployment may hold here at a time: cluster cap <name> <n> (0 = no cap)", _federation("cap"), "Clusters"),
         # Sharing and codes live under `groups` / `codes`; these spellings still work.
         Command(("cluster groups",), "", _federation("groups"), "Clusters", hidden=True),
         Command(("cluster codes create",), "", _federation("codes create"), "Clusters", hidden=True),
         Command(("cluster codes list",), "", _federation("codes list"), "Clusters", hidden=True),
-        Command(("cluster peers",), "Partner listeners this lab dials directly: cluster peers [add <id> <host:port> --ca <ca.crt> | remove <id>]", _federation("peers"), "Clusters"),
+        Command(("cluster peers",), "Partner listeners this deployment dials directly: cluster peers [add <id> <host:port> --ca <ca.crt> | remove <id>]", _federation("peers"), "Clusters"),
         Command(("cluster accept",), "", _federation("accept"), "Clusters", hidden=True),
         Command(("global cluster",), "", _federation("cluster"), "Global", hidden=True),
         # ---- gist ----
@@ -220,7 +220,7 @@ _SECTION_BLURB = {
     "Certificates": "TLS certs clients trust",
     "Config": "ports and address",
     "Global": "public address and relay",
-    "Clusters": "sharing devices with other labs",
+    "Clusters": "sharing devices with other deployments",
     "Gist status": "publishing status to a GitHub gist",
     "Database": "export, or wipe everything",
 }

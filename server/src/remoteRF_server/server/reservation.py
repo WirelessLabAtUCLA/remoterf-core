@@ -162,6 +162,24 @@ def _avail_wait(key: str) -> int:
         return 0
 
 
+# validate_reservation_request's refusal texts -> the code a federated caller gets;
+# an older lab sends reservation_refused for all of them (clients map both).
+_REFUSAL_CODES = (
+    ("End time must not be in the past", "reservation_in_past"),
+    ("Invalid device ID. Device does not exist", "device_not_visible"),
+    ("Minimum reservation time", "reservation_too_short"),
+    ("Invalid device ID. Device either", "device_not_permitted"),
+    ("You already have the maximum", "reservation_limit"),
+    ("Max Reservations allowed", "reservation_limit"),
+    ("Max Reservation Duration", "reservation_too_long"),
+    ("Reservations may start at most", "reservation_too_far_ahead"),
+)
+
+
+def refusal_code(text):
+    return next((code for prefix, code in _REFUSAL_CODES if text.startswith(prefix)), "reservation_refused")
+
+
 class ReservationHandler:
     def __init__(self):
         self.federation_enroller = None
@@ -1350,7 +1368,7 @@ class ReservationHandler:
         print_table("Accounts", rows, ["username", "name", "role", "email", "auth", "created_at"], empty="No accounts found.")
         if rows:
             proxies = sum(r["auth"] == "federated" for r in rows)
-            print(f"{len(rows) - proxies} accounts, {proxies} visiting from partner labs (federated proxies)")
+            print(f"{len(rows) - proxies} accounts, {proxies} visiting from partner deployments (federated proxies)")
 
     @staticmethod
     def _federated_names() -> dict:
@@ -1736,7 +1754,7 @@ class ReservationHandler:
             reserved_device_ids=reserved_device_ids,
         )
         if validation[0] is False:
-            return {"error": "reservation_refused", "detail": str(validation[1])}
+            return {"error": refusal_code(str(validation[1])), "detail": str(validation[1])}
 
         if lab_max_reservations is not None:
             held = self.cursor.execute(
@@ -1749,7 +1767,7 @@ class ReservationHandler:
                 return {"error": "lab_reservation_limit"}
 
         if diag_blocks(device_id, start_time.timestamp()):
-            return {"error": "reservation_refused", "detail": "the device is under diagnostics"}
+            return {"error": "device_in_diagnostics", "detail": "the device is under diagnostics"}
 
         self.cursor.execute(
             "SELECT 1 FROM Reservations WHERE device_id = ? AND start_time < ? AND end_time > ?",

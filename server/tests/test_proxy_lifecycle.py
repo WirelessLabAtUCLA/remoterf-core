@@ -67,7 +67,7 @@ def test_users_list_puts_visitors_after_the_labs_own_accounts_with_a_count(lab, 
     with patch("remoteRF_server.common.utils.panel.print_table", lambda *a, **k: tables.append(a[1])):
         lab["reservations"].print_all_accounts()
     assert [row["username"] for row in tables[0]] == [NATIVE, lab["proxy"]]
-    assert "1 accounts, 1 visiting from partner labs (federated proxies)" in capsys.readouterr().out
+    assert "1 accounts, 1 visiting from partner deployments (federated proxies)" in capsys.readouterr().out
 
 
 def test_deleting_at_home_removes_the_proxy_at_the_partner_after_an_outage(lab):

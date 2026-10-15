@@ -161,7 +161,7 @@ class perms_db:
                 return False, 'Invalid device ID. Device either does not exist or is disconnected.'
 
             if group_used > group_max:
-                return False, 'User has reached max reservations.'
+                return False, f'You already have the maximum of {group_max} reservations.'
 
             # check if user has reached max reservation time
             if reservation_duration > max_time:

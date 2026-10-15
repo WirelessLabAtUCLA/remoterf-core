@@ -431,7 +431,7 @@ class ServerHomeDevices:
         owner = route["owner_deployment_id"]
         peer = self.outbound.peer(owner)
         if peer is None:
-            raise HomeDeviceError("No direct route to the partner lab is known yet.")
+            raise HomeDeviceError("No direct route to the partner deployment is known yet.")
         candidate = self._destination(local_account_id, owner, "DEVICE_CONTROL")
         try:
             result = self._forward(

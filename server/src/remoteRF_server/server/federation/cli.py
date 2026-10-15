@@ -34,8 +34,7 @@ def _print(text: str, style=None) -> None:
 
 
 def _lab(party: dict) -> str:
-    short = party["deployment_id"][:8]
-    return f"{party['display_name']} ({short}…)" if party.get("display_name") else party["deployment_id"]
+    return party.get("display_name") or party["deployment_id"]
 
 
 def _n(count: int, noun: str) -> str:
@@ -60,7 +59,7 @@ def cmd_clusters() -> int:
         print(f"Federation is not enabled: {exc}")
         return 1
     state = load_state(Path(config["identity_dir"]))
-    rows = [f"{marker()} {config['display_name']} ({state.deployment_id})", ""]
+    rows = [f"{marker()} {config['display_name']}", ""]
     items = cluster.list_clusters()
     if not items:
         rows.append("No clusters. Start one with `cluster create <name>`.")
@@ -69,7 +68,7 @@ def cmd_clusters() -> int:
         if index:
             rows.append("")
         owner_row = None
-        public = "  open to every lab on Global" if item["public"] else ""
+        public = "  open to every deployment on Global" if item["public"] else ""
         if item["role"] == "owner":
             invites = item["open_invites"]
             rows.append(f"{item['name']}  (yours){public}"
@@ -100,9 +99,9 @@ def cmd_clusters() -> int:
                     rows.append(f"        sharing {_n(sharing['groups'], 'group')}, {_n(sharing['devices'], 'device')}")
         rows.append(f"    {item['students']} of your users enrolled, {item['visitors']} visiting")
         if item["lab_cap"]:
-            rows.append(f"    any one other lab may hold {_n(item['lab_cap'], 'reservation')} here at a time")
+            rows.append(f"    any one other deployment may hold {_n(item['lab_cap'], 'reservation')} here at a time")
         if item["kept_out"]:
-            rows.append(f"    {_n(item['kept_out'], 'lab')} kicked and kept out")
+            rows.append(f"    {_n(item['kept_out'], 'deployment')} kicked and kept out")
     print()
     print_panel("Clusters", rows, literal=True)
     print()
@@ -165,18 +164,18 @@ def _ask_for(verb: str) -> str:
     from . import cluster
 
     if verb == "join":
-        return _input("Invite code from the other lab: ")
+        return _input("Invite code from the other deployment: ")
     names = [name for name, item in sorted(cluster.load().items()) if item.get("role") == "owner"]
     if verb in ("remove", "groups", "codes", "info", "cap"):
         names = sorted(cluster.load())
     if verb == "accept":
         names = [name for name, item in sorted(cluster.load().items()) if item.get("state") == "pending"]
-    what = {"create": "Name for the new cluster (short slug, e.g. ucla-lab)",
-            "invite": "Which cluster to invite a lab into",
+    what = {"create": "Name for the new cluster (short slug, e.g. ucla-shared)",
+            "invite": "Which cluster to invite a deployment into",
             "accept": "Which cluster's pending join to accept",
             "groups": "Which cluster to share groups with",
             "info": "Which cluster to show",
-            "kick": "Which cluster to put a lab out of",
+            "kick": "Which cluster to put a deployment out of",
             "cap": "Which cluster to cap",
             "codes": "Which cluster to make codes for",
             "remove": "Which cluster to leave (revokes the contract)"}[verb]
@@ -300,7 +299,7 @@ def _input(prompt: str) -> str:
 
 _USAGE = ("Usage: cluster list | cluster create|invite|remove <name> | cluster join <code> | "
           "cluster info [<name>] | "
-          "cluster kick <name> <lab> | cluster cap <name> <reservations>")
+          "cluster kick <name> <deployment> | cluster cap <name> <reservations>")
 
 
 def cmd_cluster(argv: list[str]) -> int:
@@ -329,7 +328,7 @@ def cmd_cluster(argv: list[str]) -> int:
             _print(f"  Created cluster {arg}. Hand out an invite with `cluster invite {arg}`.", Sty.GRAY)
         elif verb == "invite" and arg:
             code = cluster.invite(arg, auto="--manual" not in argv)
-            _print("  On the other lab's server run (single use, 7 days):", Sty.GRAY)
+            _print("  On the other deployment's server run (single use, 7 days):", Sty.GRAY)
             _print(f"    cluster join {code}", Sty.BOLD)
         elif verb == "join" and len(argv) > 1:
             # A code pasted from chat or email may arrive wrapped across lines.
@@ -337,7 +336,7 @@ def cmd_cluster(argv: list[str]) -> int:
             _print(f"  Joined {name}. Both servers finish the handshake in the background; "
                    "`cluster list` shows active once done.", Sty.GRAY)
         elif verb == "accept" and arg:
-            cluster.accept(arg)
+            cluster.accept(arg, " ".join(words[1:]) or None)
             _print(f"  Accepted. {arg} activates once both servers confirm (about a minute).", Sty.GRAY)
         elif verb == "remove" and arg:
             _print(f"  {arg}: {cluster.remove(arg)}.", Sty.GRAY)
@@ -358,16 +357,16 @@ def cmd_cluster(argv: list[str]) -> int:
             else:
                 _print(f"  {cluster.detach_group(cluster.GLOBAL, arg)} is no longer public.", Sty.GRAY)
         elif verb == "kick" and arg:
-            lab = " ".join(words[1:]) or _input("Lab to put out (name or id from `cluster list`): ")
+            lab = " ".join(words[1:]) or _input("Deployment to put out (name from `cluster list`): ")
             name = cluster.kick(arg, lab)
             _print(f"  {name} is out of {arg}: its contract is revoked and its reservations here are cancelled. "
                    f"Only a new `cluster invite {arg}` code lets it back in.", Sty.GRAY)
         elif verb == "cap" and arg:
-            answer = words[1] if len(words) > 1 else _input("Reservations one lab may hold here at a time (0 = no cap): ")
+            answer = words[1] if len(words) > 1 else _input("Reservations one deployment may hold here at a time (0 = no cap): ")
             if not answer.isdigit():
                 raise cluster.ClusterError("the cap is a number of reservations: 0 (no cap) or more")
             cluster.set_cap(arg, int(answer))
-            _print(f"  In {arg}, any one other lab may now hold "
+            _print(f"  In {arg}, any one other deployment may now hold "
                    + (_n(int(answer), "reservation") if int(answer) else "any number of reservations")
                    + " on your devices at a time.", Sty.GRAY)
         elif verb == "info" and arg:
@@ -408,7 +407,7 @@ def cmd_peers(argv: list[str]) -> int:
         if verb == "list" and not words:
             rows = store.list()
             if not rows:
-                _print("  No partner routes; the cluster agent records one from each lab's signed status note.",
+                _print("  No partner routes; the cluster agent records one from each deployment's signed status note.",
                        Sty.GRAY)
             for row in rows:
                 _print(f"  {row['display_name']}  {row['deployment_id']}  {row['endpoint']}  "
