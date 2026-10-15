@@ -339,7 +339,6 @@ def _configure_addr(addr: str, ca_sha256: Optional[str] = None) -> int:
         cert_filename="ca.crt",
         grpc_addr=f"{host}:{grpc_port}", # also upserts REMOTERF_ADDR
         timeout_sec=3.0,
-        overwrite=True,
         expected_sha256=ca_sha256,
     )
     if not ok:
@@ -1177,6 +1176,10 @@ def main() -> int:
             if rc != 0:
                 return rc
             did_any = True
+
+        if ca_sha256_value is not None and addr_value is None:
+            print("ERROR: --ca-sha256 goes with --addr", file=sys.stderr)
+            return 2
 
         if addr_value is not None:
             rc = _configure_addr(addr_value, ca_sha256_value)

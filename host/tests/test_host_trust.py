@@ -37,6 +37,12 @@ class CaPinTests(unittest.TestCase):
             env = (Path(tmp) / "net.env").read_text()
             self.assertIn(f"REMOTERF_CA_SHA256={hashlib.sha256(PEM_A).hexdigest()}", env)
 
+    def test_a_garbled_fingerprint_is_refused_not_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in ("", "sha256:", ":", "  ", "abc123"):
+                self.assertFalse(_fetch(tmp, PEM_A, expected=bad), bad)
+            self.assertFalse((Path(tmp) / "ca.crt").exists())
+
     def test_first_fetch_pins_and_a_changed_ca_needs_the_new_fingerprint(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertTrue(_fetch(tmp, PEM_A))
@@ -46,11 +52,11 @@ class CaPinTests(unittest.TestCase):
             self.assertEqual((Path(tmp) / "ca.crt").read_bytes(), PEM_B)
 
 
-def _run(cfg: Path, code: str) -> subprocess.CompletedProcess:
+def _run(cfg: Path, code: str, timeout: float = 60) -> subprocess.CompletedProcess:
     env = dict(os.environ, REMOTERF_CONFIG_DIR=str(cfg), REMOTERF_DRIVERS_DIR=str(cfg / "drivers"),
                PYTHONPATH=str(PROJECT_ROOT / "src"))
     return subprocess.run([sys.executable, "-c", textwrap.dedent(code)], env=env,
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=timeout)
 
 
 class TunnelTrustTests(unittest.TestCase):
@@ -73,6 +79,18 @@ class TunnelTrustTests(unittest.TestCase):
             result = _run(cfg, "from remoteRF_host.server import tunnel_agent; tunnel_agent.main()")
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("does not match the pinned", result.stderr + result.stdout)
+
+    def test_an_unpinned_ca_from_an_older_host_is_pinned_at_start(self):
+        with tempfile.TemporaryDirectory() as raw:
+            cfg = Path(raw)
+            (cfg / "ca.crt").write_bytes(PEM_A)
+            (cfg / "net.env").write_text("REMOTERF_ADDR=127.0.0.1:9\nREMOTERF_CA_CERT=./ca.crt\n")
+            (cfg / "host.env").write_text("HOST_ID=h1\nHOST_TOKEN=t\n")
+            try:
+                _run(cfg, "from remoteRF_host.server import tunnel_agent; tunnel_agent.main()", timeout=4)
+            except subprocess.TimeoutExpired:
+                pass  # it pinned, then kept retrying the unreachable lab
+            self.assertIn(f"REMOTERF_CA_SHA256={hashlib.sha256(PEM_A).hexdigest()}", (cfg / "net.env").read_text())
 
     def test_reservation_end_closes_sessions_then_resets(self):
         with tempfile.TemporaryDirectory() as raw:

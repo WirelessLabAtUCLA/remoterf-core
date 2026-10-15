@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import socket
 import sys
 import urllib.request
@@ -43,11 +44,16 @@ def sha256_fingerprint_pem(pem_bytes: bytes) -> str:
 
 
 def normalize_sha256(value: str) -> str:
-    """'sha256:AB:CD..' / 'abcd..' -> 'abcd..'."""
+    """'sha256:AB:CD..' / 'abcd..' -> 'abcd..'; '' when it is not a sha256."""
     v = (value or "").strip().lower()
     if v.startswith("sha256:"):
         v = v[len("sha256:"):]
-    return v.replace(":", "")
+    v = v.replace(":", "")
+    return v if re.fullmatch(r"[0-9a-f]{64}", v) else ""
+
+
+def pin_ca(env_path: Path, digest: str) -> None:
+    _write_env_lines(env_path, _upsert_env_key(_read_env_lines(env_path), "REMOTERF_CA_SHA256", digest))
 
 
 def _fetch_http(host: str, port: int, timeout_sec: float) -> bytes:
@@ -119,7 +125,6 @@ def fetch_and_save_ca_cert(
     grpc_addr: Optional[str] = None,  # e.g. "your.server.edu:61007"
 
     timeout_sec: float = 3.0,
-    overwrite: bool = True,
     expected_sha256: Optional[str] = None,
 ) -> bool:
     """
@@ -138,7 +143,6 @@ def fetch_and_save_ca_cert(
         cert_filename: filename for the cert saved in env_dir (default "ca.crt")
         grpc_addr: optional value for REMOTERF_ADDR
         timeout_sec: network timeout
-        overwrite: overwrite existing cert file if present
         expected_sha256: the lab's CA fingerprint; without it the CA pinned
             by an earlier fetch (REMOTERF_CA_SHA256) must still match.
 
@@ -154,14 +158,9 @@ def fetch_and_save_ca_cert(
 
         _ensure_parent_dir(cert_path)
 
-        if cert_path.exists() and not overwrite:
-            # Still ensure .env has correct pointer
-            lines = _read_env_lines(env_path)
-            lines = _upsert_env_key(lines, "REMOTERF_CA_CERT", f"./{cert_filename}")
-            if grpc_addr:
-                lines = _upsert_env_key(lines, "REMOTERF_ADDR", grpc_addr)
-            _write_env_lines(env_path, lines)
-            return True
+        if expected_sha256 is not None and not normalize_sha256(expected_sha256):
+            print(f"Not a sha256 fingerprint: {expected_sha256!r}", file=sys.stderr)
+            return False
 
         # Fetch (HTTP first, then raw TCP fallback)
         try:
@@ -177,7 +176,7 @@ def fetch_and_save_ca_cert(
         lines = _read_env_lines(env_path)
         digest = hashlib.sha256(data).hexdigest()
         pinned = next((ln.split("=", 1)[1].strip() for ln in lines if ln.strip().startswith("REMOTERF_CA_SHA256=")), "")
-        want = normalize_sha256(expected_sha256) if expected_sha256 else normalize_sha256(pinned)
+        want = normalize_sha256(expected_sha256 if expected_sha256 is not None else pinned)
         if want and digest != want:
             print(
                 f"CA fingerprint mismatch: got {digest}, expected {want}. "

@@ -52,7 +52,7 @@ from ..common.utils import device_name_key, get_devices_config_path, get_host_co
 from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
-from ..config.cert_fetcher import normalize_sha256
+from ..config.cert_fetcher import normalize_sha256, pin_ca
 
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
@@ -282,6 +282,7 @@ class AgentConfig:
     devices_yaml_path: str
 
     ca_pem_path: Optional[str] = None
+    ca_sha256: str = ""
     client_cert_pem_path: Optional[str] = None
     client_key_pem_path: Optional[str] = None
 
@@ -623,6 +624,8 @@ class HostTunnelAgent:
 
         with ca_path.open("rb") as f:
             trusted_certs = f.read()
+        if hashlib.sha256(trusted_certs).hexdigest() != self.cfg.ca_sha256:
+            _die_config(Path(self.cfg.net_env_path), f"{ca_path} no longer matches the pinned REMOTERF_CA_SHA256.")
 
         mtls = False
         if self.cfg.client_cert_pem_path and self.cfg.client_key_pem_path:
@@ -880,12 +883,8 @@ class HostTunnelAgent:
                                 name=f"meta_{frame.meta_request.req_id}",
                             ).start()
                         elif which == "control":
-                            threading.Thread(
-                                target=self._handle_control,
-                                args=(frame.control,),
-                                daemon=True,
-                                name="control",
-                            ).start()
+                            # In order: the next holder's frames queue behind it.
+                            self._handle_control(frame.control)
                         elif which == "cancel":
                             rid = str(frame.cancel.req_id)
                             warn(f"Cancel req_id={rid}", component="hostrf.tunnel_agent")
@@ -943,6 +942,10 @@ class HostTunnelAgent:
                                     f"Closed {closed} Dynamic v2 host session(s) after tunnel loss.",
                                     component="hostrf.tunnel_agent",
                                 )
+                            # A reservation_end may be lost with the tunnel.
+                            if callable(end_reservation):
+                                for gid in list(self._devices):
+                                    end_reservation(gid)
                         except Exception:
                             exception(
                                 "Dynamic v2 tunnel-loss cleanup failed.",
@@ -1024,7 +1027,14 @@ def main() -> None:
     if not ca_path or not Path(ca_path).is_file():
         _die_config(net_env, "No CA cert (REMOTERF_CA_CERT): the host only connects over TLS.")
     ca_pin = normalize_sha256(net_kv.get("REMOTERF_CA_SHA256", ""))
-    if ca_pin and hashlib.sha256(Path(ca_path).read_bytes()).hexdigest() != ca_pin:
+    ca_digest = hashlib.sha256(Path(ca_path).read_bytes()).hexdigest()
+    if not ca_pin:
+        # Hosts set up before 1.3: pin the CA they already trust.
+        warn(f"Pinning the current CA (sha256 {ca_digest}); check it against `hosts token` on the lab.",
+             component="hostrf.tunnel_agent")
+        pin_ca(net_env, ca_digest)
+        ca_pin = ca_digest
+    if ca_digest != ca_pin:
         _die_config(net_env, f"{ca_path} does not match the pinned REMOTERF_CA_SHA256.")
     client_cert = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_CERT", "").strip())
     client_key = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_KEY", "").strip())
@@ -1037,6 +1047,7 @@ def main() -> None:
         devices_yaml_path=str(devices_yaml),
         version=os.getenv("HOST_VERSION", "host-agent/dev"),
         ca_pem_path=ca_path,
+        ca_sha256=ca_pin,
         client_cert_pem_path=client_cert or None,
         client_key_pem_path=client_key or None,
     )
