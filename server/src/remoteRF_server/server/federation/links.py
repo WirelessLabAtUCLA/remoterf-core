@@ -15,10 +15,12 @@ from __future__ import annotations
 import sqlite3
 from uuid import NAMESPACE_URL, uuid5
 
+# The username too: a link must never follow an account id that a reset or a
+# restored reservations.db hands to someone else.
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS GlobalAccountLinks ("
     "local_account_id INTEGER PRIMARY KEY, issuer_deployment_id TEXT NOT NULL, "
-    "subject_id TEXT NOT NULL, created_at INTEGER NOT NULL, "
+    "subject_id TEXT NOT NULL, username TEXT NOT NULL, created_at INTEGER NOT NULL, "
     "UNIQUE (issuer_deployment_id, subject_id))"
 )
 
@@ -53,11 +55,11 @@ def _usergroups() -> sqlite3.Connection:
     return sqlite3.connect(user_group_handler.filepath, timeout=10.0)
 
 
-def is_linked(local_account_id: int) -> bool:
+def is_linked(local_account_id: int, username: str) -> bool:
     with _usergroups() as conn:
         try:
-            return conn.execute("SELECT 1 FROM GlobalAccountLinks WHERE local_account_id=?",
-                                (int(local_account_id),)).fetchone() is not None
+            return conn.execute("SELECT 1 FROM GlobalAccountLinks WHERE local_account_id=? AND username=?",
+                                (int(local_account_id), username)).fetchone() is not None
         except sqlite3.OperationalError:
             return False
 
@@ -67,8 +69,15 @@ def lookup(issuer: str, subject: str) -> int | None:
         return account_for(conn, issuer, subject)
 
 
-def link(local_account_id: int, issuer: str, subject: str, now: int) -> None:
-    with _usergroups() as conn:
-        conn.execute(SCHEMA)
-        conn.execute("INSERT OR REPLACE INTO GlobalAccountLinks VALUES (?,?,?,?)",
-                     (int(local_account_id), issuer, subject, int(now)))
+def write(tx: sqlite3.Connection, local_account_id: int, issuer: str, subject: str, username: str, now: int) -> None:
+    """On the owner transaction's own usergroups connection."""
+    tx.execute(SCHEMA)
+    tx.execute("INSERT OR REPLACE INTO GlobalAccountLinks VALUES (?,?,?,?,?)",
+               (int(local_account_id), issuer, subject, username, int(now)))
+
+
+def forget_all(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("DELETE FROM GlobalAccountLinks")
+    except sqlite3.OperationalError:
+        pass

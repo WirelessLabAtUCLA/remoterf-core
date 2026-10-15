@@ -39,9 +39,15 @@ def lab(tmp_path):
 
 
 def _link(lab, subject=JANE, name="jdoe", email="jdoe@example.org", password="correct horse"):
+    """What Global's enroll does here (enrollment._linked_enroll): the account, then its link."""
+    from remoteRF_server.server.federation import links
+
     salt, hashed = lan_verifier(lan_secret(password, LAB, name))
-    return lab.h.link_global_account(issuer=GLOBAL, subject=subject, username=name, email=email,
-                                      salt=salt, hashed=hashed)
+    uid, error = lab.h.link_global_account(username=name, email=email, salt=salt, hashed=hashed)
+    if uid is not None:
+        with sqlite3.connect(lab.groups.filepath) as tx:
+            links.write(tx, uid, GLOBAL, subject, name, 1)
+    return uid, error
 
 
 def test_a_joined_lab_sends_registration_to_global_before_reading_anything(lab):
@@ -49,6 +55,7 @@ def test_a_joined_lab_sends_registration_to_global_before_reading_anything(lab):
     from remoteRF_server.server import global_onboarding
 
     with mock.patch("remoteRF_server.server.federation.runtime.federation_enabled", return_value=True), \
+         mock.patch.object(global_onboarding, "state", return_value="active"), \
          mock.patch.object(global_onboarding, "lab_slug", return_value="ucla"):
         reply = lab.h.create_user(un=map_arg("jdoe"), pw=map_arg(""), em=map_arg(""), ec=map_arg("ANY"))
     assert unmap_arg(reply["GS"]) == "ucla" and "UC" not in reply
@@ -57,25 +64,23 @@ def test_a_joined_lab_sends_registration_to_global_before_reading_anything(lab):
 
 
 def test_a_linked_login_takes_the_lab_bound_secret_and_tells_old_clients_to_upgrade(lab):
-    uid, error, proxy = _link(lab)
-    assert error is None and proxy is None
+    uid, error = _link(lab)
+    assert error is None
     assert "UC" in lab.h.login_user("jdoe", lan_secret("correct horse", LAB, "jdoe"))
     assert "remoterf 2.9" in str(lab.h.login_user("jdoe", "correct horse")["UE"])  # the password itself
     assert "Invalid" in str(lab.h.login_user("jdoe", lan_secret("wrong", LAB, "jdoe"))["UE"])
-    assert _link(lab)[0] == uid  # again from Global: the same login
     assert _link(lab, subject=str(uuid4()), email="other@example.org")[1] == "username_taken"
     assert _link(lab, subject=str(uuid4()), name="jdoe2", email="JDoe@example.org")[1] == "email_taken"
 
 
 def test_lan_update_replaces_the_login_and_ends_remembered_sessions(lab):
-    _link(lab)
+    uid = _link(lab)[0]
     token = lab.h.issue_session("jdoe")
     salt, hashed = lan_verifier(lan_secret("new password", LAB, "jdoe"))
-    assert lab.h.set_linked_verifier(issuer=GLOBAL, subject=JANE, email="jdoe@example.org",
-                                     salt=salt, hashed=hashed) is None
-    assert "UC" not in lab.h.login_user("jdoe", token)
+    assert lab.h.set_linked_verifier(account_id=uid, email="jdoe@example.org", salt=salt, hashed=hashed) is None
+    assert "Invalid" in str(lab.h.login_user("jdoe", token)["UE"])  # ended: log in again, not "upgrade"
     assert "UC" in lab.h.login_user("jdoe", lan_secret("new password", LAB, "jdoe"))
-    assert lab.h.set_linked_verifier(issuer=GLOBAL, subject=str(uuid4()), email="x@example.org",
+    assert lab.h.set_linked_verifier(account_id=uid + 99, email="x@example.org",
                                      salt=salt, hashed=hashed) == "principal_unknown"
 
 
@@ -85,13 +90,14 @@ def test_a_linked_login_lives_as_long_as_a_group_it_joined(lab):
     term = lab.groups.create_user_group(group_name="term", devices_whitelist=[], max_reservation_time_sec=60,
                                         max_reservations=1, lifetime_sec=0)
     only, both = _link(lab)[0], _link(lab, subject=str(uuid4()), name="amy", email="amy@example.org")[0]
+    native = lab.h.link_global_account(username="native", email="n@example.org", salt="0" * 32, hashed="x")[0]
     with sqlite3.connect(lab.groups.filepath) as conn:
         conn.executemany("INSERT INTO UsersLookup(user_id, group_id) VALUES (?,?)",
-                         [(only, term), (both, term), (both, keep)])
+                         [(only, term), (both, term), (both, keep), (native, term)])
     assert lab.groups.delete_user_group(group_id=term)
     with sqlite3.connect(lab.res_db) as conn:
         left = {row[0] for row in conn.execute("SELECT username FROM Accounts")}
-    assert left == {"amy"}
+    assert left == {"amy", "native"}  # an account with no link is never dropped
 
 
 def _action(code, *, issuer=GLOBAL, **payload):
@@ -108,7 +114,8 @@ def _enroll(lab, action):
 
     handler = ServerFederatedEnrollHandler(usergroups_path=lab.groups.filepath, reservations_path=lab.res_db,
                                            local_deployment_id=LAB, display_name="Lab")
-    action.prepared = handler.prepare(action)
+    assert handler.prepare(action) is None  # nothing happens before the grant is consumed
+    action.prepared = None
     with sqlite3.connect(lab.groups.filepath) as tx:
         return handler(tx, action)
 
@@ -118,15 +125,18 @@ def test_globals_enroll_makes_the_login_and_a_partner_lab_cannot(lab):
 
     gid = lab.groups.create_user_group(group_name="class", devices_whitelist=[], max_reservation_time_sec=60,
                                        max_reservations=1, lifetime_sec=0)
-    lab.groups.create_enrollment_codes(code_names=["CLASS1"], group_id=gid, uses=2, duration_sec=0)
+    lab.groups.create_enrollment_codes(code_names=["CLASS1"], group_id=gid, uses=1, duration_sec=0)
     with pytest.raises(FederationBusinessError, match="enrollee_not_allowed"):
         _enroll(lab, _action("CLASS1", issuer=PARTNER))
-    result = _enroll(lab, _action("CLASS1"))
+    first = _action("CLASS1")
+    result = _enroll(lab, first)
     assert result["membership_present"] and result["groups"] == [{"group_id": str(gid), "group_name": "class"}]
     uid = lab.h.get_uid("jdoe")
     with sqlite3.connect(lab.groups.filepath) as conn:
         assert conn.execute("SELECT 1 FROM UsersLookup WHERE user_id=? AND group_id=?", (uid, gid)).fetchone()
-        assert conn.execute("SELECT uses FROM EnrollmentCodes WHERE code_name='CLASS1'").fetchone()[0] == 1
+        assert conn.execute("SELECT uses FROM EnrollmentCodes WHERE code_name='CLASS1'").fetchone() is None  # its one use went
+    # Global retrying the same request after the single use went: the same answer.
+    assert _enroll(lab, first)["groups"] == result["groups"]
     assert "UC" in lab.h.login_user("jdoe", lan_secret("correct horse", LAB, "jdoe"))
 
     # Global's lab-login update, then its unenrol (the account was deleted there).

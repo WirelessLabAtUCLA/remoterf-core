@@ -569,7 +569,7 @@ class ReservationHandler:
     def create_user(self,*, un, pw, em, ec, ad:bool=False):
         from .federation.runtime import federation_enabled
 
-        if federation_enabled() and global_onboarding.lab_slug():
+        if federation_enabled() and global_onboarding.state() == "active" and global_onboarding.lab_slug():
             # One name for one person across Global and every joined lab: accounts
             # are made on RemoteRF Global, which then gives this lab a login for
             # them (federated_enroll). Answered before the password is even read.
@@ -659,7 +659,7 @@ class ReservationHandler:
         if self._account_security_state_locked(username) in (
             "federated",
             "incoherent",
-        ) or (row and links.is_linked(int(row[0]))):
+        ) or (row and links.is_linked(int(row[0]), username)):
             self.cursor.execute(
                 "DELETE FROM Reservations WHERE username = ?", (username,)
             )
@@ -672,20 +672,16 @@ class ReservationHandler:
         return {"UC": map_arg(f'Removed {username}')}
 
     @db_connection
-    def link_global_account(self, *, issuer, subject, username, email, salt, hashed):
-        """A RemoteRF Global account's login here: (account id, error, walk-in
-        proxy to drop). Idempotent; a name or email another account here has is
-        refused, never merged."""
-        existing = links.lookup(issuer, subject)
-        if existing is not None and self._username_for_account_locked(existing) is not None:
-            self.cursor.execute("UPDATE Accounts SET pass_salt=?, pass_hash=? WHERE acc_id=?", (salt, hashed, existing))
-            return existing, None, None
+    def link_global_account(self, *, username, email, salt, hashed):
+        """The account for a RemoteRF Global account's login here: (id, error).
+        A name or email another account here has is refused, never merged.
+        The caller links it, on the owner transaction (links.write)."""
         clash = self.cursor.execute(
             "SELECT lower(username)=lower(?) FROM Accounts WHERE lower(username)=lower(?) OR lower(email)=lower(?)",
             (username, username, email),
         ).fetchone()
         if clash is not None:
-            return None, "username_taken" if clash[0] else "email_taken", None
+            return None, "username_taken" if clash[0] else "email_taken"
         self.cursor.execute(
             "INSERT INTO Accounts (username, email, pass_salt, pass_hash, created_at, auth_type) "
             "VALUES (?, ?, ?, ?, ?, 'local_password')",
@@ -695,31 +691,29 @@ class ReservationHandler:
         self.cursor.execute(
             "INSERT INTO LocalAccountSubjects (local_account_id, subject_id, status, created_at) "
             "VALUES (?, ?, 'active', ?)", (uid, str(uuid4()), int(time.time())))
-        self.db.commit()  # before the link points at it
-        links.link(uid, issuer, subject, int(time.time()))
         perms.set_user(username)
-        # Its anonymous walk-in proxy here (public devices) is no longer how
-        # it is seen; drop it once nothing of it is live.
-        proxy = self.cursor.execute(
-            "SELECT a.username FROM FederatedAccountBindings b JOIN Accounts a ON a.acc_id=b.local_account_id "
-            "WHERE b.issuer_deployment_id=? AND b.remote_subject_id=? AND NOT EXISTS ("
-            "SELECT 1 FROM Reservations r WHERE r.username=a.username AND r.end_time > ?)",
-            (issuer, subject, datetime.now()),
-        ).fetchone()
-        return uid, None, proxy[0] if proxy else None
+        return uid, None
 
     @db_connection
-    def set_linked_verifier(self, *, issuer, subject, email, salt, hashed):
+    def discard_unlinked_account(self, uid: int) -> None:
+        """Undo link_global_account when its link could not be written: never a login with no link."""
+        name = self._username_for_account_locked(int(uid))
+        self.cursor.execute("DELETE FROM LocalAccountSubjects WHERE local_account_id = ?", (int(uid),))
+        self.cursor.execute("DELETE FROM Accounts WHERE acc_id = ?", (int(uid),))
+        if name:
+            perms.delete_user_from_reservation_handler(name)
+
+    @db_connection
+    def set_linked_verifier(self, *, account_id, email, salt, hashed):
         """A reset, disable or re-derived login from Global: the new verifier,
         and every remembered session ends. None, or an error code."""
-        account = links.lookup(issuer, subject)
-        username = self._username_for_account_locked(account) if account is not None else None
+        username = self._username_for_account_locked(int(account_id))
         if username is None:
             return "principal_unknown"
-        self.cursor.execute("UPDATE Accounts SET pass_salt=?, pass_hash=? WHERE acc_id=?", (salt, hashed, account))
-        if self.cursor.execute("SELECT 1 FROM Accounts WHERE lower(email)=lower(?) AND acc_id != ?",
-                               (email, account)).fetchone() is None:
-            self.cursor.execute("UPDATE Accounts SET email=? WHERE acc_id=?", (email, account))
+        self.cursor.execute("UPDATE Accounts SET pass_salt=?, pass_hash=? WHERE acc_id=?", (salt, hashed, int(account_id)))
+        if email and self.cursor.execute("SELECT 1 FROM Accounts WHERE lower(email)=lower(?) AND acc_id != ?",
+                                         (email, int(account_id))).fetchone() is None:
+            self.cursor.execute("UPDATE Accounts SET email=? WHERE acc_id=?", (email, int(account_id)))
         self.cursor.execute("DELETE FROM ClientSessions WHERE username = ?", (username,))
         return None
 
@@ -730,7 +724,8 @@ class ReservationHandler:
         dropped = []
         with sqlite3.connect(user_group_handler.filepath, timeout=10.0) as conn:
             for uid in {int(a) for a in account_ids}:
-                if not links.is_linked(uid):
+                name = self.get_username_by_acc_id(uid)
+                if not name or not links.is_linked(uid, name):
                     continue
                 left = conn.execute(
                     "SELECT 1 FROM UsersLookup u WHERE u.user_id=? AND NOT EXISTS ("
@@ -793,6 +788,8 @@ class ReservationHandler:
             time.sleep(1)
             if input("Last chance. Are you sure? (y/n): ") == 'y':
                 self._queue_revocations(None)
+                with sqlite3.connect(user_group_handler.filepath) as groups_db:
+                    links.forget_all(groups_db)  # account ids start over
                 self.cursor.execute('DROP TABLE IF EXISTS Accounts')
                 self.cursor.execute('DROP TABLE IF EXISTS Reservations')
                 self.cursor.execute('DROP TABLE IF EXISTS ClientSessions')
@@ -839,11 +836,13 @@ class ReservationHandler:
                 return {"UE": map_arg("Invalid login details.")}
             matches, needs_rehash = verify_password(account[2], account[3], password)
             if not matches:
-                if not _LAN_SECRET.fullmatch(password or "") and links.is_linked(int(account[0])):
-                    # A RemoteRF Global account's login here takes a lab-bound
-                    # secret that only remoterf 2.9+ sends; never the password.
-                    return {"UE": map_arg("This account needs remoterf 2.9 or newer here: pip install -U remoterf")}
                 _record_failure(limiter_key)
+                # A RemoteRF Global account's login here takes a lab-bound secret
+                # that only remoterf 2.9+ sends (64 hex); never the password. A
+                # remembered session token (43 chars) that ended is just invalid.
+                secret = password or ""
+                if not _LAN_SECRET.fullmatch(secret) and len(secret) != 43 and links.is_linked(int(account[0]), username):
+                    return {"UE": map_arg("This account needs remoterf 2.9 or newer here: pip install -U remoterf")}
                 return {"UE": map_arg("Invalid login details.")}
             if needs_rehash:
                 self.cursor.execute(
@@ -1718,7 +1717,7 @@ class ReservationHandler:
         username = self._username_for_account_locked(int(local_account_id))
         if username is None:
             return {"error": "principal_unknown"}
-        if self._account_security_state_locked(username) != "federated" and not links.is_linked(int(local_account_id)):
+        if self._account_security_state_locked(username) != "federated" and not links.is_linked(int(local_account_id), username):
             return {"error": "principal_not_federated"}
 
         device_id = int(device_id)
@@ -1841,7 +1840,7 @@ class ReservationHandler:
             (int(reservation_id),),
         ).fetchone()
         # A linked account may cancel what it reserved here directly too (LAN).
-        if row is None or row[0] != username or (row[1] is None and not links.is_linked(int(local_account_id))):
+        if row is None or row[0] != username or (row[1] is None and not links.is_linked(int(local_account_id), username)):
             return {"error": "reservation_not_found"}
         self.cursor.execute(
             "DELETE FROM Reservations WHERE res_id = ?", (int(reservation_id),)
@@ -1903,7 +1902,7 @@ class ReservationHandler:
         moment = now or datetime.now()
         rows = self.cursor.execute(
             "SELECT r.start_time, r.end_time FROM Reservations r "
-            + ("" if links.is_linked(int(local_account_id)) else  # a linked account's own count too
+            + ("" if links.is_linked(int(local_account_id), username) else  # a linked account's own count too
                "JOIN FederatedReservations f ON f.res_id = r.res_id ")
             + "WHERE r.username = ? AND r.device_id = ?",
             (username, int(device_id)),

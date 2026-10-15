@@ -275,8 +275,31 @@ class UserGroupHandler:
 
 
 
+    def delete_user_group(self, *, group_id: int) -> bool:
+        """Delete a group; then (outside this handler's lock: logins take the
+        reservation lock first, then this one) a RemoteRF Global account's
+        login here that no other group holds goes with it."""
+        members = self._group_members(group_id)
+        deleted = self._delete_user_group(group_id=group_id)
+        if deleted and members:
+            try:
+                from .reservation import reservation_handler
+
+                reservation_handler.drop_orphans(members)
+            except Exception:  # noqa: BLE001 - the group is gone either way
+                pass
+        return deleted
+
     @db_connection
-    def delete_user_group(
+    def _group_members(self, group_id) -> list[int]:
+        try:
+            return [row[0] for row in self.cursor.execute(
+                "SELECT user_id FROM UsersLookup WHERE group_id = ?", (int(group_id),)).fetchall()]
+        except (TypeError, ValueError):
+            return []
+
+    @db_connection
+    def _delete_user_group(
         self, 
         *, 
         group_id: int
@@ -293,20 +316,10 @@ class UserGroupHandler:
             if self.cursor.fetchone() is None:
                 return False
 
-            members = [row[0] for row in self.cursor.execute(
-                "SELECT user_id FROM UsersLookup WHERE group_id = ?", (group_id,)).fetchall()]
             # cleanup
             self.cursor.execute("DELETE FROM EnrollmentCodes WHERE group_id = ?", (group_id,))
             self.cursor.execute("DELETE FROM UsersLookup WHERE group_id = ?", (group_id,))
             self.cursor.execute("DELETE FROM UserGroups WHERE group_id = ?", (group_id,))
-            self.db.commit()
-            try:
-                # A RemoteRF Global account's login here lives as long as a group it joined.
-                from .reservation import reservation_handler
-
-                reservation_handler.drop_orphans(members)
-            except Exception:  # noqa: BLE001 - the group is gone either way
-                pass
 
             return True
         except Exception:

@@ -36,14 +36,6 @@ from . import links
 from remoterf_federation_core import LAN_UPDATE_CODE
 
 
-class PreparedLinked:
-    """A Global account's login here (links.py), made before the owner tx; or
-    the reason it could not be (`error`), raised there as a typed refusal."""
-
-    def __init__(self, local_account_id=None, error=None):
-        self.local_account_id, self.error = local_account_id, error
-
-
 def _code_hash(code_name: str) -> str:
     return hashlib.sha256(code_name.encode("utf-8")).hexdigest()
 
@@ -357,7 +349,7 @@ class ServerFederatedEnrollHandler:
                     self.account_remover(found[0])
             return None
         if "lan_hash" in payload:
-            return self._prepare_linked(claims, payload)
+            return None  # a lab login: all of it in the owner transaction, once the grant is consumed
         if payload["code_name"] == CLUSTER_CODE:
             # No code to check: the home lab's signature under an active
             # cluster contract is the vouching. Prepare a proxy only once.
@@ -397,50 +389,35 @@ class ServerFederatedEnrollHandler:
             now=int(self.clock()),
         )
 
-    def _prepare_linked(self, claims, payload):
-        """Only RemoteRF Global gives its accounts a login here; a partner lab
-        cannot plant one. `lan.update` replaces the login's verifier (reset,
-        disable); a code makes the login, once that code would admit them."""
+    def _linked_enroll(self, tx, action, now):
+        """A RemoteRF Global account's login here (links.py). Only Global makes
+        or changes one, and only here -- after the grant was consumed -- so a
+        replayed or refused grant changes nothing. `lan.update` replaces the
+        verifier (reset, disable). A LAN-only group keeps meaning "be here":
+        the login is made, but its code is redeemed only over the LAN
+        (ACC:set_enroll), so neither membership nor a use is spent here."""
         from ..reservation import reservation_handler
 
+        claims, payload = action.claims, action.request.value["payload"]
         if claims["iss"] != links.global_home_id():
-            return PreparedLinked(error="enrollee_not_allowed")
+            raise FederationBusinessError("enrollee_not_allowed")
+        if not payload.get("email"):
+            raise FederationBusinessError("invalid_enrollee")
+        login = dict(email=payload["email"], salt=payload["lan_salt"], hashed=payload["lan_hash"])
+        account = links.account_for(tx, claims["iss"], claims["sub"])
         if payload["code_name"] == LAN_UPDATE_CODE:
-            return PreparedLinked(error=reservation_handler.set_linked_verifier(
-                issuer=claims["iss"], subject=claims["sub"], email=payload.get("email", ""),
-                salt=payload["lan_salt"], hashed=payload["lan_hash"]))
-        with sqlite3.connect(self.usergroups_path) as conn:
-            conn.row_factory = sqlite3.Row
-            code = conn.execute(
-                "SELECT code_id,group_id,uses,federation_contract_id,"
-                "federation_contract_version,allowed_issuer_deployment_id,"
-                "federation_expires_at,duration_sec,created_at FROM EnrollmentCodes WHERE code_name=?",
-                (payload["code_name"],),
-            ).fetchone()
-            if code is None or code["uses"] <= 0 or not _code_admits(code, claims, int(self.clock())):
-                return PreparedLinked(error="code_invalid")
-        uid, error, proxy = reservation_handler.link_global_account(
-            issuer=claims["iss"], subject=claims["sub"], username=payload["username"],
-            email=payload.get("email", ""), salt=payload["lan_salt"], hashed=payload["lan_hash"])
-        if proxy:
-            self.account_remover(proxy)
-        return PreparedLinked(uid, error)
-
-    def _linked_enroll(self, tx, action, now):
-        """The membership for a linked login prepared above. A LAN-only group
-        keeps meaning "be here": the login exists, but the code is redeemed
-        only over the LAN (ACC:set_enroll), so neither is spent here."""
-        claims, payload, prepared = action.claims, action.request.value["payload"], action.prepared
-        if not isinstance(prepared, PreparedLinked):
-            raise RuntimeError("linked login preparation unavailable")
-        if prepared.error:
-            raise FederationBusinessError(prepared.error)
-        if payload["code_name"] == LAN_UPDATE_CODE:
+            error = "principal_unknown" if account is None else reservation_handler.set_linked_verifier(
+                account_id=account, **login)
+            if error:
+                raise FederationBusinessError(error)
             self._audit(tx, action, code="ok", metadata={"lan_update": True})
             return self._result(action, redemption_id=str(uuid5(NAMESPACE_URL, f"remoterf-lan:{claims['request_id']}")),
                                 membership_present=False, groups=[], now=now)
+        expected_code_hash = _code_hash(payload["code_name"])
         receipt = lookup_redemption_tx(tx, claims["iss"], claims["sub"], claims["request_id"])
-        if receipt is not None:
+        if receipt is not None:  # Global retrying: the same answer, nothing changes
+            if receipt[11] != claims["request_sha256"] or receipt[2] != expected_code_hash:
+                raise FederationBusinessError("request_conflict")
             group = tx.execute("SELECT group_id,group_name FROM UserGroups WHERE group_id=?", (receipt[3],)).fetchone()
             return self._result(action, redemption_id=receipt[0], membership_present=group is not None,
                                 groups=[{"group_id": str(group[0]), "group_name": group[1]}] if group else [], now=now)
@@ -448,26 +425,44 @@ class ServerFederatedEnrollHandler:
             "SELECT code_id,code_name,group_id,uses,duration_sec,created_at,federation_contract_id,"
             "federation_contract_version,allowed_issuer_deployment_id,federation_expires_at "
             "FROM EnrollmentCodes WHERE code_name=?", (payload["code_name"],)).fetchone()
-        if code is None or int(code[3]) <= 0:
+        if code is None:
             raise FederationBusinessError("code_invalid")
+        if _plain_code(code[6], code[7], code[8]):
+            if _plain_code_expired(code[5], code[4], now):
+                raise FederationBusinessError("code_expired")
+        elif code[6] != claims["contract_id"] or int(code[7] or 0) != claims["contract_version"] or code[8] != claims["iss"]:
+            raise FederationBusinessError("code_restriction_mismatch")
         if code[9] is not None and now >= int(code[9]):
             raise FederationBusinessError("code_expired")
+        if int(code[3]) <= 0:
+            raise FederationBusinessError("code_exhausted")
         group = tx.execute(
             "SELECT group_id,group_name,devices_whitelist,max_reservation_time_sec,"
             "max_reservations,lifetime_sec,created_at,lan_only FROM UserGroups WHERE group_id=?",
             (code[2],)).fetchone()
         if not _group_current(group, now):
             raise FederationBusinessError("group_expired")
+        if account is None:
+            account, error = reservation_handler.link_global_account(username=payload["username"], **login)
+            if error:
+                raise FederationBusinessError(error)
+            try:
+                links.write(tx, account, claims["iss"], claims["sub"], payload["username"], now)
+            except Exception:
+                reservation_handler.discard_unlinked_account(account)  # never a login with no link
+                raise
+        else:
+            reservation_handler.set_linked_verifier(account_id=account, **login)
         if group[7]:
             self._audit(tx, action, code="ok", metadata={"linked": True, "lan_only": True})
             return self._result(action, redemption_id=str(uuid5(NAMESPACE_URL, f"remoterf-lan:{claims['request_id']}")),
                                 membership_present=False, groups=[], now=now)
-        membership_added = add_membership_tx(tx, prepared.local_account_id, int(code[2]))
+        membership_added = add_membership_tx(tx, account, int(code[2]))
         decrement_code_tx(tx, int(code[0]))
         redemption_id = str(uuid4())
         insert_redemption_tx(tx, (
-            redemption_id, int(code[0]), _code_hash(payload["code_name"]), int(code[2]),
-            links.principal_id(claims["sub"]), prepared.local_account_id, claims["iss"], claims["sub"],
+            redemption_id, int(code[0]), expected_code_hash, int(code[2]),
+            links.principal_id(claims["sub"]), account, claims["iss"], claims["sub"],
             claims["contract_id"], claims["contract_version"], claims["request_id"], claims["request_sha256"],
             now, int(membership_added)))
         self._audit(tx, action, code="ok", metadata={"redemption_id": redemption_id, "linked": True})
