@@ -259,12 +259,16 @@ host_session_proxy = HostDynamicV2Proxy()
 
 
 def _end_host_reservation(gid: int) -> None:
-    """Close the device's v2 sessions, then tell its host to reset it."""
-    host_session_proxy.close_gid(gid)
+    """Tell the device's host to close its sessions and reset it, then drop the routes here.
+
+    The frame goes first: the next holder is already set, and the host handles
+    it before any of that holder's frames queued behind it.
+    """
     device = HostDynamicV2Proxy._virtual_for_gid(gid)
     registry = hts.get_tunnel_registry(create=False)
     if device is not None and registry is not None:
         registry.send_control(device.host_id, kind="reservation_end", device_id=device.device_id)
+    host_session_proxy.close_gid(gid)
 
 
 register_reservation_end_callback(_end_host_reservation)

@@ -173,7 +173,9 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
         ):
             host_dynamic_v2._end_host_reservation(7)
         self.assertFalse(self.proxy.is_remote_session("host-session"))
-        self.assertEqual(sent, [("lab-host", "reservation_end", "7", ["OpenSession", "CloseSession"])])
+        # The frame goes before the lab closes its routes (its CloseSession forward).
+        self.assertEqual(sent, [("lab-host", "reservation_end", "7", ["OpenSession"])])
+        self.assertEqual([item[2] for item in calls], ["OpenSession", "CloseSession"])
 
 
 class HostRegistryControlTests(unittest.TestCase):

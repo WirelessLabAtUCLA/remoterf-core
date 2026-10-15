@@ -2252,7 +2252,7 @@ def cmd_hosts_token(argv: List[str]) -> int:
     print(f'On the host, run:\n  hostrf --host --set {host_id} "{token}"')
     ca = cert_sha256()
     if ca:
-        print(f"  hostrf --config --addr {lan_endpoint() or '<lab address>:<grpc port>'} --ca-sha256 {ca}")
+        print(f"  hostrf --config --addr {lan_endpoint() or '<lab address>:<grpc port>'} --ca-sha256 {ca}   (hostrf 1.3+)")
     return 0
 
 
