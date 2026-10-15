@@ -103,6 +103,7 @@ _MASKS = [
     (re.compile(r"\b(?=[\w-]*\d)(?=[\w-]*[A-Za-z])[\w-]{24,}\b"), "<token>"),
     (re.compile(r"\b[A-Z0-9]{16}\b"), "<code>"),  # codes the console wizard generates (16 chars, below)
     (re.compile(r"\b1[6-9]\d{8}\b"), "<epoch>"),
+    (re.compile(r"VERSION  \d+(\.\d+)*(\.?(dev|rc|a|b)\d+)? *"), "VERSION  <version>"),  # the client release, not behaviour
 ]
 
 

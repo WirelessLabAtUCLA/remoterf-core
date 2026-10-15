@@ -724,10 +724,13 @@ class ReservationHandler:
     @db_connection
     def set_linked_verifier(self, *, account_id, email, salt, hashed):
         """A reset, disable or re-derived login from Global: the new verifier,
-        and every remembered session ends. None, or an error code."""
+        and every remembered session ends. None, or an error code. A power
+        user's or admin's login is the lab's own: Global never changes it."""
         username = self._username_for_account_locked(int(account_id))
         if username is None:
             return "principal_unknown"
+        if any(row[0] != "Normal User" for row in perms.get_perms(username)):
+            return "privileged_account"
         self.cursor.execute("UPDATE Accounts SET pass_salt=?, pass_hash=? WHERE acc_id=?", (salt, hashed, int(account_id)))
         if email and self.cursor.execute("SELECT 1 FROM Accounts WHERE lower(email)=lower(?) AND acc_id != ?",
                                          (email, int(account_id))).fetchone() is None:

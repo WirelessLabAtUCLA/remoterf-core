@@ -56,6 +56,40 @@ def _plain_code_expired(created_at, duration_sec, now: int) -> bool:
     return now >= int(created) + int(duration_sec)
 
 
+def _guess_buckets(claims):
+    """Code guesses through federation: the native limit per remote user, and
+    ten times that per issuer (every Global user shares Global's), so one
+    guesser locks out only itself and a partner minting users stays bounded."""
+    from ..reservation import _ENROLL_LIMIT
+
+    return ((f"enroll:{claims['iss']}:{claims['sub']}", _ENROLL_LIMIT),
+            (f"enroll:{claims['iss']}", 10 * _ENROLL_LIMIT))
+
+
+def _missed(claims) -> None:
+    from ..reservation import _record_failure
+
+    for key, _limit in _guess_buckets(claims):
+        _record_failure(key)
+
+
+def _code_row(tx, claims, code_name: str):
+    """The code a federated enrolment names, or code_invalid, so a short code
+    is no easier to find through federation than over the LAN."""
+    from ..reservation import _limited
+
+    if any(_limited(key, limit) for key, limit in _guess_buckets(claims)):
+        raise FederationBusinessError("code_invalid")
+    code = tx.execute(
+        "SELECT code_id,code_name,group_id,uses,duration_sec,created_at,federation_contract_id,"
+        "federation_contract_version,allowed_issuer_deployment_id,federation_expires_at "
+        "FROM EnrollmentCodes WHERE code_name=?", (code_name,)).fetchone()
+    if code is None:
+        _missed(claims)
+        raise FederationBusinessError("code_invalid")
+    return code
+
+
 def _code_admits(code, claims, now: int) -> bool:
     if _plain_code(code["federation_contract_id"], code["federation_contract_version"],
                    code["allowed_issuer_deployment_id"]):
@@ -421,16 +455,12 @@ class ServerFederatedEnrollHandler:
             group = tx.execute("SELECT group_id,group_name FROM UserGroups WHERE group_id=?", (receipt[3],)).fetchone()
             return self._result(action, redemption_id=receipt[0], membership_present=group is not None,
                                 groups=[{"group_id": str(group[0]), "group_name": group[1]}] if group else [], now=now)
-        code = tx.execute(
-            "SELECT code_id,code_name,group_id,uses,duration_sec,created_at,federation_contract_id,"
-            "federation_contract_version,allowed_issuer_deployment_id,federation_expires_at "
-            "FROM EnrollmentCodes WHERE code_name=?", (payload["code_name"],)).fetchone()
-        if code is None:
-            raise FederationBusinessError("code_invalid")
+        code = _code_row(tx, claims, payload["code_name"])
         if _plain_code(code[6], code[7], code[8]):
             if _plain_code_expired(code[5], code[4], now):
                 raise FederationBusinessError("code_expired")
         elif code[6] != claims["contract_id"] or int(code[7] or 0) != claims["contract_version"] or code[8] != claims["iss"]:
+            _missed(claims)  # not this issuer's code: a guess like any other
             raise FederationBusinessError("code_restriction_mismatch")
         if code[9] is not None and now >= int(code[9]):
             raise FederationBusinessError("code_expired")
@@ -452,7 +482,9 @@ class ServerFederatedEnrollHandler:
                 reservation_handler.discard_unlinked_account(account)  # never a login with no link
                 raise
         else:
-            reservation_handler.set_linked_verifier(account_id=account, **login)
+            error = reservation_handler.set_linked_verifier(account_id=account, **login)
+            if error:
+                raise FederationBusinessError(error)
         if group[7]:
             self._audit(tx, action, code="ok", metadata={"linked": True, "lan_only": True})
             return self._result(action, redemption_id=str(uuid5(NAMESPACE_URL, f"remoterf-lan:{claims['request_id']}")),
@@ -610,15 +642,7 @@ class ServerFederatedEnrollHandler:
                 now=now,
             )
 
-        code = tx.execute(
-            "SELECT code_id,code_name,group_id,uses,duration_sec,created_at,"
-            "federation_contract_id,federation_contract_version,"
-            "allowed_issuer_deployment_id,federation_expires_at "
-            "FROM EnrollmentCodes WHERE code_name=?",
-            (payload["code_name"],),
-        ).fetchone()
-        if code is None:
-            raise FederationBusinessError("code_invalid")
+        code = _code_row(tx, claims, payload["code_name"])
         if _plain_code(code[6], code[7], code[8]):
             # The lab's ordinary invite, handed to a user whose HOME is another
             # deployment (Global, say): the code itself is the authorization.
@@ -630,6 +654,7 @@ class ServerFederatedEnrollHandler:
             or int(code[7]) != claims["contract_version"]
             or code[8] != claims["iss"]
         ):
+            _missed(claims)  # not this issuer's code: a guess like any other
             raise FederationBusinessError("code_restriction_mismatch")
         if code[9] is not None and now >= int(code[9]):
             raise FederationBusinessError("code_expired")

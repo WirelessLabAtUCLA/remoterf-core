@@ -181,3 +181,52 @@ def test_listings_skip_partners_for_a_while_after_one_slow_pass(lab, monkeypatch
     assert reservation._fanout(lambda: calls.append(1) or {"a": 1}, {}) == {"a": 1}
     assert reservation._fanout(lambda: calls.append(1) or {"a": 1}, {}) == {}  # paused: not even asked
     assert len(calls) == 1
+
+
+def test_global_never_changes_a_power_user_or_admins_lab_login(lab):
+    from remoteRF_server.server.federation.destination import FederationBusinessError
+
+    uid = _link(lab)[0]
+    with mock.patch("builtins.input", return_value="y"):
+        lab.reservation.perms.set_admin("jdoe")
+    salt, hashed = lan_verifier(lan_secret("taken over", LAB, "jdoe"))
+    assert lab.h.set_linked_verifier(account_id=uid, email="jdoe@example.org", salt=salt,
+                                     hashed=hashed) == "privileged_account"
+    with pytest.raises(FederationBusinessError, match="privileged_account"):
+        _enroll(lab, _action(LAN_UPDATE_CODE, lan_salt=salt, lan_hash=hashed))
+    assert "UC" in lab.h.login_user("jdoe", lan_secret("correct horse", LAB, "jdoe"))
+
+
+def test_codes_guessed_through_federation_are_held_to_the_native_limit(lab, monkeypatch):
+    from remoteRF_server.server.federation.destination import FederationBusinessError
+
+    gid = lab.groups.create_user_group(group_name="class", devices_whitelist=[], max_reservation_time_sec=60,
+                                       max_reservations=1, lifetime_sec=0)
+    lab.groups.create_enrollment_codes(code_names=["REAL1", "REAL2"], group_id=gid, uses=1, duration_sec=0)
+    monkeypatch.setattr(lab.reservation, "_ENROLL_LIMIT", 3)
+    lab.reservation._failures.clear()
+
+    def guesses(sub, count):
+        for n in range(count):
+            action = _action(f"GUESS{n}")
+            action.claims["sub"] = sub
+            with pytest.raises(FederationBusinessError, match="code_invalid"):
+                _enroll(lab, action)
+
+    try:
+        guesses(JANE, 3)
+        with pytest.raises(FederationBusinessError, match="code_invalid"):
+            _enroll(lab, _action("REAL1"))  # the right code, once this user is out of guesses
+        bob = _action("REAL2", username="bob", email="bob@example.org")
+        bob.claims["sub"] = str(uuid4())
+        assert _enroll(lab, bob)["membership_present"]  # every Global user shares Global's issuer: one guesser locks out only itself...
+        for _ in range(9):
+            guesses(str(uuid4()), 3)
+        late = _action("REAL1", username="amy", email="amy@example.org")
+        late.claims["sub"] = str(uuid4())
+        with pytest.raises(FederationBusinessError, match="code_invalid"):
+            _enroll(lab, late)  # ...until the issuer as a whole hits ten times the limit
+        lab.reservation._failures.clear()
+        assert _enroll(lab, _action("REAL1"))["membership_present"]
+    finally:
+        lab.reservation._failures.clear()
