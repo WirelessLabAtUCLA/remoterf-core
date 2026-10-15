@@ -805,6 +805,8 @@ class ReservationHandler:
     
     @db_connection 
     def rm_db(self):
+        from .control import prompt as input  # asked at the caller's terminal when it came over the socket
+
         if input("Drop Tables? (y/n): ") == 'y' and input("Are you sure? This deletes ALL data stored on the server. (y/n): ") == 'y':
             time.sleep(1)
             if input("Last chance. Are you sure? (y/n): ") == 'y':

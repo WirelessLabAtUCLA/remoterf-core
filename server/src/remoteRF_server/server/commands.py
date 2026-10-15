@@ -25,6 +25,7 @@ reloads or restarts itself.
 
 from __future__ import annotations
 
+import os
 import sys
 import textwrap
 from dataclasses import dataclass
@@ -65,6 +66,7 @@ _SYNONYMS = {
     "clusters": "cluster",
     "schemas": "schema",
     "cert": "certs", "certificate": "certs", "certificates": "certs",
+    "admin": "admins",
     "ls": "list", "show": "list", "rm": "remove", "del": "remove", "delete": "remove",
     "mk": "create", "add": "add", "new": "create",
 }
@@ -84,6 +86,10 @@ def _daemon(name: str):
 
 def _shell(name: str):
     return _lazy("remoteRF_server.serverrf_cli", name)
+
+
+def _admins(name: str):
+    return _lazy(".remote_admin", name)
 
 
 def _global(verb: str):
@@ -180,6 +186,17 @@ def _table() -> list[Command]:
         Command(("stats purge",), "Delete the activity log (reservation stats) [-y]", _daemon("cmd_stats_purge"), "Database", where=D),
         Command(("db purge",), "Remove all database entries", _daemon("cmd_db_purge"), "Database", where=D),
         Command(("wipe",), "Factory reset: delete all config and data [-y]", _shell("cmd_wipe"), "Database"),
+        # ---- remote admin (pinning is never remote; see remote_admin_shell) ----
+        Command(("admins list",), "Pinned remote admins, their devices, last use", _admins("cmd_admins_list"), "Remote admin"),
+        Command(("admins add",), "Pin an Admin for remote admin; prints the pairing code: admins add <user> [--read-only]", _admins("cmd_admins_add"), "Remote admin"),
+        Command(("admins code", "admins codes"), "One-time code for a new device or a forgotten password: admins code <user>", _admins("cmd_admins_code"), "Remote admin"),
+        Command(("admins remove",), "Unpin; their sessions end: admins remove <user>", _admins("cmd_admins_remove"), "Remote admin"),
+        Command(("admins devices",), "Approved device keys: admins devices [<user>]", _admins("cmd_admins_devices"), "Remote admin"),
+        Command(("admins revoke",), "Revoke device keys: admins revoke <user> <fingerprint|all>", _admins("cmd_admins_revoke"), "Remote admin"),
+        Command(("admins log",), "Audit log tail: admins log [N]", _admins("cmd_admins_log"), "Remote admin"),
+        Command(("admins hostkey",), "Show the admin host key, or rotate it: admins hostkey [rotate]", _admins("cmd_admins_hostkey"), "Remote admin"),
+        Command(("admins policy",), "admins policy [relay on|off] [new-device email|console]", _admins("cmd_admins_policy"), "Remote admin"),
+        Command(("admins kick",), "End live remote-admin sessions: admins kick [<user>]", _admins("cmd_admins_kick"), "Remote admin"),
     ]
 
 
@@ -228,6 +245,7 @@ _SECTION_BLURB = {
     "Schemas": "driver schemas approved on RemoteRF Global",
     "Gist status": "publishing status to a GitHub gist",
     "Database": "export, or wipe everything",
+    "Remote admin": "admins who reach this console from anywhere",
 }
 
 
@@ -334,10 +352,16 @@ def _run_in_daemon(command: Command, rest: list[str]) -> int:
             return 0 if ok else 1
         print("The server is not running. Start it with: serverrf -s", file=sys.stderr)
         return 1
-    if command.interactive or command.console_only:
-        # Prompts need the console's terminal: type it there and attach.
+    remote = bool(os.environ.get("REMOTERF_REMOTE_ADMIN"))
+    if command.console_only and remote:
+        print(f"`{command.names[0]}` works only at the lab console.", file=sys.stderr)
+        return 1
+    if command.console_only or (command.interactive and not remote):
+        # Prompts need the console's terminal: type it there and attach. Never
+        # for a remote admin: that would hand them the live console, past the policy.
         return console.run_in_console([*command.names[0].split(), *rest])
-    reply = control.call([*command.names[0].split(), *rest])
+    # A prompt inside the daemon is asked here, over the socket (control.call).
+    reply = control.call([*command.names[0].split(), *rest], timeout=3600.0 if command.interactive else 30.0)
     if reply is None:
         print("The server stopped answering.", file=sys.stderr)
         return 1

@@ -2348,6 +2348,8 @@ def cmd_db_export(argv: List[str]) -> int:
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.suffix == ".sock" or path.name.endswith("-journal"):
                 continue
+            if path.relative_to(root).parts[:2] == ("remote_admin", "backups"):
+                continue  # the remote-admin backups are themselves exports
             arcname = str(Path("remoterf") / path.relative_to(root))
             if path.suffix == ".db":
                 # A consistent snapshot even while the server is writing.

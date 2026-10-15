@@ -30,6 +30,7 @@ CLUSTER_CODE = "cluster"
 # A HOME that deleted the account tells each partner to drop its proxy. The
 # `cluster.` prefix is reserved and minted codes are uppercase: no collision.
 UNENROLL_CODE = "cluster.unenroll"
+ADMIN_PIN_REVOKE_CODE = "admin_pin.revoke"  # Global: this account's remote-admin pins here end
 from .migrations import configure_connection, migrate_gate_f_usergroups_schema
 from .principals import PreparedFederatedAccount, prepare_federated_account
 from . import links
@@ -382,8 +383,8 @@ class ServerFederatedEnrollHandler:
                 if found:
                     self.account_remover(found[0])
             return None
-        if "lan_hash" in payload:
-            return None  # a lab login: all of it in the owner transaction, once the grant is consumed
+        if "lan_hash" in payload or payload["code_name"] == ADMIN_PIN_REVOKE_CODE:
+            return None  # all of it in the owner transaction, once the grant is consumed
         if payload["code_name"] == CLUSTER_CODE:
             # No code to check: the home lab's signature under an active
             # cluster contract is the vouching. Prepare a proxy only once.
@@ -421,6 +422,24 @@ class ServerFederatedEnrollHandler:
             remote_subject_id=claims["sub"],
             perms_path=self.perms_path,
             now=int(self.clock()),
+        )
+
+    def _admin_pin_revoke(self, tx, action, now):
+        """Global disabled or deleted an account: its Global-only remote-admin
+        pins here end. Only from the Global home this lab holds a contract with,
+        and only that grant's own subject."""
+        from .. import remote_admin
+
+        claims = action.claims
+        if claims["iss"] != links.global_home_id():
+            raise FederationBusinessError("enrollee_not_allowed")
+        if {"display_name", "email", "username", "lan_hash"} & set(action.request.value["payload"]):
+            raise FederationBusinessError("code_invalid")  # a user enrolling with this code, not Global's revoke
+        ended = remote_admin.revoke_global_pin(claims["sub"])
+        self._audit(tx, action, code="ok", metadata={"admin_pins_revoked": ended})
+        return self._result(
+            action, redemption_id=str(uuid5(NAMESPACE_URL, f"remoterf-adminpin:{claims['iss']}:{claims['sub']}")),
+            membership_present=False, groups=[], now=now,
         )
 
     def _linked_enroll(self, tx, action, now):
@@ -591,6 +610,8 @@ class ServerFederatedEnrollHandler:
         now = int(self.clock())
         if payload["code_name"] == UNENROLL_CODE:
             return self._unenroll(tx, action, now)
+        if payload["code_name"] == ADMIN_PIN_REVOKE_CODE:
+            return self._admin_pin_revoke(tx, action, now)
         if payload["code_name"] == CLUSTER_CODE:
             return self._cluster_enroll(tx, action, now)
         if "lan_hash" in payload:
