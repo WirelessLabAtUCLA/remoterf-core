@@ -63,6 +63,7 @@ _SYNONYMS = {
     "reservation": "reservations", "res": "reservations", "r": "reservations",
     "host": "hosts",
     "clusters": "cluster",
+    "schemas": "schema",
     "cert": "certs", "certificate": "certs", "certificates": "certs",
     "ls": "list", "show": "list", "rm": "remove", "del": "remove", "delete": "remove",
     "mk": "create", "add": "add", "new": "create",
@@ -151,6 +152,9 @@ def _table() -> list[Command]:
         Command(("global join",), "Request a public address", _global("join"), "Global"),
         Command(("global verify",), "Redeem the emailed code [code]", _global("verify"), "Global"),
         Command(("global leave",), "Stop participating", _global("leave"), "Global"),
+        # ---- driver schemas approved on RemoteRF Global (server/schema_registry.py) ----
+        Command(("schema browse",), "Driver schemas approved on RemoteRF Global: schema browse [text]", _lazy(".schema_registry", "cmd_browse"), "Schemas"),
+        Command(("schema download",), "Save one to the drivers folder, hash checked: schema download <name|hash> [-y]", _lazy(".schema_registry", "cmd_download"), "Schemas"),
         # ---- clusters (sharing devices with other deployments) ----
         Command(("cluster list",), "Clusters shared with other deployments", _federation("list"), "Clusters"),
         Command(("cluster info",), "Every deployment, shared group and device in a cluster", _federation("info"), "Clusters"),
@@ -221,6 +225,7 @@ _SECTION_BLURB = {
     "Config": "ports and address",
     "Global": "public address and relay",
     "Clusters": "sharing devices with other deployments",
+    "Schemas": "driver schemas approved on RemoteRF Global",
     "Gist status": "publishing status to a GitHub gist",
     "Database": "export, or wipe everything",
 }
