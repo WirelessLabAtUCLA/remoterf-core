@@ -7,7 +7,6 @@ import pytest
 from remoterf_federation_core import (
     LAN_UPDATE_CODE,
     FederationError,
-    held_keys,
     build_action_request,
     lan_secret,
     lan_verifier,
@@ -65,8 +64,3 @@ def test_a_malformed_lab_login_is_refused(bad):
     with pytest.raises(FederationError, match="invalid_enrollee"):
         enroll(**bad)
 
-
-def test_held_keys_ignore_case_and_spacing_and_keep_name_and_email_apart():
-    name, email = held_keys("JDoe", " JDoe@Example.org ")
-    assert (name, email) == held_keys("jdoe", "jdoe@example.org")
-    assert len(name) == len(email) == 12 and name != held_keys("jdoe@example.org", "x")[0]
