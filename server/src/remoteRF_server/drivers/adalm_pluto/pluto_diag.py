@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""`diag` tests for ADALM-Pluto (USB, PoE, MIMO). Nothing radiates: the tone
+"""`diag` tests for ADALM-Pluto (USB, PoE, MIMO, Pluto+). Nothing radiates: the tone
 tests use the AD936x internal digital loopback at the lowest TX gain, and a
 Multi-Tap's coax loopback (init `multi_tap: true`) stays at TX <= -10 dB."""
 
@@ -37,7 +37,9 @@ COAX_RX_DB = (10, 30, 50)
 SNAPSHOT = ("sample_rate", "rx_lo", "tx_lo", "rx_rf_bandwidth", "tx_rf_bandwidth",
             "gain_control_mode_chan0", "rx_hardwaregain_chan0", "tx_hardwaregain_chan0", "rx_buffer_size",
             "tx_cyclic_buffer", "loopback")
-MIMO_SNAPSHOT = ("tx_hardwaregain_chan1", "tx_enabled_channels", "rx_enabled_channels")
+MIMO_TYPES = ("adalm_pluto_mimo", "pluto_plus")
+MIMO_SNAPSHOT = ("gain_control_mode_chan1", "rx_hardwaregain_chan1", "tx_hardwaregain_chan1",
+                 "tx_enabled_channels", "rx_enabled_channels")
 
 
 def _poe(ctx):
@@ -63,7 +65,7 @@ def power(ctx):
     if poe is not None and not ctx["was_on"]:
         poe.power_up()
     rate = int(schema.get_sample_rate())
-    mimo = ctx.get("type") == "adalm_pluto_mimo"
+    mimo = ctx.get("type") in MIMO_TYPES
     ctx["snapshot"] = {name: getattr(schema, f"get_{name}")() for name in SNAPSHOT + (MIMO_SNAPSHOT if mimo else ())}
     # Quiet the transmitter before anything retunes it: a boot-time DDS tone or a
     # previous holder's cyclic buffer would otherwise follow the LO sweep on air.
@@ -211,6 +213,28 @@ def loopback_tone(ctx):
     return f"{len(OFFSETS)} offsets found, SNR >= {worst} dB", values
 
 
+def channel_1(ctx):
+    """MIMO boards (Pluto+, 2R2T): the loopback tone through the second RX/TX pair."""
+    if ctx.get("type") not in MIMO_TYPES:
+        raise Skip("single-channel Pluto")
+    schema = ctx["schema"]
+    _prepare_tone(schema, 915e6)
+    schema.set_gain_control_mode_chan1("manual")
+    schema.set_rx_hardwaregain_chan1(10)
+    schema.set_tx_enabled_channels([1])
+    schema.set_rx_enabled_channels([1])
+    schema.set_loopback(1)
+    try:
+        peak, snr = _tone(schema, OFFSETS[0], TX_MIN_DB, 10)
+    finally:
+        schema.set_loopback(0)
+        schema.set_tx_enabled_channels([0])
+        schema.set_rx_enabled_channels([0])
+    if abs(peak - OFFSETS[0]) > 5_000 or snr < MIN_SNR_DB:
+        raise RuntimeError(f"channel 1: tone at {OFFSETS[0] / 1e3:+g} kHz came back at {peak / 1e3:+.1f} kHz, SNR {snr} dB")
+    return f"tone found, SNR {snr} dB", {"peak_hz": peak, "snr_db": snr}
+
+
 def coax_loopback(ctx):
     if not ctx["init"].get("multi_tap"):
         raise Skip("not a Multi-Tap")
@@ -243,6 +267,7 @@ TESTS = [
     ("gain", 2, 20, gains),
     ("rx buffers", 2, 20, rx_buffers),
     ("loopback tone", 4, 40, loopback_tone),
+    ("channel 1", 2, 30, channel_1),
     ("coax loopback", 2, 60, coax_loopback),
 ]
 
@@ -259,8 +284,9 @@ def teardown(ctx):
     schema.call_rx_destroy_buffer()
     schema.set_loopback(0)
     snapshot = dict(ctx.get("snapshot", {}))
-    if snapshot.get("gain_control_mode_chan0") != "manual":
-        snapshot.pop("rx_hardwaregain_chan0", None)  # an AGC mode owns it
+    for chan in (0, 1):
+        if snapshot.get(f"gain_control_mode_chan{chan}", "manual") != "manual":
+            snapshot.pop(f"rx_hardwaregain_chan{chan}", None)  # an AGC mode owns it
     failed = []
     for name, value in snapshot.items():
         try:

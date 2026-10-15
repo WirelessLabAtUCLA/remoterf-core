@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from remoteRF_server.drivers import bluetooth_diag, gps_diag
+from remoteRF_server.drivers import bluetooth_diag, gps_diag, kraken_sdr_diag, rfbeam_kmd7_diag
 from remoteRF_server.drivers.adalm_pluto import pluto_diag
 from remoteRF_server.drivers.adalm_pluto.poe import PoePluto
 from remoteRF_server.drivers.rtl_sdr import rtl_sdr_diag
@@ -112,6 +112,49 @@ class FakeRtl(Attrs):
 
     def call_read_samples(self, n):
         return ((np.random.randn(n) + 1j * np.random.randn(n)) * 0.1).astype(np.complex64)
+
+
+class FakeKraken(Attrs):
+    def __init__(self, stuck_channel=None):
+        self.attrs = dict(sample_rate=2_400_000, center_freq=433_920_000, gain=20.7)
+        self.stuck_channel = stuck_channel
+
+    def get_gain(self):
+        return [self.attrs["gain"]] * 5
+
+    def get_num_channels(self):
+        return 5
+
+    def get_serials(self):
+        return ["1000", "1001", "1002", "1003", "1004"]
+
+    def get_tuner_type(self):
+        return "R820T"
+
+    def get_valid_gains_db(self):
+        return [0.0, 20.7, 49.6]
+
+    def call_read_samples(self, n):
+        reads = [((np.random.randn(n) + 1j * np.random.randn(n)) * 0.1).astype(np.complex64) for _ in range(5)]
+        if self.stuck_channel is not None:
+            reads[self.stuck_channel][:] = 0.5
+        return reads
+
+
+class FakeKmd7:
+    def __init__(self, version="K-MD7_APP-RFB-0205"):
+        self.version = version
+        self.frames = []
+
+    def get_version(self):
+        return self.version
+
+    def get_parameters(self):
+        return self.version.encode() + b"\0\x01\x00\x00\x0c"
+
+    def call_frame(self, flags):
+        self.frames.append(flags)
+        return {"DONE": (16).to_bytes(4, "little")}
 
 
 class Range:
@@ -251,7 +294,7 @@ def test_pluto_passes_and_restores_settings():
     fake = FakePluto()
     row, tests = run_one(state("Pluto 01", fake, "adalm_pluto"))
     assert row["status"] == "ok", tests
-    assert statuses(tests) == {**{n: "pass" for n in tests}, "coax loopback": "skip"}
+    assert statuses(tests) == {**{n: "pass" for n in tests}, "channel 1": "skip", "coax loopback": "skip"}
     assert tests["temperature"]["values"]["celsius"] == 41.5
     assert all(v["snr_db"] > 20 for v in tests["loopback tone"]["values"].values())
     assert fake.attrs["sample_rate"] == 30_720_000 and fake.attrs["loopback"] == 0
@@ -261,12 +304,17 @@ def test_pluto_passes_and_restores_settings():
     assert fake.attrs["tx_cyclic_buffer"] is False and fake.attrs["tx_hardwaregain_chan0"] == -10
 
 
-def test_pluto_mimo_tones_on_channel_0_and_restores():
+@pytest.mark.parametrize("dtype", ["adalm_pluto_mimo", "pluto_plus"])
+def test_pluto_mimo_tones_on_both_channels_and_restores(dtype):
     fake = FakePluto()
-    fake.attrs.update(tx_hardwaregain_chan1=0, tx_enabled_channels=[0, 1], rx_enabled_channels=[0, 1])
-    row, tests = run_one(state("MIMO", fake, "adalm_pluto_mimo"))
+    fake.attrs.update(gain_control_mode_chan1="slow_attack", rx_hardwaregain_chan1=71, tx_hardwaregain_chan1=0,
+                      tx_enabled_channels=[0, 1], rx_enabled_channels=[0, 1])
+    row, tests = run_one(state("MIMO", fake, dtype))
     assert row["status"] == "ok", tests
-    assert fake.attrs["tx_enabled_channels"] == [0, 1] and fake.attrs["tx_hardwaregain_chan1"] == 0
+    assert tests["channel 1"]["status"] == "pass" and tests["channel 1"]["values"]["snr_db"] > 20
+    assert fake.attrs["tx_enabled_channels"] == fake.attrs["rx_enabled_channels"] == [0, 1]
+    assert fake.attrs["tx_hardwaregain_chan1"] == 0 and fake.attrs["gain_control_mode_chan1"] == "slow_attack"
+    assert fake.attrs["loopback"] == 0 and max(fake.tx_gains_while_sending) == pluto_diag.TX_MIN_DB
 
 
 def test_pluto_failures_are_named():
@@ -339,6 +387,26 @@ def test_rtl_blog_v4_unreported_gain_and_no_reset_buffer_pass():
     row, tests = run_one(state("RTLSDR 0", FakeRtlBlogV4(), "rtl_sdr"))
     assert row["status"] == "ok", tests
     assert "does not report gain" in tests["gain"]["detail"]
+
+
+def test_kraken_reads_all_five_and_restores():
+    fake = FakeKraken()
+    row, tests = run_one(state("Kraken", fake, "kraken_sdr"))
+    assert row["status"] == "ok", tests
+    assert len(tests["iq samples"]["values"]["dbfs"]) == 5
+    assert fake.attrs == {"sample_rate": 2_400_000, "center_freq": 433_920_000, "gain": 20.7}
+    _, tests = run_one(state("Kraken", FakeKraken(stuck_channel=3), "kraken_sdr"), gid=2)
+    assert tests["iq samples"]["status"] == "fail" and "channel 3" in tests["iq samples"]["detail"]
+
+
+def test_kmd7_is_read_only_and_names_the_wrong_sensor():
+    fake = FakeKmd7()
+    row, tests = run_one(state("K-MD7", fake, "rfbeam_kmd7"))
+    assert row["status"] == "ok", tests
+    assert tests["version"]["detail"] == "K-MD7_APP-RFB-0205" and fake.frames == [0x20]
+    assert tests["frame"]["values"]["frame"] == 16
+    _, tests = run_one(state("K-LD7", FakeKmd7("K-LD7_APP-RFB-0103"), "rfbeam_kmd7"), gid=2)
+    assert tests["version"]["status"] == "fail" and tests["frame"]["status"] == "skip"
 
 
 def test_usrp_rx_only_preloads_then_closes():

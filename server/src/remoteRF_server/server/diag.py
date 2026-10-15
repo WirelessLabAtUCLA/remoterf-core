@@ -49,10 +49,13 @@ from .startup_check import _Display, _flush_all, _log, _new_log, _redirected, _s
 DIAG_MODULES = {
     "adalm_pluto": "remoteRF_server.drivers.adalm_pluto.pluto_diag",
     "adalm_pluto_mimo": "remoteRF_server.drivers.adalm_pluto.pluto_diag",
+    "pluto_plus": "remoteRF_server.drivers.adalm_pluto.pluto_diag",
     "rtl_sdr": "remoteRF_server.drivers.rtl_sdr.rtl_sdr_diag",
     "usrp": "remoteRF_server.drivers.usrp.usrp_diag",
     "gps": "remoteRF_server.drivers.gps_diag",
     "bluetooth": "remoteRF_server.drivers.bluetooth_diag",
+    "kraken_sdr": "remoteRF_server.drivers.kraken_sdr_diag",
+    "rfbeam_kmd7": "remoteRF_server.drivers.rfbeam_kmd7_diag",
 }
 MARGIN_S = 60  # a reservation starting before a device's tests end + this skips it
 LOCK_WAIT_S = 10
