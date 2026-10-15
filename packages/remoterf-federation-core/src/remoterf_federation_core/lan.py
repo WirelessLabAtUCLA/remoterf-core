@@ -49,3 +49,12 @@ def validate_lan_credential(username: object, salt: object, hashed: object) -> d
     if match is None or not LAN_PBKDF2_ROUNDS <= int(match.group(1)) <= MAX_LAN_PBKDF2_ROUNDS:
         raise ValidationError("invalid_enrollee")
     return {"username": username, "lan_salt": salt, "lan_hash": hashed}
+
+
+def held_keys(username: str, email: str) -> tuple[str, str]:
+    """A lab account as Global sees it in that lab's status note ("held"):
+    (name key, email key), 12 hex each. Unreadable, but a clash shows."""
+    def key(kind: str, value: str) -> str:
+        return hashlib.sha256(f"{kind}\0{value.strip().lower()}".encode()).hexdigest()[:12]
+
+    return key("name", username), key("email", email)

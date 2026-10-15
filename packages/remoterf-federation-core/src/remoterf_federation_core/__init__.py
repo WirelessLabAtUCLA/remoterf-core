@@ -35,7 +35,7 @@ from .contracts import (
     validate_sha256,
     validate_trusted_key_material,
 )
-from .lan import LAN_PBKDF2_ROUNDS, MAX_LAN_PBKDF2_ROUNDS, lan_secret, lan_verifier, validate_lan_credential
+from .lan import LAN_PBKDF2_ROUNDS, MAX_LAN_PBKDF2_ROUNDS, held_keys, lan_secret, lan_verifier, validate_lan_credential
 from .federation import (
     ACTION_CAPABILITIES,
     DEFAULT_ACTION_RETRY_POLICIES,
@@ -167,7 +167,7 @@ __all__ = ["ValidationError", "canonical_json", "strict_json", "canonical_uuid",
            "CanonicalActionRequest", "ACTION_CAPABILITIES",
            "FederationInvitation", "FEDERATION_INVITATION_PREFIX",
            "LAN_CREDENTIAL_FIELDS", "LAN_UPDATE_CODE", "LAN_PBKDF2_ROUNDS",
-           "MAX_LAN_PBKDF2_ROUNDS", "lan_secret", "lan_verifier", "validate_lan_credential",
+           "MAX_LAN_PBKDF2_ROUNDS", "held_keys", "lan_secret", "lan_verifier", "validate_lan_credential",
            "MAX_FEDERATION_INVITATION_BYTES", "build_federation_invitation",
            "parse_federation_invitation",
            "ActionRetryPolicy", "DEFAULT_ACTION_RETRY_POLICIES",
