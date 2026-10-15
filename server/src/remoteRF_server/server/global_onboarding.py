@@ -551,6 +551,24 @@ def lan_endpoint() -> Optional[str]:
 # federation peer). LAN-only groups do not exist to such a call.
 RELAYED = contextvars.ContextVar("remoterf_relayed", default=False)
 
+# The client version a network call carried (gRPC metadata `x-remoterf-client`,
+# "" when none); None for an in-process call (the console, tests).
+CLIENT_VERSION = contextvars.ContextVar("remoterf_client_version", default=None)
+# The first client with the driver-schema fixes (security audit 2026-10-15):
+# a Global account's login here needs it.
+MIN_CLIENT_VERSION = (2, 10, 0)
+
+
+def client_is_current(version) -> bool:
+    import re
+
+    found = re.match(r"(\d{1,6})\.(\d{1,6})(?:\.(\d{1,6}))?", version or "")
+    return bool(found) and tuple(int(part or 0) for part in found.groups()) >= MIN_CLIENT_VERSION
+
+
+def client_metadata_version(metadata) -> str:
+    return next((str(value) for key, value in metadata or () if key == "x-remoterf-client"), "")
+
 
 def is_relayed(peer: str) -> bool:
     """Whether a gRPC peer string reached this Server through the relay.

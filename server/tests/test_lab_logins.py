@@ -230,3 +230,23 @@ def test_codes_guessed_through_federation_are_held_to_the_native_limit(lab, monk
         assert _enroll(lab, _action("REAL1"))["membership_present"]
     finally:
         lab.reservation._failures.clear()
+
+
+def test_a_global_accounts_lab_login_needs_a_current_client(lab):
+    from remoteRF_server.server.global_onboarding import CLIENT_VERSION, client_metadata_version
+
+    _link(lab)
+    secret = lan_secret("correct horse", LAB, "jdoe")
+    for sent, ok in (("2.9.0", False), ("", False), ("2.10.0", True), ("2.10.0.dev3", True), ("3.0", True)):
+        token = CLIENT_VERSION.set(sent)
+        try:
+            reply = lab.h.login_user("jdoe", secret)
+            assert ("UC" in reply) is ok, (sent, reply)
+            if not ok:
+                assert "remoterf 2.10 or newer" in str(reply["UE"])
+            assert "remoterf 2.10" not in str(lab.h.login_user("jdoe", lan_secret("wrong", LAB, "jdoe")))  # never before the password
+        finally:
+            CLIENT_VERSION.reset(token)
+    assert "UC" in lab.h.login_user("jdoe", secret)  # in-process (console, tests): no version to check
+    assert client_metadata_version((("x-remoterf-client", "2.10.0"), ("user-agent", "grpc"))) == "2.10.0"
+    assert client_metadata_version(None) == ""

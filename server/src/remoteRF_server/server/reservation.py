@@ -73,7 +73,7 @@ def _fanout(call, empty):
 _LAN_SECRET = re.compile(r"[0-9a-f]{64}")
 from .user_group_handler import user_group_handler
 from . import global_onboarding
-from .global_onboarding import RELAYED, lan_only_hint
+from .global_onboarding import CLIENT_VERSION, MIN_CLIENT_VERSION, RELAYED, client_is_current, lan_only_hint
 from .federation.migrations import (
     FEDERATED_PASSWORD_HASH,
     FEDERATED_PASSWORD_SALT,
@@ -871,6 +871,11 @@ class ReservationHandler:
                     (*hash_password(password), int(account[0])),
                 )
         _clear_failures(limiter_key)
+        version = CLIENT_VERSION.get()
+        if version is not None and not client_is_current(version) and links.is_linked(int(account[0]), username):
+            # After the password checked out, so it tells nobody which accounts are linked.
+            wanted = ".".join(map(str, MIN_CLIENT_VERSION[:2]))
+            return {"UE": map_arg(f"This account needs remoterf {wanted} or newer here: pip install -U remoterf")}
         if RELAYED.get() and user_group_handler.user_is_lan_only(uid=int(account[0])):
             return {"UE": map_arg(lan_only_hint("This account"))}
         return {"UC": map_arg(f"{username}")}

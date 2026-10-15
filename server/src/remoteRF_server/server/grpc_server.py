@@ -181,12 +181,14 @@ class GenericRPCServicer(grpc_pb2_grpc.GenericRPCServicer):
 
         # Normal RPC. Everything below reads RELAYED instead of the peer:
         # LAN-only groups do not exist to a call that came through the relay.
-        from .global_onboarding import RELAYED, is_relayed
+        from .global_onboarding import CLIENT_VERSION, RELAYED, client_metadata_version, is_relayed
 
         token = RELAYED.set(is_relayed(context.peer()))
+        version = CLIENT_VERSION.set(client_metadata_version(context.invocation_metadata()))
         try:
             response = rpc_manager.run_rpc(function_name=request.function_name, args=request.args)
         finally:
+            CLIENT_VERSION.reset(version)
             RELAYED.reset(token)
         return grpc_pb2.GenericRPCResponse(results=response)
 
