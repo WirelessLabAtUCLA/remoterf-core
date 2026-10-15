@@ -384,10 +384,77 @@ def redeem_code(conn, admin_id: int, purpose: str, typed: str, *, device_fp=None
     return False
 
 
+NOTICE_PATH = "/v2/deployment/admin-notice"
+PINS_PATH = "/v2/deployment/admin-pins"
+
+
+def _post(url: str, body: dict) -> dict:
+    import requests
+
+    response = requests.post(url, json=body, timeout=15.0, allow_redirects=False)
+    if response.status_code >= 400:
+        try:
+            code = response.json()["error"]["code"]
+        except Exception:  # noqa: BLE001
+            code = f"http_{response.status_code}"
+        raise RuntimeError(code)
+    return response.json()
+
+
+def _global_call(path: str, payload: dict) -> dict:
+    """A call to Global's account home, signed with this lab's deployment key
+    (as its status notes are); Global checks it against our standing contract."""
+    import base64
+
+    from remoterf_federation_core import canonical_json
+
+    from . import global_onboarding as g
+
+    key, _, me = g._signing_material()
+    body = {"deployment_id": me, "issued_at": int(time.time()), "nonce": secrets.token_hex(16), **payload}
+    signature = base64.b64encode(key.sign(canonical_json(body).encode())).decode("ascii")
+    return _post(g.broker_origin() + path, {"payload": body, "signature": signature})
+
+
+def _on_global() -> bool:
+    from .federation import global_home
+
+    return global_home.contract_id() is not None
+
+
 def email_device_code(pin, code: str, fp: str, label: str, route: str) -> str | None:
     """Have Global email a new-device code to this pin's Global address. The
     masked address, or None when the pin has no email path (console codes only)."""
-    return None
+    subject = pin["subject_id"] if pin["kind"] == "global" else _link_subject(pin["acc_id"], pin["username"])
+    if not subject or not _on_global():
+        return None
+    reply = _global_call(NOTICE_PATH, {"subject": subject, "template": "device_code", "code": code,
+                                       "device_fp": fp, "device_label": label, "route": route})
+    return reply.get("masked_email")
+
+
+def revoke_global_pin(subject_id: str) -> int:
+    """Global disabled or deleted this account: its Global-only pins here end
+    (nothing re-enables them; `admins add` pins it again)."""
+    with closing(connect()) as conn:
+        pins = conn.execute("SELECT * FROM remote_admins WHERE kind='global' AND subject_id=? AND disabled_at IS NULL",
+                            (subject_id,)).fetchall()
+        for pin in pins:
+            disable_pin(conn, pin["admin_id"])
+            audit("pin_disabled_by_global", admin=login_name(pin), conn=conn)
+        conn.commit()
+    for pin in pins:
+        _console(f"[remote] {login_name(pin)}: Global disabled or deleted this account; its remote admin here ended.")
+    return len(pins)
+
+
+def _console(text: str) -> None:
+    try:
+        from ..common.utils.ansi_codes import Sty, printf
+
+        printf(text, Sty.GRAY)
+    except Exception:  # noqa: BLE001
+        print(text)
 
 
 # -----------------------------
@@ -522,8 +589,30 @@ def cmd_admins_add(argv) -> int:
 
 
 def _add_global_pin(conn, name: str, read_only: bool):
-    print("Global-only accounts can be pinned once this lab runs the Global part of remote admin.", file=sys.stderr)
-    return None
+    """`<name>@global`: Global says who the subject is and where its codes go;
+    the operator confirms the address. Login still needs this console's code."""
+    if not _on_global():
+        print("This lab has no standing contract with RemoteRF Global, so Global-only accounts cannot be pinned.",
+              file=sys.stderr)
+        return None
+    try:
+        found = _global_call(PINS_PATH, {"op": "resolve", "username": name})
+    except Exception as exc:  # noqa: BLE001
+        print(f"RemoteRF Global could not resolve {name}@global: {exc}", file=sys.stderr)
+        return None
+    if not _confirm(f"{name}@global is the Global account with email {found['masked_email']}. Pin it? [y/N]: ", "y"):
+        print("Not pinned.")
+        return None
+    try:
+        _global_call(PINS_PATH, {"op": "register", "subject": found["subject"]})
+    except Exception as exc:  # noqa: BLE001
+        print(f"RemoteRF Global did not register the pin: {exc}", file=sys.stderr)
+        return None
+    cur = conn.execute(
+        "INSERT INTO remote_admins(kind,acc_id,username,subject_id,email_snapshot,read_only,created_at) "
+        "VALUES ('global',NULL,?,?,?,?,?)",
+        (name, found["subject"], found["masked_email"], int(read_only), int(time.time())))
+    return pin_by_id(conn, cur.lastrowid)
 
 
 def cmd_admins_code(argv) -> int:

@@ -544,3 +544,96 @@ def test_a_real_openssh_session_through_the_tunnel(lab, tmp_path):
     finally:
         server.stop(0)
 
+
+# -----------------------------
+# With RemoteRF Global: emailed device codes, `<user>@global` pins, revocation
+# -----------------------------
+
+SUB = "44444444-4444-4444-8444-444444444444"
+
+
+def test_a_global_only_account_is_pinned_after_the_operator_confirms(lab):
+    calls = []
+
+    def global_call(path, payload):
+        calls.append((path, payload))
+        return {"subject": SUB, "username": "jdoe", "masked_email": "j***@example.org"} \
+            if payload["op"] == "resolve" else {"registered": True}
+
+    with mock.patch.object(ra, "_on_global", return_value=True), \
+         mock.patch.object(ra, "_global_call", side_effect=global_call), \
+         mock.patch("builtins.input", return_value="n"):
+        assert run(ra.cmd_admins_add, ["jdoe@global"])[0] == 1
+    assert [p["op"] for _, p in calls] == ["resolve"] and not ra.any_active_pin()
+    with mock.patch.object(ra, "_on_global", return_value=True), \
+         mock.patch.object(ra, "_global_call", side_effect=global_call), \
+         mock.patch("builtins.input", return_value="y"):
+        rc, out = run(ra.cmd_admins_add, ["jdoe@global"])
+    assert rc == 0 and "pair jdoe@global@" in out
+    assert calls[-1] == (ra.PINS_PATH, {"op": "register", "subject": SUB})
+    with contextlib.closing(ra.connect()) as conn:
+        pin_row = ra.find_pin(conn, "jdoe@global")
+        assert (pin_row["kind"], pin_row["acc_id"], pin_row["subject_id"]) == ("global", None, SUB)
+        assert ra.pin_problem(pin_row) is None  # no lab row, no role: the pin is the grant
+        assert ra.find_pin(conn, "jdoe") is None
+    with mock.patch.object(ra, "_on_global", return_value=False):
+        assert run(ra.cmd_admins_add, ["other@global"])[0] == 1
+
+
+def test_device_codes_go_to_the_global_subject_only(lab):
+    pin(lab)
+    with contextlib.closing(ra.connect()) as conn:
+        lab_pin = ra.find_pin(conn, "jdoe")
+    sent = []
+    with mock.patch.object(ra, "_global_call", side_effect=lambda p, b: sent.append(b) or {"masked_email": "x"}), \
+         mock.patch.object(ra, "_on_global", return_value=True):
+        assert ra.email_device_code(lab_pin, "ABCDEFGH23", "SHA256:x", "l", "lan") is None  # not linked: console only
+        with mock.patch.object(ra, "_link_subject", return_value=SUB):
+            assert ra.email_device_code(lab_pin, "ABCDEFGH23", "SHA256:x", "l", "lan") == "x"
+    assert sent == [{"subject": SUB, "template": "device_code", "code": "ABCDEFGH23", "device_fp": "SHA256:x",
+                     "device_label": "l", "route": "lan"}]
+    with mock.patch.object(ra, "_link_subject", return_value=SUB), mock.patch.object(ra, "_on_global", return_value=False):
+        assert ra.email_device_code(lab_pin, "ABCDEFGH23", "SHA256:x", "l", "lan") is None
+
+
+def test_lab_calls_to_global_are_signed_with_the_deployment_key(lab):
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from remoterf_federation_core import canonical_json
+
+    from remoteRF_server.server import global_onboarding as g
+
+    key = Ed25519PrivateKey.generate()
+    posted = {}
+    with mock.patch.object(g, "_signing_material", return_value=(key, "kid", "lab-id")), \
+         mock.patch.object(ra, "_post", side_effect=lambda url, body: posted.update(url=url, body=body) or {"ok": 1}):
+        assert ra._global_call(ra.NOTICE_PATH, {"subject": SUB}) == {"ok": 1}
+    body = posted["body"]
+    assert posted["url"].endswith(ra.NOTICE_PATH) and body["payload"]["deployment_id"] == "lab-id"
+    key.public_key().verify(base64.b64decode(body["signature"]), canonical_json(body["payload"]).encode())
+
+
+def test_global_revoking_an_account_ends_its_global_only_pins(lab):
+    from remoteRF_server.server.federation import enrollment
+
+    with contextlib.closing(ra.connect()) as conn:
+        conn.execute("INSERT INTO remote_admins(kind,username,subject_id,created_at) VALUES ('global','jdoe',?,1)", (SUB,))
+        admin = ra.find_pin(conn, "jdoe@global")["admin_id"]
+        ra.approve_device(conn, admin, "ssh-ed25519 AAAA", "SHA256:dev", "l", "pair")
+        conn.commit()
+    handler = enrollment.ServerFederatedEnrollHandler.__new__(enrollment.ServerFederatedEnrollHandler)
+    handler.local_deployment_id, handler.display_name = "lab", "Lab"
+    handler._audit = mock.Mock()
+    action = SimpleNamespace(state="active", claims={"iss": "not-global", "sub": SUB, "contract_id": "c",
+                                                     "contract_version": 1})
+    with mock.patch.object(enrollment.links, "global_home_id", return_value="global-home"):
+        with pytest.raises(enrollment.FederationBusinessError):
+            handler._admin_pin_revoke(None, action, 1)
+        assert ra.any_active_pin()
+        action.claims["iss"] = "global-home"
+        assert handler._admin_pin_revoke(None, action, 1)["status"] == "ok"
+    assert not ra.any_active_pin()
+    with contextlib.closing(ra.connect()) as conn:
+        assert ra.device_for(conn, admin, "ssh-ed25519 AAAA") is None
+        assert ra.revoke_global_pin(SUB) == 0  # a second revoke is a harmless ok
