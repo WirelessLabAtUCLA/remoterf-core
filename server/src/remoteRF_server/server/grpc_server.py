@@ -1027,7 +1027,14 @@ def _cmd_hosts_wipe(*, yes: bool = False) -> None:
     if reg is None:
         printf("Host tunnel registry not initialized; only persisted wipe attempted.", Sty.GRAY)
     else:
+        # A live tunnel would keep serving devices the directory no longer lists.
+        closed = reg.close_all_sessions()
+        if closed:
+            printf(f"Closed {closed} live host tunnel(s); hosts reconnect on their own.", Sty.GRAY)
         cleared = _try_clear_registry_in_memory(reg)
+        from .host_dynamic_v2 import host_session_proxy
+
+        host_session_proxy.close_all()
         if cleared:
             printf("Cleared in-memory registry state:", Sty.GREEN)
             # keep output short-ish

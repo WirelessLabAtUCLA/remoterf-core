@@ -2246,8 +2246,13 @@ def cmd_hosts_token(argv: List[str]) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    from .server.global_onboarding import cert_sha256, lan_endpoint
+
     print("Host token created and stored at ~/.config/remoterf/db/hosts_auth.env")
     print(f'On the host, run:\n  hostrf --host --set {host_id} "{token}"')
+    ca = cert_sha256()
+    if ca:
+        print(f"  hostrf --config --addr {lan_endpoint() or '<lab address>:<grpc port>'} --ca-sha256 {ca}")
     return 0
 
 

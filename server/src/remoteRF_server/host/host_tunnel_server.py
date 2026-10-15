@@ -541,6 +541,23 @@ class HostTunnelRegistry:
         info(f"[registry] drop_host_if_match done: host_id={host_id!r} online=False")
         return True
 
+    def close_all_sessions(self) -> int:
+        """End every live tunnel; each host reconnects and announces afresh."""
+        with self._lock:
+            sessions = [s for s in self._hosts.values() if s is not None and s.alive]
+        for sess in sessions:
+            sess.close()
+        return len(sessions)
+
+    def send_control(self, host_id: str, *, kind: str, device_id: str) -> bool:
+        with self._lock:
+            sess = self._hosts.get(host_id)
+        if sess is None or not sess.alive:
+            return False
+        return sess.send(host_tunnel_pb2.HostFrame(
+            control=host_tunnel_pb2.Control(kind=str(kind), device_id=str(device_id))
+        ))
+
     def forget_host(self, host_id: str) -> Optional[List[str]]:
         """Remove a host and its devices from the directory, in memory and persisted.
 

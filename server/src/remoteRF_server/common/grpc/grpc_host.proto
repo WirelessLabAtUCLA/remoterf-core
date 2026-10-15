@@ -96,6 +96,13 @@ message MetaResponse {
   HostMeta meta = 4;
 }
 
+// Lab -> host. kind "reservation_end": the device's reservation ended or
+// changed holder; close its sessions and reset it. Hosts before 1.3 ignore it.
+message Control {
+  string kind = 1;
+  string device_id = 2;
+}
+
 message HostFrame {
   oneof msg {
     HostHello hello = 1;
@@ -110,6 +117,8 @@ message HostFrame {
     // NEW
     MetaRequest meta_request = 7;
     MetaResponse meta_response = 8;
+
+    Control control = 9;
   }
 }
 

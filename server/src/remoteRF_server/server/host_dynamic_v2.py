@@ -91,6 +91,13 @@ class HostDynamicV2Proxy:
 
         host_id = route.host_id
         device_id = route.device_id
+        if "token" in request.DESCRIPTOR.fields_by_name:
+            # The lab already checked the reservation; the host swaps in its own
+            # bridge token, so the client's never leaves this process.
+            stripped = type(request)()
+            stripped.CopyFrom(request)
+            stripped.ClearField("token")
+            request = stripped
         results = hts.handle_host_device(
             registry,
             host_id=host_id,
@@ -249,4 +256,15 @@ class HostDynamicV2Proxy:
 
 
 host_session_proxy = HostDynamicV2Proxy()
-register_reservation_end_callback(host_session_proxy.close_gid)
+
+
+def _end_host_reservation(gid: int) -> None:
+    """Close the device's v2 sessions, then tell its host to reset it."""
+    host_session_proxy.close_gid(gid)
+    device = HostDynamicV2Proxy._virtual_for_gid(gid)
+    registry = hts.get_tunnel_registry(create=False)
+    if device is not None and registry is not None:
+        registry.send_control(device.host_id, kind="reservation_end", device_id=device.device_id)
+
+
+register_reservation_end_callback(_end_host_reservation)

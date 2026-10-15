@@ -53,14 +53,15 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
 
             if operation == "GetSchema":
                 request = grpc_pb2.GetSchemaRequest.FromString(wire)
-                self.assertEqual(request.token, "reservation-token")
+                self.assertEqual(request.token, "")  # never sent to the host
+                self.assertEqual(list(request.schema_versions), ["2.0"])
                 response = grpc_pb2.GetSchemaResponse(
                     schema_version="2.0",
                     schema_json='{"schema_version":"2.0"}',
                     schema_hash="sha256:test",
                 )
             elif operation == "OpenSession":
-                grpc_pb2.OpenSessionRequest.FromString(wire)
+                self.assertEqual(grpc_pb2.OpenSessionRequest.FromString(wire).token, "")
                 response = grpc_pb2.OpenSessionResponse(
                     session_id="host-session",
                     device_handle="host-root",
@@ -154,6 +155,63 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
             [item[2] for item in self.forwarded],
             ["GetSchema", "OpenSession", "Invoke", "SampleFrame", "CloseSession"],
         )
+
+    def test_reservation_end_closes_sessions_then_resets_the_host_device(self):
+        from remoteRF_server.server import host_dynamic_v2
+
+        self.proxy.open(grpc_pb2.OpenSessionRequest(token="reservation-token"))
+        sent = []
+
+        class Registry:
+            def send_control(self, host_id, *, kind, device_id):
+                sent.append((host_id, kind, device_id, [item[2] for item in calls]))
+                return True
+
+        calls = self.forwarded
+        with patch.object(host_dynamic_v2, "host_session_proxy", self.proxy), patch(
+            "remoteRF_server.server.host_dynamic_v2.hts.get_tunnel_registry", return_value=Registry()
+        ):
+            host_dynamic_v2._end_host_reservation(7)
+        self.assertFalse(self.proxy.is_remote_session("host-session"))
+        self.assertEqual(sent, [("lab-host", "reservation_end", "7", ["OpenSession", "CloseSession"])])
+
+
+class HostRegistryControlTests(unittest.TestCase):
+    def test_send_control_and_close_all_sessions(self):
+        import tempfile
+        from remoteRF_server.common.grpc import grpc_host_pb2
+        from remoteRF_server.host import host_tunnel_server as hts
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(hts, "cfg_dir_from_file", return_value=__import__("pathlib").Path(tmp)):
+            registry = hts.HostTunnelRegistry()
+            session = hts.HostSession("lab-host")
+            registry.register_host("lab-host", session)
+            self.assertTrue(registry.send_control("lab-host", kind="reservation_end", device_id="7"))
+            frame = session.out_q.get_nowait()
+            self.assertEqual(frame.WhichOneof("msg"), "control")
+            self.assertEqual((frame.control.kind, frame.control.device_id), ("reservation_end", "7"))
+            self.assertFalse(registry.send_control("other", kind="reservation_end", device_id="7"))
+            self.assertEqual(registry.close_all_sessions(), 1)
+            self.assertFalse(session.alive)
+            self.assertIsNone(session.out_q.get_nowait())  # the stream's end sentinel
+            self.assertIsInstance(frame, grpc_host_pb2.HostFrame)
+
+    def test_hosts_wipe_closes_live_tunnels(self):
+        import tempfile
+        from pathlib import Path
+        from remoteRF_server.host import host_tunnel_server as hts
+        from remoteRF_server.server import grpc_server
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(hts, "cfg_dir_from_file", return_value=Path(tmp)):
+            registry = hts.HostTunnelRegistry()
+            session = hts.HostSession("lab-host")
+            registry.register_host("lab-host", session)
+            with patch.object(hts, "get_tunnel_registry", return_value=registry), patch.object(
+                grpc_server, "_host_state_files", return_value=[]
+            ):
+                grpc_server._cmd_hosts_wipe(yes=True)
+            self.assertFalse(session.alive)
+            self.assertEqual(registry.list_hosts(), {})
 
 
 if __name__ == "__main__":
