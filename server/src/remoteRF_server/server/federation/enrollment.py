@@ -399,6 +399,8 @@ class ServerFederatedEnrollHandler:
         claims = action.claims
         if claims["iss"] != links.global_home_id():
             raise FederationBusinessError("enrollee_not_allowed")
+        if {"display_name", "email", "username", "lan_hash"} & set(action.request.value["payload"]):
+            raise FederationBusinessError("code_invalid")  # a user enrolling with this code, not Global's revoke
         ended = remote_admin.revoke_global_pin(claims["sub"])
         self._audit(tx, action, code="ok", metadata={"admin_pins_revoked": ended})
         return self._result(

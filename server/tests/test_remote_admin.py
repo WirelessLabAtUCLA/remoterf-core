@@ -626,12 +626,18 @@ def test_global_revoking_an_account_ends_its_global_only_pins(lab):
     handler.local_deployment_id, handler.display_name = "lab", "Lab"
     handler._audit = mock.Mock()
     action = SimpleNamespace(state="active", claims={"iss": "not-global", "sub": SUB, "contract_id": "c",
-                                                     "contract_version": 1})
+                                                     "contract_version": 1},
+                             request=SimpleNamespace(value={"payload": {"code_name": "admin_pin.revoke",
+                                                                        "email": "x@example.org"}}))
     with mock.patch.object(enrollment.links, "global_home_id", return_value="global-home"):
         with pytest.raises(enrollment.FederationBusinessError):
             handler._admin_pin_revoke(None, action, 1)
         assert ra.any_active_pin()
         action.claims["iss"] = "global-home"
+        with pytest.raises(enrollment.FederationBusinessError):  # a user's own enrolment naming this code
+            handler._admin_pin_revoke(None, action, 1)
+        assert ra.any_active_pin()
+        del action.request.value["payload"]["email"]
         assert handler._admin_pin_revoke(None, action, 1)["status"] == "ok"
     assert not ra.any_active_pin()
     with contextlib.closing(ra.connect()) as conn:

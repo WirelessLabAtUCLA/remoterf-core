@@ -374,9 +374,12 @@ def start_server_runtime(
         _print_tls_credentials_error(cert_dir, e)
         raise SystemExit(2)
 
-    from . import remote_admin_ssh
-
-    remote_admin_ssh.register(server)
+    try:
+        from . import remote_admin_ssh
+    except ImportError:  # no PTYs here (Windows): no remote admin
+        pass
+    else:
+        remote_admin_ssh.register(server)
     if include_host_tunnel:
         reg = hts.get_tunnel_registry()
         if reg is None:
@@ -516,6 +519,13 @@ def welcome():
         if g.participating() and g.state() == "active" and g.hostname():
             rows.append(f"global  {g.hostname()}")
     except Exception:  # noqa: BLE001 - the banner never fails on Global state
+        pass
+    try:
+        from . import remote_admin
+
+        if remote_admin.any_active_pin():
+            rows.append(f"admin   {remote_admin.host_key().fingerprint}")
+    except Exception:  # noqa: BLE001 - nor on remote admin's
         pass
     rows += ["", "Input 'help' for help menu."]
     if console.attached():
