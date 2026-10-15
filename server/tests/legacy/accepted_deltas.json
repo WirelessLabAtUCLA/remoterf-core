@@ -1,0 +1,1616 @@
+{
+ "server-base+client-head": {
+  "cli.login": {
+   "kind": "review",
+   "value": "⠋ Connecting to default…                        ╭─ REMOTERF CLIENT ───────────────────────╮\n│ ◆ www.remoterf.net                      │\n│ Created by https://wireless.ee.ucla.edu │\n│ VERSION  2.7.0                          │\n│ SERVER   default (direct)               │\n╰─────────────────────────────────────────╯\n◆ <ip>:<port>  default  via direct <ip>:<port>\n◆ Login to default (direct)\n  Username: jdoe\n  Password (Hidden):\n◆ Signed in as jdoe.\n◆ Logged in as jdoe   devices via direct   TOS remoterf.net/tos   'help' for commands\njdoe@default> getdev\n⠋ Asking the labs for devices…                              ╭─ DEVICES ────────────────╮\n│ @<ip>:<port>      │\n│   Fake radio  online     │\n╰──────────────────────────╯\njdoe@default> exit\n\n[exit 0]",
+   "why": "New client UI; the configured lab is saved as the 'default' home and opens without the old l/r question."
+  },
+  "cli.login_bad_password": {
+   "kind": "review",
+   "value": "⠋ Connecting to default…                        ╭─ REMOTERF CLIENT ───────────────────────╮\n│ ◆ www.remoterf.net                      │\n│ Created by https://wireless.ee.ucla.edu │\n│ VERSION  2.7.0                          │\n│ SERVER   default (direct)               │\n╰─────────────────────────────────────────╯\n◆ <ip>:<port>  default  via direct <ip>:<port>\n◆ Login to default (direct)\n  Username: jdoe\n  Password (Hidden):\nUserError: Invalid login details.\n◆ Invalid login details.\n◆ Login to default (direct)\n  Username:\n[harness: no more answers; stopping]\n\n[exit None]",
+   "why": "New client UI for a failed login (no stored session: it asks again)."
+  },
+  "cli.register": {
+   "kind": "review",
+   "value": "╭─ REMOTERF CLIENT ───────────────────────╮\n│ ◆ www.remoterf.net                      │\n│ Created by https://wireless.ee.ucla.edu │\n│ VERSION  2.7.0                          │\n╰─────────────────────────────────────────╯\n============================================================\nRemoteRF 2026\nTerms of Service Acknowledgement\n\nBy continuing, you confirm that you have reviewed and agree to the\nRemoteRF Terms of Service and understand that use of the client and\nservice is at your own risk. RemoteRF is not liable for losses or\ndamages arising from use of the platform.\n\nTerms of Service: https://remoterf.net/tos\n============================================================\nDo you agree to the RemoteRF Terms of Service? [y/N]:\nEnrollment code (Enter for a RemoteRF Global account): ╭─ REGISTER ─────────────────────╮\n│ Register at <ip>:<port> │\n╰────────────────────────────────╯\n  Username: jdoe\n  Password (Hidden):\n  Confirm Password:\n  Email: jdoe@example.org\n◆ Account jdoe created.\n◆ Signed in as jdoe.\n◆ Logged in as jdoe   TOS remoterf.net/tos   'help' for commands\njdoe@remoterf> perms\n⠋ Asking the labs for permissions…                                  ╭─ PERMISSIONS ────────────────────╮\n│ Permission Level: Normal User    │\n│ User Groups:                     │\n│   - native-users                 │\n│ Accessible Devices: [7]          │\n│ Permissions:                     │\n│   Max Reservations: 2            │\n│   Reservation Duration (min): 60 │\n│   Days Ahead: no limit           │\n╰──────────────────────────────────╯\njdoe@remoterf> getdev\n⠋ Asking the labs for devices…                              ╭─ DEVICES ────────────────╮\n│ @<ip>:<port>      │\n│   Fake radio  online     │\n╰──────────────────────────╯\njdoe@remoterf> getres\n⠋ Asking the labs for reservations…                                   No reservations found.\njdoe@remoterf> myres\n⠋ Asking the labs for reservations…                                   No reservations found.\njdoe@remoterf> exit\n\n[exit 0]",
+   "why": "New client UI: banner, ToS prompt at register, 'Enrollment code (Enter for a RemoteRF Global account)', boxed output, 'Asking the labs…' spinners; perms adds 'Days Ahead'."
+  }
+ },
+ "server-head+client-base": {
+  "acc.create_user.at_sign": {
+   "kind": "security",
+   "value": {
+    "UE": "Username cannot contain '@'."
+   },
+   "why": "Usernames may not contain '@' (it routes name@lab). Pre-Global accepted 'a@b'."
+  },
+  "acc.create_user.duplicate_email": {
+   "kind": "security",
+   "value": {
+    "UE": "That username or email is already registered."
+   },
+   "why": "Generic 'already registered' instead of the raw SQLite UNIQUE error."
+  },
+  "acc.create_user.duplicate_name": {
+   "kind": "security",
+   "value": {
+    "UE": "That username or email is already registered."
+   },
+   "why": "Generic 'already registered' instead of the raw SQLite UNIQUE error."
+  },
+  "acc.get_perms": {
+   "kind": "review",
+   "value": {
+    "UC": "[('Normal User', 2, 'wire-user', None, None, None)]",
+    "details": "{\"devices\": [7], \"caps\": {\"7\": {\"max_reservation_time_sec\": 3600, \"max_reservations\": 2, \"max_horizon_sec\": 604800}}, \"groups\": [\"native-users\"]}"
+   },
+   "why": "Caps now carry max_horizon_sec: a 7-day reservation horizon on every group, pre-existing ones included."
+  },
+  "acc.set_enroll": {
+   "kind": "security",
+   "value": {
+    "UC": "Enrolled wire-user."
+   },
+   "why": "The reply no longer echoes the submitted code."
+  },
+  "acc.set_enroll.bad_code": {
+   "kind": "security",
+   "value": {
+    "UE": "Failed to enroll wire-user. Invalid or expired code."
+   },
+   "why": "The reply no longer echoes the submitted code."
+  },
+  "acc.set_enroll.second_group": {
+   "kind": "security",
+   "value": {
+    "UC": "Enrolled jdoe."
+   },
+   "why": "The reply no longer echoes the submitted code."
+  },
+  "console": {
+   "kind": "review",
+   "value": {
+    "00 users list": {
+     "asked": [],
+     "output": "╭─ ACCOUNTS ─────────────────────────────╮\n│ username    jdoe                       │\n│ role        Normal User                │\n│ email       jdoe@example.org           │\n│ auth        local_password             │\n│ created_at  <time> │\n│                                        │\n│ username    wire-user                  │\n│ role        Normal User                │\n│ email       wire@example.org           │\n│ auth        local_password             │\n│ created_at  <time> │\n╰────────────────────────────────────────╯\n\n2 accounts, 0 visiting from partner labs (federated proxies)"
+    },
+    "01 groups list": {
+     "asked": [],
+     "output": "╭─ USER GROUPS ────────────────────────────────────────╮\n│ group_id                  1                          │\n│ group_name                native-users               │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  2                          │\n│ group_name                kept-users                 │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n╰──────────────────────────────────────────────────────╯"
+    },
+    "02 codes list": {
+     "asked": [],
+     "output": "╭─ ENROLLMENT CODES ──────────────────────────────────────────╮\n│ group 1 native-users · 3 uses left · never expires · 1 code │\n│   native-signup                                             │\n│                                                             │\n│ group 2 kept-users · 1 use left · never expires · 1 code    │\n│   keep-signup                                               │\n╰─────────────────────────────────────────────────────────────╯"
+    },
+    "03 reservations list": {
+     "asked": [],
+     "output": "╭─ RESERVATIONS ────────────────────────────────────────────────────────╮\n│ res_id  username  device_id  start_time           end_time            │\n│ ------  --------  ---------  -------------------  ------------------- │\n│ 2       jdoe      7          <time>  <time> │\n╰───────────────────────────────────────────────────────────────────────╯"
+    },
+    "04 devices list": {
+     "asked": [],
+     "output": "╭─ DEVICES ──────────────────────────────────────────────────────────╮\n│ device_id  name                           handle  host   last_seen │\n│ ---------  -----------------------------  ------  -----  --------- │\n│ 7          Fake radio (online, reserved)  -       local  -         │\n╰────────────────────────────────────────────────────────────────────╯"
+    },
+    "05 groups create": {
+     "asked": [
+      "Enter group name (c to cancel):",
+      "Confirm group name 'console-group'? (y/n):",
+      "Devices whitelist (e.g. 0,1,2) (c to cancel):",
+      "Max reservation time (sec) [1800] (c to cancel):",
+      "Max concurrent reservations [3] (c to cancel):",
+      "Group lifetime (sec) [0=forever] (c to cancel):",
+      "Max days ahead a reservation may start [7] (0=no limit) (c to cancel):",
+      "Reachable from outside your network (via Global)? (Y/n):",
+      "Public: open to anyone on RemoteRF Global? (y/N):",
+      "Proceed? (y/n):"
+     ],
+     "output": "Devices on this server:\n     7  Fake radio (online, reserved)\n\nAbout to create user group with:\n  group_name               : console-group\n  devices_whitelist        : 7\n  max_reservation_time_sec : 3600\n  max_reservations         : 2\n  lifetime_sec             : 0\n  max_days_ahead           : 7\n  lan_only                 : no\n  public                   : no\nUser group created with group_id=3."
+    },
+    "06 codes create": {
+     "asked": [
+      "How many enrollment codes? (c to cancel):",
+      "Attach a user group? (Y/n):",
+      "Group ID to attach codes to? (c to cancel):",
+      "Characters per code name? [10] (c to cancel):",
+      "Use these codes? (y/n):",
+      "Uses per code? [1] (c to cancel):",
+      "Duration in seconds? [3600] (0=never expires) (c to cancel):",
+      "Proceed? (y/n):"
+     ],
+     "output": "Your groups:\n    1  native-users\n    2  kept-users\n    3  console-group\n\nGenerated code names:\n   1) <code>\n\nAbout to create enrollment codes with:\n  group_id     : 1\n  count        : 1\n  uses         : 3\n  duration_sec : 0\n\nCreated 1/1 enrollment codes.\nHand these out as is; users connect first with: remoterf -c -a <ip>:12321\n\n╭─ ENROLLMENT CODES ───────╮\n│ invite                   │\n│ ----------------         │\n│ <code>         │\n╰──────────────────────────╯"
+    },
+    "07 groups list": {
+     "asked": [],
+     "output": "╭─ USER GROUPS ────────────────────────────────────────╮\n│ group_id                  1                          │\n│ group_name                native-users               │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  2                          │\n│ group_name                kept-users                 │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  3                          │\n│ group_name                console-group              │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n╰──────────────────────────────────────────────────────╯"
+    },
+    "08 codes list": {
+     "asked": [],
+     "output": "╭─ ENROLLMENT CODES ───────────────────────────────────────────╮\n│ group 1 native-users · 3 uses left · never expires · 2 codes │\n│   native-signup  <code>                            │\n│                                                              │\n│ group 2 kept-users · 1 use left · never expires · 1 code     │\n│   keep-signup                                                │\n╰──────────────────────────────────────────────────────────────╯"
+    }
+   },
+   "why": "Boxed tables; users list shows the auth type; groups create asks 'Max days ahead', 'Reachable from outside your network (via Global)?' and 'Public: open to anyone on RemoteRF Global?' on a lab that never joined; codes create asks 'Attach a user group?'; one more code use left because 'a@b' is refused."
+  },
+  "db": {
+   "kind": "review",
+   "value": {
+    "perms.db:Admins": {
+     "columns": [
+      "AdminID",
+      "Username"
+     ],
+     "rows": []
+    },
+    "perms.db:PowerUsers": {
+     "columns": [
+      "UserID",
+      "Username",
+      "MaxReservations",
+      "MaxReservationTimeSec",
+      "DevicesAllowed"
+     ],
+     "rows": []
+    },
+    "perms.db:Users": {
+     "columns": [
+      "UserID",
+      "Username"
+     ],
+     "rows": [
+      [
+       1,
+       "jdoe"
+      ]
+     ]
+    },
+    "reservations.db:Accounts": {
+     "columns": [
+      "acc_id",
+      "username",
+      "email",
+      "pass_salt",
+      "pass_hash",
+      "created_at",
+      "auth_type"
+     ],
+     "rows": [
+      [
+       1,
+       "jdoe",
+       "jdoe@example.org",
+       "local_password"
+      ]
+     ]
+    },
+    "reservations.db:ClientSessions": {
+     "columns": [
+      "token_hash",
+      "username",
+      "created_at",
+      "last_used_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:FederatedAccountBindings": {
+     "columns": [
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:FederatedReservations": {
+     "columns": [
+      "res_id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "contract_id",
+      "contract_version",
+      "request_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:LocalAccountSubjects": {
+     "columns": [
+      "local_account_id",
+      "subject_id",
+      "status",
+      "created_at"
+     ],
+     "rows": [
+      [
+       1,
+       "<token>",
+       "active"
+      ]
+     ]
+    },
+    "reservations.db:Reservations": {
+     "columns": [
+      "res_id",
+      "username",
+      "device_id",
+      "start_time",
+      "end_time",
+      "salt",
+      "hash"
+     ],
+     "rows": [
+      [
+       2,
+       "jdoe",
+       7
+      ]
+     ]
+    },
+    "reservations.db:ReservedTotal": {
+     "columns": [
+      "id",
+      "seconds"
+     ],
+     "rows": [
+      [
+       1,
+       "<float>"
+      ]
+     ]
+    },
+    "usergroups.db:ClusterAccounts": {
+     "columns": [
+      "cluster_name",
+      "local_account_id",
+      "kind",
+      "joined_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:ClusterMemberships": {
+     "columns": [
+      "cluster_name",
+      "local_account_id",
+      "group_id"
+     ],
+     "rows": []
+    },
+    "usergroups.db:EnrollmentCodes": {
+     "columns": [
+      "code_id",
+      "code_name",
+      "group_id",
+      "uses",
+      "duration_sec",
+      "created_at",
+      "federation_contract_id",
+      "federation_contract_version",
+      "allowed_issuer_deployment_id",
+      "federation_expires_at",
+      "cluster_name"
+     ],
+     "rows": [
+      [
+       2,
+       "keep-signup",
+       2,
+       1,
+       0,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
+    },
+    "usergroups.db:EnrollmentRedemptions": {
+     "columns": [
+      "id",
+      "code_id",
+      "code_sha256",
+      "group_id",
+      "principal_id",
+      "local_account_id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "contract_id",
+      "contract_version",
+      "request_id",
+      "request_sha256",
+      "redeemed_at",
+      "membership_added"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederatedPrincipals": {
+     "columns": [
+      "id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "status",
+      "created_at",
+      "last_seen_at",
+      "disabled_at",
+      "display_metadata_json"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationAuditEvents": {
+     "columns": [
+      "id",
+      "occurred_at",
+      "actor_kind",
+      "actor_ref",
+      "event_type",
+      "principal_id",
+      "contract_id",
+      "version",
+      "request_id",
+      "result_code",
+      "metadata_json"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationClockState": {
+     "columns": [
+      "singleton_id",
+      "max_seen_at"
+     ],
+     "rows": [
+      [
+       1
+      ]
+     ]
+    },
+    "usergroups.db:FederationContractEvents": {
+     "columns": [
+      "event_id",
+      "contract_id",
+      "version",
+      "actor_deployment_id",
+      "actor_sequence",
+      "event_type",
+      "terms_sha256",
+      "occurred_at",
+      "actor_admin_ref",
+      "reason_code",
+      "signed_event"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationContracts": {
+     "columns": [
+      "contract_id",
+      "version",
+      "deployment_a",
+      "deployment_b",
+      "state",
+      "valid_from",
+      "valid_until",
+      "allowed_capabilities_json",
+      "key_a_kid",
+      "key_a_sha256",
+      "key_b_kid",
+      "key_b_sha256",
+      "terms_sha256",
+      "supersedes_version",
+      "superseded_by_version",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationGrantJTIs": {
+     "columns": [
+      "issuer_deployment_id",
+      "jti",
+      "remote_subject_id",
+      "destination_deployment_id",
+      "contract_id",
+      "contract_version",
+      "terms_sha256",
+      "action",
+      "request_id",
+      "request_sha256",
+      "expires_at",
+      "retain_until",
+      "consumed_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:SchemaMigrations": {
+     "columns": [
+      "version",
+      "name",
+      "checksum",
+      "applied_at"
+     ],
+     "rows": [
+      [
+       2,
+       "gate_c_identity_v2",
+       "<token>"
+      ],
+      [
+       3,
+       "<token>",
+       "<token>"
+      ],
+      [
+       4,
+       "gate_e_grant_jtis_v1",
+       "<token>"
+      ],
+      [
+       5,
+       "gate_e1_clock_floor_v1",
+       "<token>"
+      ],
+      [
+       6,
+       "<token>",
+       "<token>"
+      ]
+     ]
+    },
+    "usergroups.db:TrustedDeploymentKeys": {
+     "columns": [
+      "deployment_id",
+      "kid",
+      "public_key_b64",
+      "public_key_sha256",
+      "state",
+      "valid_from",
+      "valid_until",
+      "approved_at",
+      "approved_by",
+      "approval_source"
+     ],
+     "rows": []
+    },
+    "usergroups.db:UserGroups": {
+     "columns": [
+      "group_id",
+      "group_name",
+      "devices_whitelist",
+      "max_reservation_time_sec",
+      "max_reservations",
+      "lifetime_sec",
+      "created_at",
+      "lan_only",
+      "max_horizon_sec"
+     ],
+     "rows": [
+      [
+       2,
+       "kept-users",
+       "[7]",
+       3600,
+       2,
+       0,
+       0,
+       604800
+      ],
+      [
+       3,
+       "console-group",
+       "[7]",
+       3600,
+       2,
+       0,
+       0,
+       604800
+      ]
+     ]
+    },
+    "usergroups.db:UsersLookup": {
+     "columns": [
+      "user_id",
+      "group_id"
+     ],
+     "rows": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   },
+   "why": "Additive schema: 16 new federation/session tables (rows only in ClientSessions, LocalAccountSubjects, ReservedTotal), Accounts.auth_type, UserGroups lan_only/max_horizon_sec, EnrollmentCodes federation columns; no 'a@b' row."
+  },
+  "files": {
+   "kind": "review",
+   "value": [
+    ".config/remoterf/certs/ca.crt",
+    ".config/remoterf/certs/server.crt",
+    ".config/remoterf/certs/server.key",
+    ".config/remoterf/db/.remoterf-writer.lock",
+    ".config/remoterf/db/activity_logs.npy",
+    ".config/remoterf/db/perms.db",
+    ".config/remoterf/db/perms.db-shm",
+    ".config/remoterf/db/perms.db-wal",
+    ".config/remoterf/db/reservations.db",
+    ".config/remoterf/db/reservations.db-shm",
+    ".config/remoterf/db/reservations.db-wal",
+    ".config/remoterf/db/usergroups.db",
+    ".config/remoterf/db/usergroups.db-shm",
+    ".config/remoterf/db/usergroups.db-wal",
+    ".config/remoterf/devices.yml",
+    ".config/remoterf/drivers/.hackrf_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.pluto_mimo_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.pluto_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.rtl_sdr_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.ti_mmwave_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.usrp_phaser_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.usrp_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/hackrf_schema.py",
+    ".config/remoterf/drivers/pluto_mimo_schema.py",
+    ".config/remoterf/drivers/pluto_schema.py",
+    ".config/remoterf/drivers/rtl_sdr_schema.py",
+    ".config/remoterf/drivers/ti_mmwave_schema.py",
+    ".config/remoterf/drivers/usrp_phaser_schema.py",
+    ".config/remoterf/drivers/usrp_schema.py",
+    ".config/remoterf/logs/<token>.log",
+    ".config/remoterf/super_token.txt"
+   ],
+   "why": "A DB writer lock, one more seeded driver (usrp_phaser) and a server log under ~/.config/remoterf/logs."
+  },
+  "threads": {
+   "kind": "review",
+   "value": [
+    "MainThread",
+    "Thread (_serve)",
+    "Thread (serve_forever)",
+    "ThreadPoolExecutor",
+    "remoterf-direct",
+    "remoterf-reservation-updates"
+   ],
+   "why": "'remoterf-direct' (direct-path QUIC listener) starts on every lab and binds the fixed UDP port, Global or not. Nothing left the machine in this session."
+  }
+ },
+ "server-head+client-head": {
+  "acc.create_user.at_sign": {
+   "kind": "security",
+   "value": {
+    "UE": "Username cannot contain '@'."
+   },
+   "why": "Usernames may not contain '@' (it routes name@lab). Pre-Global accepted 'a@b'."
+  },
+  "acc.create_user.duplicate_email": {
+   "kind": "security",
+   "value": {
+    "UE": "That username or email is already registered."
+   },
+   "why": "Generic 'already registered' instead of the raw SQLite UNIQUE error."
+  },
+  "acc.create_user.duplicate_name": {
+   "kind": "security",
+   "value": {
+    "UE": "That username or email is already registered."
+   },
+   "why": "Generic 'already registered' instead of the raw SQLite UNIQUE error."
+  },
+  "acc.get_perms": {
+   "kind": "review",
+   "value": {
+    "UC": "[('Normal User', 2, 'wire-user', None, None, None)]",
+    "details": "{\"devices\": [7], \"caps\": {\"7\": {\"max_reservation_time_sec\": 3600, \"max_reservations\": 2, \"max_horizon_sec\": 604800}}, \"groups\": [\"native-users\"]}"
+   },
+   "why": "Caps now carry max_horizon_sec: a 7-day reservation horizon on every group, pre-existing ones included."
+  },
+  "acc.set_enroll": {
+   "kind": "security",
+   "value": {
+    "UC": "Enrolled wire-user."
+   },
+   "why": "The reply no longer echoes the submitted code."
+  },
+  "acc.set_enroll.bad_code": {
+   "kind": "security",
+   "value": {
+    "UE": "Failed to enroll wire-user. Invalid or expired code."
+   },
+   "why": "The reply no longer echoes the submitted code."
+  },
+  "acc.set_enroll.second_group": {
+   "kind": "security",
+   "value": {
+    "UC": "Enrolled jdoe."
+   },
+   "why": "The reply no longer echoes the submitted code."
+  },
+  "cli.login": {
+   "kind": "review",
+   "value": "⠋ Connecting to default…                        ╭─ REMOTERF CLIENT ───────────────────────╮\n│ ◆ www.remoterf.net                      │\n│ Created by https://wireless.ee.ucla.edu │\n│ VERSION  2.7.0                          │\n│ SERVER   default (direct)               │\n╰─────────────────────────────────────────╯\n◆ <ip>:<port>  default  via direct <ip>:<port>\n◆ Login to default (direct)\n  Username: jdoe\n  Password (Hidden):\n◆ Signed in as jdoe.\n◆ Logged in as jdoe   devices via direct   TOS remoterf.net/tos   'help' for commands\njdoe@default> getdev\n⠋ Asking the labs for devices…                              ╭─ DEVICES ────────────────╮\n│ @<ip>:<port>      │\n│   Fake radio  online     │\n╰──────────────────────────╯\njdoe@default> exit\n\n[exit 0]",
+   "why": "New client UI; the configured lab is saved as the 'default' home and opens without the old l/r question."
+  },
+  "cli.login_bad_password": {
+   "kind": "review",
+   "value": "⠋ Connecting to default…                        ╭─ REMOTERF CLIENT ───────────────────────╮\n│ ◆ www.remoterf.net                      │\n│ Created by https://wireless.ee.ucla.edu │\n│ VERSION  2.7.0                          │\n│ SERVER   default (direct)               │\n╰─────────────────────────────────────────╯\n◆ <ip>:<port>  default  via direct <ip>:<port>\n◆ Login to default (direct)\n  Username: jdoe\n  Password (Hidden):\nUserError: Invalid login details.\n◆ Invalid login details.\n◆ Login to default (direct)\n  Username:\n[harness: no more answers; stopping]\n\n[exit None]",
+   "why": "New client UI for a failed login (no stored session: it asks again)."
+  },
+  "cli.register": {
+   "kind": "review",
+   "value": "╭─ REMOTERF CLIENT ───────────────────────╮\n│ ◆ www.remoterf.net                      │\n│ Created by https://wireless.ee.ucla.edu │\n│ VERSION  2.7.0                          │\n╰─────────────────────────────────────────╯\n============================================================\nRemoteRF 2026\nTerms of Service Acknowledgement\n\nBy continuing, you confirm that you have reviewed and agree to the\nRemoteRF Terms of Service and understand that use of the client and\nservice is at your own risk. RemoteRF is not liable for losses or\ndamages arising from use of the platform.\n\nTerms of Service: https://remoterf.net/tos\n============================================================\nDo you agree to the RemoteRF Terms of Service? [y/N]:\nEnrollment code (Enter for a RemoteRF Global account): ╭─ REGISTER ─────────────────────╮\n│ Register at <ip>:<port> │\n╰────────────────────────────────╯\n  Username: jdoe\n  Password (Hidden):\n  Confirm Password:\n  Email: jdoe@example.org\n◆ Account jdoe created.\n◆ Signed in as jdoe.\n◆ Logged in as jdoe   TOS remoterf.net/tos   'help' for commands\njdoe@remoterf> perms\n⠋ Asking the labs for permissions…                                  ╭─ PERMISSIONS ────────────────────╮\n│ Permission Level: Normal User    │\n│ User Groups:                     │\n│   - native-users                 │\n│ Accessible Devices: [7]          │\n│ Permissions:                     │\n│   Max Reservations: 2            │\n│   Reservation Duration (min): 60 │\n│   Days Ahead: 7                  │\n╰──────────────────────────────────╯\njdoe@remoterf> getdev\n⠋ Asking the labs for devices…                              ╭─ DEVICES ────────────────╮\n│ @<ip>:<port>      │\n│   Fake radio  online     │\n╰──────────────────────────╯\njdoe@remoterf> getres\n⠋ Asking the labs for reservations…                                   No reservations found.\njdoe@remoterf> myres\n⠋ Asking the labs for reservations…                                   No reservations found.\njdoe@remoterf> exit\n\n[exit 0]",
+   "why": "New client UI: banner, ToS prompt at register, 'Enrollment code (Enter for a RemoteRF Global account)', boxed output, 'Asking the labs…' spinners; perms adds 'Days Ahead'."
+  },
+  "console": {
+   "kind": "review",
+   "value": {
+    "00 users list": {
+     "asked": [],
+     "output": "╭─ ACCOUNTS ─────────────────────────────╮\n│ username    jdoe                       │\n│ role        Normal User                │\n│ email       jdoe@example.org           │\n│ auth        local_password             │\n│ created_at  <time> │\n│                                        │\n│ username    wire-user                  │\n│ role        Normal User                │\n│ email       wire@example.org           │\n│ auth        local_password             │\n│ created_at  <time> │\n╰────────────────────────────────────────╯\n\n2 accounts, 0 visiting from partner labs (federated proxies)"
+    },
+    "01 groups list": {
+     "asked": [],
+     "output": "╭─ USER GROUPS ────────────────────────────────────────╮\n│ group_id                  1                          │\n│ group_name                native-users               │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  2                          │\n│ group_name                kept-users                 │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n╰──────────────────────────────────────────────────────╯"
+    },
+    "02 codes list": {
+     "asked": [],
+     "output": "╭─ ENROLLMENT CODES ──────────────────────────────────────────╮\n│ group 1 native-users · 3 uses left · never expires · 1 code │\n│   native-signup                                             │\n│                                                             │\n│ group 2 kept-users · 1 use left · never expires · 1 code    │\n│   keep-signup                                               │\n╰─────────────────────────────────────────────────────────────╯"
+    },
+    "03 reservations list": {
+     "asked": [],
+     "output": "╭─ RESERVATIONS ────────────────────────────────────────────────────────╮\n│ res_id  username  device_id  start_time           end_time            │\n│ ------  --------  ---------  -------------------  ------------------- │\n│ 2       jdoe      7          <time>  <time> │\n╰───────────────────────────────────────────────────────────────────────╯"
+    },
+    "04 devices list": {
+     "asked": [],
+     "output": "╭─ DEVICES ──────────────────────────────────────────────────────────╮\n│ device_id  name                           handle  host   last_seen │\n│ ---------  -----------------------------  ------  -----  --------- │\n│ 7          Fake radio (online, reserved)  -       local  -         │\n╰────────────────────────────────────────────────────────────────────╯"
+    },
+    "05 groups create": {
+     "asked": [
+      "Enter group name (c to cancel):",
+      "Confirm group name 'console-group'? (y/n):",
+      "Devices whitelist (e.g. 0,1,2) (c to cancel):",
+      "Max reservation time (sec) [1800] (c to cancel):",
+      "Max concurrent reservations [3] (c to cancel):",
+      "Group lifetime (sec) [0=forever] (c to cancel):",
+      "Max days ahead a reservation may start [7] (0=no limit) (c to cancel):",
+      "Reachable from outside your network (via Global)? (Y/n):",
+      "Public: open to anyone on RemoteRF Global? (y/N):",
+      "Proceed? (y/n):"
+     ],
+     "output": "Devices on this server:\n     7  Fake radio (online, reserved)\n\nAbout to create user group with:\n  group_name               : console-group\n  devices_whitelist        : 7\n  max_reservation_time_sec : 3600\n  max_reservations         : 2\n  lifetime_sec             : 0\n  max_days_ahead           : 7\n  lan_only                 : no\n  public                   : no\nUser group created with group_id=3."
+    },
+    "06 codes create": {
+     "asked": [
+      "How many enrollment codes? (c to cancel):",
+      "Attach a user group? (Y/n):",
+      "Group ID to attach codes to? (c to cancel):",
+      "Characters per code name? [10] (c to cancel):",
+      "Use these codes? (y/n):",
+      "Uses per code? [1] (c to cancel):",
+      "Duration in seconds? [3600] (0=never expires) (c to cancel):",
+      "Proceed? (y/n):"
+     ],
+     "output": "Your groups:\n    1  native-users\n    2  kept-users\n    3  console-group\n\nGenerated code names:\n   1) <code>\n\nAbout to create enrollment codes with:\n  group_id     : 1\n  count        : 1\n  uses         : 3\n  duration_sec : 0\n\nCreated 1/1 enrollment codes.\nHand these out as is; users connect first with: remoterf -c -a <ip>:12321\n\n╭─ ENROLLMENT CODES ───────╮\n│ invite                   │\n│ ----------------         │\n│ <code>         │\n╰──────────────────────────╯"
+    },
+    "07 groups list": {
+     "asked": [],
+     "output": "╭─ USER GROUPS ────────────────────────────────────────╮\n│ group_id                  1                          │\n│ group_name                native-users               │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  2                          │\n│ group_name                kept-users                 │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  3                          │\n│ group_name                console-group              │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n╰──────────────────────────────────────────────────────╯"
+    },
+    "08 codes list": {
+     "asked": [],
+     "output": "╭─ ENROLLMENT CODES ───────────────────────────────────────────╮\n│ group 1 native-users · 3 uses left · never expires · 2 codes │\n│   native-signup  <code>                            │\n│                                                              │\n│ group 2 kept-users · 1 use left · never expires · 1 code     │\n│   keep-signup                                                │\n╰──────────────────────────────────────────────────────────────╯"
+    }
+   },
+   "why": "Boxed tables; users list shows the auth type; groups create asks 'Max days ahead', 'Reachable from outside your network (via Global)?' and 'Public: open to anyone on RemoteRF Global?' on a lab that never joined; codes create asks 'Attach a user group?'; one more code use left because 'a@b' is refused."
+  },
+  "db": {
+   "kind": "review",
+   "value": {
+    "perms.db:Admins": {
+     "columns": [
+      "AdminID",
+      "Username"
+     ],
+     "rows": []
+    },
+    "perms.db:PowerUsers": {
+     "columns": [
+      "UserID",
+      "Username",
+      "MaxReservations",
+      "MaxReservationTimeSec",
+      "DevicesAllowed"
+     ],
+     "rows": []
+    },
+    "perms.db:Users": {
+     "columns": [
+      "UserID",
+      "Username"
+     ],
+     "rows": [
+      [
+       1,
+       "jdoe"
+      ]
+     ]
+    },
+    "reservations.db:Accounts": {
+     "columns": [
+      "acc_id",
+      "username",
+      "email",
+      "pass_salt",
+      "pass_hash",
+      "created_at",
+      "auth_type"
+     ],
+     "rows": [
+      [
+       1,
+       "jdoe",
+       "jdoe@example.org",
+       "local_password"
+      ]
+     ]
+    },
+    "reservations.db:ClientSessions": {
+     "columns": [
+      "token_hash",
+      "username",
+      "created_at",
+      "last_used_at"
+     ],
+     "rows": [
+      [
+       "jdoe"
+      ],
+      [
+       "jdoe"
+      ]
+     ]
+    },
+    "reservations.db:FederatedAccountBindings": {
+     "columns": [
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:FederatedReservations": {
+     "columns": [
+      "res_id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "contract_id",
+      "contract_version",
+      "request_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:LocalAccountSubjects": {
+     "columns": [
+      "local_account_id",
+      "subject_id",
+      "status",
+      "created_at"
+     ],
+     "rows": [
+      [
+       1,
+       "<token>",
+       "active"
+      ]
+     ]
+    },
+    "reservations.db:Reservations": {
+     "columns": [
+      "res_id",
+      "username",
+      "device_id",
+      "start_time",
+      "end_time",
+      "salt",
+      "hash"
+     ],
+     "rows": [
+      [
+       2,
+       "jdoe",
+       7
+      ]
+     ]
+    },
+    "reservations.db:ReservedTotal": {
+     "columns": [
+      "id",
+      "seconds"
+     ],
+     "rows": [
+      [
+       1,
+       "<float>"
+      ]
+     ]
+    },
+    "usergroups.db:ClusterAccounts": {
+     "columns": [
+      "cluster_name",
+      "local_account_id",
+      "kind",
+      "joined_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:ClusterMemberships": {
+     "columns": [
+      "cluster_name",
+      "local_account_id",
+      "group_id"
+     ],
+     "rows": []
+    },
+    "usergroups.db:EnrollmentCodes": {
+     "columns": [
+      "code_id",
+      "code_name",
+      "group_id",
+      "uses",
+      "duration_sec",
+      "created_at",
+      "federation_contract_id",
+      "federation_contract_version",
+      "allowed_issuer_deployment_id",
+      "federation_expires_at",
+      "cluster_name"
+     ],
+     "rows": [
+      [
+       2,
+       "keep-signup",
+       2,
+       1,
+       0,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
+    },
+    "usergroups.db:EnrollmentRedemptions": {
+     "columns": [
+      "id",
+      "code_id",
+      "code_sha256",
+      "group_id",
+      "principal_id",
+      "local_account_id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "contract_id",
+      "contract_version",
+      "request_id",
+      "request_sha256",
+      "redeemed_at",
+      "membership_added"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederatedPrincipals": {
+     "columns": [
+      "id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "status",
+      "created_at",
+      "last_seen_at",
+      "disabled_at",
+      "display_metadata_json"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationAuditEvents": {
+     "columns": [
+      "id",
+      "occurred_at",
+      "actor_kind",
+      "actor_ref",
+      "event_type",
+      "principal_id",
+      "contract_id",
+      "version",
+      "request_id",
+      "result_code",
+      "metadata_json"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationClockState": {
+     "columns": [
+      "singleton_id",
+      "max_seen_at"
+     ],
+     "rows": [
+      [
+       1
+      ]
+     ]
+    },
+    "usergroups.db:FederationContractEvents": {
+     "columns": [
+      "event_id",
+      "contract_id",
+      "version",
+      "actor_deployment_id",
+      "actor_sequence",
+      "event_type",
+      "terms_sha256",
+      "occurred_at",
+      "actor_admin_ref",
+      "reason_code",
+      "signed_event"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationContracts": {
+     "columns": [
+      "contract_id",
+      "version",
+      "deployment_a",
+      "deployment_b",
+      "state",
+      "valid_from",
+      "valid_until",
+      "allowed_capabilities_json",
+      "key_a_kid",
+      "key_a_sha256",
+      "key_b_kid",
+      "key_b_sha256",
+      "terms_sha256",
+      "supersedes_version",
+      "superseded_by_version",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationGrantJTIs": {
+     "columns": [
+      "issuer_deployment_id",
+      "jti",
+      "remote_subject_id",
+      "destination_deployment_id",
+      "contract_id",
+      "contract_version",
+      "terms_sha256",
+      "action",
+      "request_id",
+      "request_sha256",
+      "expires_at",
+      "retain_until",
+      "consumed_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:SchemaMigrations": {
+     "columns": [
+      "version",
+      "name",
+      "checksum",
+      "applied_at"
+     ],
+     "rows": [
+      [
+       2,
+       "gate_c_identity_v2",
+       "<token>"
+      ],
+      [
+       3,
+       "<token>",
+       "<token>"
+      ],
+      [
+       4,
+       "gate_e_grant_jtis_v1",
+       "<token>"
+      ],
+      [
+       5,
+       "gate_e1_clock_floor_v1",
+       "<token>"
+      ],
+      [
+       6,
+       "<token>",
+       "<token>"
+      ]
+     ]
+    },
+    "usergroups.db:TrustedDeploymentKeys": {
+     "columns": [
+      "deployment_id",
+      "kid",
+      "public_key_b64",
+      "public_key_sha256",
+      "state",
+      "valid_from",
+      "valid_until",
+      "approved_at",
+      "approved_by",
+      "approval_source"
+     ],
+     "rows": []
+    },
+    "usergroups.db:UserGroups": {
+     "columns": [
+      "group_id",
+      "group_name",
+      "devices_whitelist",
+      "max_reservation_time_sec",
+      "max_reservations",
+      "lifetime_sec",
+      "created_at",
+      "lan_only",
+      "max_horizon_sec"
+     ],
+     "rows": [
+      [
+       2,
+       "kept-users",
+       "[7]",
+       3600,
+       2,
+       0,
+       0,
+       604800
+      ],
+      [
+       3,
+       "console-group",
+       "[7]",
+       3600,
+       2,
+       0,
+       0,
+       604800
+      ]
+     ]
+    },
+    "usergroups.db:UsersLookup": {
+     "columns": [
+      "user_id",
+      "group_id"
+     ],
+     "rows": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   },
+   "why": "Additive schema: 16 new federation/session tables (rows only in ClientSessions, LocalAccountSubjects, ReservedTotal), Accounts.auth_type, UserGroups lan_only/max_horizon_sec, EnrollmentCodes federation columns; no 'a@b' row."
+  },
+  "files": {
+   "kind": "review",
+   "value": [
+    ".config/remoterf/certs/ca.crt",
+    ".config/remoterf/certs/server.crt",
+    ".config/remoterf/certs/server.key",
+    ".config/remoterf/db/.remoterf-writer.lock",
+    ".config/remoterf/db/activity_logs.npy",
+    ".config/remoterf/db/perms.db",
+    ".config/remoterf/db/perms.db-shm",
+    ".config/remoterf/db/perms.db-wal",
+    ".config/remoterf/db/reservations.db",
+    ".config/remoterf/db/reservations.db-shm",
+    ".config/remoterf/db/reservations.db-wal",
+    ".config/remoterf/db/usergroups.db",
+    ".config/remoterf/db/usergroups.db-shm",
+    ".config/remoterf/db/usergroups.db-wal",
+    ".config/remoterf/devices.yml",
+    ".config/remoterf/drivers/.hackrf_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.pluto_mimo_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.pluto_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.rtl_sdr_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.ti_mmwave_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.usrp_phaser_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.usrp_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/hackrf_schema.py",
+    ".config/remoterf/drivers/pluto_mimo_schema.py",
+    ".config/remoterf/drivers/pluto_schema.py",
+    ".config/remoterf/drivers/rtl_sdr_schema.py",
+    ".config/remoterf/drivers/ti_mmwave_schema.py",
+    ".config/remoterf/drivers/usrp_phaser_schema.py",
+    ".config/remoterf/drivers/usrp_schema.py",
+    ".config/remoterf/logs/<token>.log",
+    ".config/remoterf/super_token.txt"
+   ],
+   "why": "A DB writer lock, one more seeded driver (usrp_phaser) and a server log under ~/.config/remoterf/logs."
+  },
+  "threads": {
+   "kind": "review",
+   "value": [
+    "MainThread",
+    "Thread (_serve)",
+    "Thread (serve_forever)",
+    "ThreadPoolExecutor",
+    "remoterf-direct",
+    "remoterf-reservation-updates"
+   ],
+   "why": "'remoterf-direct' (direct-path QUIC listener) starts on every lab and binds the fixed UDP port, Global or not. Nothing left the machine in this session."
+  }
+ },
+ "upgrade-server-base-to-head": {
+  "db": {
+   "kind": "review",
+   "value": {
+    "perms.db:Admins": {
+     "columns": [
+      "AdminID",
+      "Username"
+     ],
+     "rows": []
+    },
+    "perms.db:PowerUsers": {
+     "columns": [
+      "UserID",
+      "Username",
+      "MaxReservations",
+      "MaxReservationTimeSec",
+      "DevicesAllowed"
+     ],
+     "rows": []
+    },
+    "perms.db:Users": {
+     "columns": [
+      "UserID",
+      "Username"
+     ],
+     "rows": [
+      [
+       1,
+       "jdoe"
+      ],
+      [
+       3,
+       "a@b"
+      ]
+     ]
+    },
+    "reservations.db:Accounts": {
+     "columns": [
+      "acc_id",
+      "username",
+      "email",
+      "pass_salt",
+      "pass_hash",
+      "created_at",
+      "auth_type"
+     ],
+     "rows": [
+      [
+       1,
+       "jdoe",
+       "jdoe@example.org",
+       "local_password"
+      ],
+      [
+       3,
+       "a@b",
+       "ab@example.org",
+       "local_password"
+      ]
+     ]
+    },
+    "reservations.db:ClientSessions": {
+     "columns": [
+      "token_hash",
+      "username",
+      "created_at",
+      "last_used_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:FederatedAccountBindings": {
+     "columns": [
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:FederatedReservations": {
+     "columns": [
+      "res_id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "contract_id",
+      "contract_version",
+      "request_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:LocalAccountSubjects": {
+     "columns": [
+      "local_account_id",
+      "subject_id",
+      "status",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "reservations.db:Reservations": {
+     "columns": [
+      "res_id",
+      "username",
+      "device_id",
+      "start_time",
+      "end_time",
+      "salt",
+      "hash"
+     ],
+     "rows": [
+      [
+       2,
+       "jdoe",
+       7
+      ]
+     ]
+    },
+    "reservations.db:ReservedTotal": {
+     "columns": [
+      "id",
+      "seconds"
+     ],
+     "rows": [
+      [
+       1,
+       "<float>"
+      ]
+     ]
+    },
+    "usergroups.db:ClusterAccounts": {
+     "columns": [
+      "cluster_name",
+      "local_account_id",
+      "kind",
+      "joined_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:ClusterMemberships": {
+     "columns": [
+      "cluster_name",
+      "local_account_id",
+      "group_id"
+     ],
+     "rows": []
+    },
+    "usergroups.db:EnrollmentCodes": {
+     "columns": [
+      "code_id",
+      "code_name",
+      "group_id",
+      "uses",
+      "duration_sec",
+      "created_at",
+      "federation_contract_id",
+      "federation_contract_version",
+      "allowed_issuer_deployment_id",
+      "federation_expires_at",
+      "cluster_name"
+     ],
+     "rows": [
+      [
+       2,
+       "keep-signup",
+       2,
+       1,
+       0,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
+    },
+    "usergroups.db:EnrollmentRedemptions": {
+     "columns": [
+      "id",
+      "code_id",
+      "code_sha256",
+      "group_id",
+      "principal_id",
+      "local_account_id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "contract_id",
+      "contract_version",
+      "request_id",
+      "request_sha256",
+      "redeemed_at",
+      "membership_added"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederatedPrincipals": {
+     "columns": [
+      "id",
+      "issuer_deployment_id",
+      "remote_subject_id",
+      "local_account_id",
+      "status",
+      "created_at",
+      "last_seen_at",
+      "disabled_at",
+      "display_metadata_json"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationAuditEvents": {
+     "columns": [
+      "id",
+      "occurred_at",
+      "actor_kind",
+      "actor_ref",
+      "event_type",
+      "principal_id",
+      "contract_id",
+      "version",
+      "request_id",
+      "result_code",
+      "metadata_json"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationClockState": {
+     "columns": [
+      "singleton_id",
+      "max_seen_at"
+     ],
+     "rows": [
+      [
+       1
+      ]
+     ]
+    },
+    "usergroups.db:FederationContractEvents": {
+     "columns": [
+      "event_id",
+      "contract_id",
+      "version",
+      "actor_deployment_id",
+      "actor_sequence",
+      "event_type",
+      "terms_sha256",
+      "occurred_at",
+      "actor_admin_ref",
+      "reason_code",
+      "signed_event"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationContracts": {
+     "columns": [
+      "contract_id",
+      "version",
+      "deployment_a",
+      "deployment_b",
+      "state",
+      "valid_from",
+      "valid_until",
+      "allowed_capabilities_json",
+      "key_a_kid",
+      "key_a_sha256",
+      "key_b_kid",
+      "key_b_sha256",
+      "terms_sha256",
+      "supersedes_version",
+      "superseded_by_version",
+      "created_at",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:FederationGrantJTIs": {
+     "columns": [
+      "issuer_deployment_id",
+      "jti",
+      "remote_subject_id",
+      "destination_deployment_id",
+      "contract_id",
+      "contract_version",
+      "terms_sha256",
+      "action",
+      "request_id",
+      "request_sha256",
+      "expires_at",
+      "retain_until",
+      "consumed_at"
+     ],
+     "rows": []
+    },
+    "usergroups.db:SchemaMigrations": {
+     "columns": [
+      "version",
+      "name",
+      "checksum",
+      "applied_at"
+     ],
+     "rows": [
+      [
+       2,
+       "gate_c_identity_v2",
+       "<token>"
+      ],
+      [
+       3,
+       "<token>",
+       "<token>"
+      ],
+      [
+       4,
+       "gate_e_grant_jtis_v1",
+       "<token>"
+      ],
+      [
+       5,
+       "gate_e1_clock_floor_v1",
+       "<token>"
+      ],
+      [
+       6,
+       "<token>",
+       "<token>"
+      ]
+     ]
+    },
+    "usergroups.db:TrustedDeploymentKeys": {
+     "columns": [
+      "deployment_id",
+      "kid",
+      "public_key_b64",
+      "public_key_sha256",
+      "state",
+      "valid_from",
+      "valid_until",
+      "approved_at",
+      "approved_by",
+      "approval_source"
+     ],
+     "rows": []
+    },
+    "usergroups.db:UserGroups": {
+     "columns": [
+      "group_id",
+      "group_name",
+      "devices_whitelist",
+      "max_reservation_time_sec",
+      "max_reservations",
+      "lifetime_sec",
+      "created_at",
+      "lan_only",
+      "max_horizon_sec"
+     ],
+     "rows": [
+      [
+       2,
+       "kept-users",
+       "[7]",
+       3600,
+       2,
+       0,
+       0,
+       604800
+      ],
+      [
+       3,
+       "console-group",
+       "[7]",
+       3600,
+       2,
+       0,
+       0,
+       604800
+      ]
+     ]
+    },
+    "usergroups.db:UsersLookup": {
+     "columns": [
+      "user_id",
+      "group_id"
+     ],
+     "rows": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   },
+   "why": "Additive schema: 16 new federation/session tables (rows only in ClientSessions, LocalAccountSubjects, ReservedTotal), Accounts.auth_type, UserGroups lan_only/max_horizon_sec, EnrollmentCodes federation columns; no 'a@b' row."
+  },
+  "files": {
+   "kind": "review",
+   "value": [
+    ".config/remoterf/certs/ca.crt",
+    ".config/remoterf/certs/server.crt",
+    ".config/remoterf/certs/server.key",
+    ".config/remoterf/db/.remoterf-writer.lock",
+    ".config/remoterf/db/activity_logs.npy",
+    ".config/remoterf/db/perms.db",
+    ".config/remoterf/db/perms.db-shm",
+    ".config/remoterf/db/perms.db-wal",
+    ".config/remoterf/db/reservations.db",
+    ".config/remoterf/db/reservations.db-shm",
+    ".config/remoterf/db/reservations.db-wal",
+    ".config/remoterf/db/usergroups.db",
+    ".config/remoterf/db/usergroups.db-shm",
+    ".config/remoterf/db/usergroups.db-wal",
+    ".config/remoterf/devices.yml",
+    ".config/remoterf/drivers/.hackrf_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.pluto_mimo_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.pluto_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.rtl_sdr_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.ti_mmwave_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.usrp_phaser_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/.usrp_schema.py.remoterf-managed",
+    ".config/remoterf/drivers/hackrf_schema.py",
+    ".config/remoterf/drivers/pluto_mimo_schema.py",
+    ".config/remoterf/drivers/pluto_schema.py",
+    ".config/remoterf/drivers/rtl_sdr_schema.py",
+    ".config/remoterf/drivers/ti_mmwave_schema.py",
+    ".config/remoterf/drivers/usrp_phaser_schema.py",
+    ".config/remoterf/drivers/usrp_schema.py",
+    ".config/remoterf/logs/<token>.log",
+    ".config/remoterf/super_token.txt"
+   ],
+   "why": "A DB writer lock, one more seeded driver (usrp_phaser) and a server log under ~/.config/remoterf/logs."
+  },
+  "reopen.acc.get_perms": {
+   "kind": "review",
+   "value": {
+    "UC": "[('Normal User', 1, 'jdoe', None, None, None)]",
+    "details": "{\"devices\": [7], \"caps\": {\"7\": {\"max_reservation_time_sec\": 3600, \"max_reservations\": 2, \"max_horizon_sec\": 604800}}, \"groups\": [\"kept-users\"]}"
+   },
+   "why": "Caps now carry max_horizon_sec: a 7-day reservation horizon on every group, pre-existing ones included."
+  },
+  "reopen.console": {
+   "kind": "review",
+   "value": {
+    "00 users list": {
+     "asked": [],
+     "output": "╭─ ACCOUNTS ─────────────────────────────╮\n│ username    jdoe                       │\n│ role        Normal User                │\n│ email       jdoe@example.org           │\n│ auth        local_password             │\n│ created_at  <time> │\n│                                        │\n│ username    a@b                        │\n│ role        Normal User                │\n│ email       ab@example.org             │\n│ auth        local_password             │\n│ created_at  <time> │\n╰────────────────────────────────────────╯\n\n2 accounts, 0 visiting from partner labs (federated proxies)"
+    },
+    "01 groups list": {
+     "asked": [],
+     "output": "╭─ USER GROUPS ────────────────────────────────────────╮\n│ group_id                  2                          │\n│ group_name                kept-users                 │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n│                                                      │\n│ group_id                  3                          │\n│ group_name                console-group              │\n│ devices_whitelist         7                          │\n│ max_reservation_time_sec  3600                       │\n│ max_reservations          2                          │\n│ lifetime_sec              0                          │\n│ max_horizon_sec           604800                     │\n│ lan_only                  no                         │\n│ shared_with               -                          │\n│ created_at                <time> │\n╰──────────────────────────────────────────────────────╯"
+    },
+    "02 codes list": {
+     "asked": [],
+     "output": "╭─ ENROLLMENT CODES ───────────────────────────────────────╮\n│ group 2 kept-users · 1 use left · never expires · 1 code │\n│   keep-signup                                            │\n╰──────────────────────────────────────────────────────────╯"
+    },
+    "03 reservations list": {
+     "asked": [],
+     "output": "╭─ RESERVATIONS ────────────────────────────────────────────────────────╮\n│ res_id  username  device_id  start_time           end_time            │\n│ ------  --------  ---------  -------------------  ------------------- │\n│ 2       jdoe      7          <time>  <time> │\n╰───────────────────────────────────────────────────────────────────────╯"
+    }
+   },
+   "why": "Boxed tables instead of plain text; users list shows the auth type."
+  },
+  "threads": {
+   "kind": "review",
+   "value": [
+    "MainThread",
+    "Thread (_serve)",
+    "Thread (serve_forever)",
+    "ThreadPoolExecutor",
+    "remoterf-direct",
+    "remoterf-reservation-updates"
+   ],
+   "why": "'remoterf-direct' (direct-path QUIC listener) starts on every lab and binds the fixed UDP port, Global or not. Nothing left the machine in this session."
+  }
+ }
+}

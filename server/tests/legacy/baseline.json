@@ -1,0 +1,527 @@
+{
+ "session": {
+  "cli.configure": "============================================================\nRemoteRF 2026\nTerms of Service Acknowledgement\n\nBy continuing, you confirm that you have reviewed and agree to the\nRemoteRF Terms of Service and understand that use of the client and\nservice is at your own risk. RemoteRF is not liable for losses or\ndamages arising from use of the platform.\n\nTerms of Service: https://remoterf.net/tos\n============================================================\nContinue with configuration? [y/N]:\n============================================================\nConfiguration Complete!\n- Details:\n  gRPC target: <ip>:<port>\n  Cert port  : <ip>:<port>\n  CA cert    : <tmp>/client/.config/remoterf-client/certs/default.crt\n  Env file   : <tmp>/client/.config/remoterf-client/.env\n============================================================\n\n[exit 0]",
+  "cli.register": "╭─ REMOTERF CLIENT ───────────────────╮\n│ ◆ www.remoterf.net                  │\n│ Created by the Wireless Lab at UCLA │\n│ VERSION  0.0.0                      │\n│ SERVER   <ip>:<port>         │\n╰─────────────────────────────────────╯\nPlease login or register to continue. (l/r): r\nRegistering new account...\nEnrollment Code: Username: Password (Hidden):\nConfirm Password:\nEmail:\nUser jdoe successfully created.\n\n╭─ REMOTERF SESSION ──────────────────╮\n│ ◆ www.remoterf.net                  │\n│ VERSION  0.0.0                      │\n│ SERVER   <ip>:<port>         │\n│ TOS      remoterf.net/tos           │\n╰─────────────────────────────────────╯\nInput 'help' for a list of available commands.\njdoe@remoterf: perms\nPermission Level: Normal User\nUser Groups:\n  - native-users\nAccessible Devices: [7]\nPermissions:\n  Max Reservations: 2\n  Reservation Duration (min): 60\njdoe@remoterf: getdev\nDevices:\nDevice ID: 7 Device Name: Fake radio (online)\njdoe@remoterf: getres\nNo reservations found.\njdoe@remoterf: myres\nNo reservations found.\njdoe@remoterf: exit\n\n[exit 0]",
+  "cli.login": "╭─ REMOTERF CLIENT ───────────────────╮\n│ ◆ www.remoterf.net                  │\n│ Created by the Wireless Lab at UCLA │\n│ VERSION  0.0.0                      │\n│ SERVER   <ip>:<port>         │\n╰─────────────────────────────────────╯\nPlease login or register to continue. (l/r): l\nUsername: Password (Hidden):\nUser jdoe successful login.\n\n╭─ REMOTERF SESSION ──────────────────╮\n│ ◆ www.remoterf.net                  │\n│ VERSION  0.0.0                      │\n│ SERVER   <ip>:<port>         │\n│ TOS      remoterf.net/tos           │\n╰─────────────────────────────────────╯\nInput 'help' for a list of available commands.\njdoe@remoterf: getdev\nDevices:\nDevice ID: 7 Device Name: Fake radio (online)\njdoe@remoterf: exit\n\n[exit 0]",
+  "cli.login_bad_password": "╭─ REMOTERF CLIENT ───────────────────╮\n│ ◆ www.remoterf.net                  │\n│ Created by the Wireless Lab at UCLA │\n│ VERSION  0.0.0                      │\n│ SERVER   <ip>:<port>         │\n╰─────────────────────────────────────╯\nPlease login or register to continue. (l/r): l\nUsername: Password (Hidden):\nUserError: Invalid login details.\nHit enter to continue...Error: Invalid login details.\n\nInvalid login. Try again. Contact admin(s) if you forgot your password.\nPlease login or register to continue. (l/r):\n[harness: no more answers; stopping]\n\n[exit None]",
+  "acc.create_user": {
+   "UC": "wire-user"
+  },
+  "acc.create_user.duplicate_name": {
+   "UE": "UNIQUE constraint failed: Accounts.username"
+  },
+  "acc.create_user.duplicate_email": {
+   "UE": "UNIQUE constraint failed: Accounts.email"
+  },
+  "acc.create_user.bad_code": {
+   "UE": "Invalid or expired enrollment code."
+  },
+  "acc.create_user.short_password": {
+   "UE": "Password must be at least 5 characters long."
+  },
+  "acc.create_user.at_sign": {
+   "UC": "a@b"
+  },
+  "acc.login": {
+   "UC": "wire-user"
+  },
+  "acc.login.wrong_password": {
+   "UE": "Invalid login details."
+  },
+  "acc.login.unknown_user": {
+   "UE": "Invalid login details."
+  },
+  "acc.get_perms": {
+   "UC": "[('Normal User', 2, 'wire-user', None, None, None)]",
+   "details": "{\"devices\": [7], \"caps\": {\"7\": {\"max_reservation_time_sec\": 3600, \"max_reservations\": 2}}, \"groups\": [\"native-users\"]}"
+  },
+  "acc.get_dev": {
+   "7": "Fake radio (online)"
+  },
+  "acc.reserve": {
+   "has_token": true
+  },
+  "acc.reserve.overlap": {
+   "ace": "Device already reserved at this time. Please select another time or device."
+  },
+  "acc.reserve.too_long": {
+   "ace": "Max Reservation Duration allowed is 60.0 minutes."
+  },
+  "acc.get_res": {
+   "1": "wire-user,7,<time>,<time>"
+  },
+  "device.acquire_with_token": {
+   "device": 7
+  },
+  "device.acquire_with_master_token": {
+   "device": 7
+  },
+  "acc.cancel_res": {
+   "UC": "Removed reservation 1"
+  },
+  "device.acquire_after_cancel": {
+   "refused": "RuntimeError"
+  },
+  "acc.set_enroll.second_group": {
+   "UC": "Enrolled jdoe with code keep-signup"
+  },
+  "acc.reserve.kept": {
+   "has_token": true
+  },
+  "acc.set_enroll": {
+   "UC": "Enrolled wire-user with code native-signup"
+  },
+  "acc.set_enroll.bad_code": {
+   "UE": "Failed to enroll wire-user with code invalid. Invalid or expired code."
+  },
+  "console": {
+   "00 users list": {
+    "asked": [],
+    "output": "Printing all accounts...\nUsername: jdoe <Normal User>  Email: jdoe@example.org  Created At: <time>\nUsername: wire-user <Normal User>  Email: wire@example.org  Created At: <time>\nUsername: a@b <Normal User>  Email: ab@example.org  Created At: <time>"
+   },
+   "01 groups list": {
+    "asked": [],
+    "output": "group_id  group_name    devices_whitelist  max_reservation_time_sec  max_reservations  lifetime_sec  created_at\n--------  ------------  -----------------  ------------------------  ----------------  ------------  --------------------------\n1         native-users  7                  3600                      2                 0             <time>\n2         kept-users    7                  3600                      2                 0             <time>"
+   },
+   "02 codes list": {
+    "asked": [],
+    "output": "code_name      group_id  uses  duration_sec  code_id\n-------------  --------  ----  ------------  -------\nnative-signup  1         2     0             1\nkeep-signup    2         1     0             2"
+   },
+   "03 reservations list": {
+    "asked": [],
+    "output": "Printing all reservations...\nId: 2 Username: jdoe  Device ID: 7  Start Time: <time>  End Time: <time>"
+   },
+   "04 devices list": {
+    "asked": [],
+    "output": "Devices:\nDevice ID: 7 Device Name: Fake radio (online, reserved)"
+   },
+   "05 groups create": {
+    "asked": [
+     "Enter group name (c to cancel):",
+     "Confirm group name 'console-group'? (y/n):",
+     "Devices whitelist (e.g. 0,1,2) (c to cancel):",
+     "Max reservation time (sec) [1800] (c to cancel):",
+     "Max concurrent reservations [3] (c to cancel):",
+     "Group lifetime (sec) [0=forever] (c to cancel):",
+     "Proceed? (y/n):"
+    ],
+    "output": "About to create user group with:\n  group_name               : console-group\n  devices_whitelist        : 7\n  max_reservation_time_sec : 3600\n  max_reservations         : 2\n  lifetime_sec             : 0\nUser group created with group_id=3."
+   },
+   "06 codes create": {
+    "asked": [
+     "How many enrollment codes? (c to cancel):",
+     "Group ID to attach codes to? (c to cancel):",
+     "Characters per code name? [10] (c to cancel):",
+     "Use these codes? (y/n):",
+     "Uses per code? [1] (c to cancel):",
+     "Duration in seconds? [3600] (0=never expires) (c to cancel):",
+     "Proceed? (y/n):"
+    ],
+    "output": "Generated code names:\n   1) <code>\n\nAbout to create enrollment codes with:\n  group_id     : 1\n  count        : 1\n  uses         : 3\n  duration_sec : 0\n\nCreated enrollment codes:\nCreated 1/1 enrollment codes."
+   },
+   "07 groups list": {
+    "asked": [],
+    "output": "group_id  group_name     devices_whitelist  max_reservation_time_sec  max_reservations  lifetime_sec  created_at\n--------  -------------  -----------------  ------------------------  ----------------  ------------  --------------------------\n1         native-users   7                  3600                      2                 0             <time>\n2         kept-users     7                  3600                      2                 0             <time>\n3         console-group  7                  3600                      2                 0             <time>"
+   },
+   "08 codes list": {
+    "asked": [],
+    "output": "code_name         group_id  uses  duration_sec  code_id\n----------------  --------  ----  ------------  -------\nnative-signup     1         2     0             1\nkeep-signup       2         1     0             2\n<code>  1         3     0             3"
+   }
+  },
+  "acc.get_perms.after_group_delete": {
+   "UC": "[('Normal User', 2, 'wire-user', None, None, None)]",
+   "details": "{\"devices\": [], \"caps\": {}, \"groups\": []}"
+  },
+  "acc.reserve.after_group_delete": {
+   "ace": "Invalid device ID. Device either does not exist or is disconnected."
+  },
+  "acc.login.after_account_delete": {
+   "UE": "Invalid login details."
+  },
+  "db": {
+   "perms.db:Admins": {
+    "columns": [
+     "AdminID",
+     "Username"
+    ],
+    "rows": []
+   },
+   "perms.db:PowerUsers": {
+    "columns": [
+     "UserID",
+     "Username",
+     "MaxReservations",
+     "MaxReservationTimeSec",
+     "DevicesAllowed"
+    ],
+    "rows": []
+   },
+   "perms.db:Users": {
+    "columns": [
+     "UserID",
+     "Username"
+    ],
+    "rows": [
+     [
+      1,
+      "jdoe"
+     ],
+     [
+      3,
+      "a@b"
+     ]
+    ]
+   },
+   "reservations.db:Accounts": {
+    "columns": [
+     "acc_id",
+     "username",
+     "email",
+     "pass_salt",
+     "pass_hash",
+     "created_at"
+    ],
+    "rows": [
+     [
+      1,
+      "jdoe",
+      "jdoe@example.org"
+     ],
+     [
+      3,
+      "a@b",
+      "ab@example.org"
+     ]
+    ]
+   },
+   "reservations.db:Reservations": {
+    "columns": [
+     "res_id",
+     "username",
+     "device_id",
+     "start_time",
+     "end_time",
+     "salt",
+     "hash"
+    ],
+    "rows": [
+     [
+      2,
+      "jdoe",
+      7
+     ]
+    ]
+   },
+   "usergroups.db:EnrollmentCodes": {
+    "columns": [
+     "code_id",
+     "code_name",
+     "group_id",
+     "uses",
+     "duration_sec",
+     "created_at"
+    ],
+    "rows": [
+     [
+      2,
+      "keep-signup",
+      2,
+      1,
+      0
+     ]
+    ]
+   },
+   "usergroups.db:UserGroups": {
+    "columns": [
+     "group_id",
+     "group_name",
+     "devices_whitelist",
+     "max_reservation_time_sec",
+     "max_reservations",
+     "lifetime_sec",
+     "created_at"
+    ],
+    "rows": [
+     [
+      2,
+      "kept-users",
+      "[7]",
+      3600,
+      2,
+      0
+     ],
+     [
+      3,
+      "console-group",
+      "[7]",
+      3600,
+      2,
+      0
+     ]
+    ]
+   },
+   "usergroups.db:UsersLookup": {
+    "columns": [
+     "user_id",
+     "group_id"
+    ],
+    "rows": [
+     [
+      1,
+      2
+     ]
+    ]
+   }
+  },
+  "files": [
+   ".config/remoterf/certs/ca.crt",
+   ".config/remoterf/certs/server.crt",
+   ".config/remoterf/certs/server.key",
+   ".config/remoterf/db/activity_logs.npy",
+   ".config/remoterf/db/perms.db",
+   ".config/remoterf/db/perms.db-shm",
+   ".config/remoterf/db/perms.db-wal",
+   ".config/remoterf/db/reservations.db",
+   ".config/remoterf/db/reservations.db-shm",
+   ".config/remoterf/db/reservations.db-wal",
+   ".config/remoterf/db/usergroups.db",
+   ".config/remoterf/db/usergroups.db-shm",
+   ".config/remoterf/db/usergroups.db-wal",
+   ".config/remoterf/devices.yml",
+   ".config/remoterf/drivers/.hackrf_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.pluto_mimo_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.pluto_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.rtl_sdr_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.ti_mmwave_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.usrp_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/hackrf_schema.py",
+   ".config/remoterf/drivers/pluto_mimo_schema.py",
+   ".config/remoterf/drivers/pluto_schema.py",
+   ".config/remoterf/drivers/rtl_sdr_schema.py",
+   ".config/remoterf/drivers/ti_mmwave_schema.py",
+   ".config/remoterf/drivers/usrp_schema.py",
+   ".config/remoterf/super_token.txt"
+  ],
+  "threads": [
+   "MainThread",
+   "Thread (_serve)",
+   "Thread (serve_forever)",
+   "ThreadPoolExecutor",
+   "remoterf-reservation-updates"
+  ],
+  "egress": [
+   "pypi.org"
+  ]
+ },
+ "reopen": {
+  "reopen.acc.login": {
+   "UC": "jdoe"
+  },
+  "reopen.acc.login.wrong_password": {
+   "UE": "Invalid login details."
+  },
+  "reopen.acc.get_perms": {
+   "UC": "[('Normal User', 1, 'jdoe', None, None, None)]",
+   "details": "{\"devices\": [7], \"caps\": {\"7\": {\"max_reservation_time_sec\": 3600, \"max_reservations\": 2}}, \"groups\": [\"kept-users\"]}"
+  },
+  "reopen.acc.get_dev": {
+   "7": "Fake radio (online, reserved)"
+  },
+  "reopen.acc.get_res": {
+   "2": "jdoe,7,<time>,<time>"
+  },
+  "reopen.device.acquire_kept_token": {
+   "device": 7
+  },
+  "reopen.console": {
+   "00 users list": {
+    "asked": [],
+    "output": "Printing all accounts...\nUsername: jdoe <Normal User>  Email: jdoe@example.org  Created At: <time>\nUsername: a@b <Normal User>  Email: ab@example.org  Created At: <time>"
+   },
+   "01 groups list": {
+    "asked": [],
+    "output": "group_id  group_name     devices_whitelist  max_reservation_time_sec  max_reservations  lifetime_sec  created_at\n--------  -------------  -----------------  ------------------------  ----------------  ------------  --------------------------\n2         kept-users     7                  3600                      2                 0             <time>\n3         console-group  7                  3600                      2                 0             <time>"
+   },
+   "02 codes list": {
+    "asked": [],
+    "output": "code_name    group_id  uses  duration_sec  code_id\n-----------  --------  ----  ------------  -------\nkeep-signup  2         1     0             2"
+   },
+   "03 reservations list": {
+    "asked": [],
+    "output": "Printing all reservations...\nId: 2 Username: jdoe  Device ID: 7  Start Time: <time>  End Time: <time>"
+   }
+  },
+  "db": {
+   "perms.db:Admins": {
+    "columns": [
+     "AdminID",
+     "Username"
+    ],
+    "rows": []
+   },
+   "perms.db:PowerUsers": {
+    "columns": [
+     "UserID",
+     "Username",
+     "MaxReservations",
+     "MaxReservationTimeSec",
+     "DevicesAllowed"
+    ],
+    "rows": []
+   },
+   "perms.db:Users": {
+    "columns": [
+     "UserID",
+     "Username"
+    ],
+    "rows": [
+     [
+      1,
+      "jdoe"
+     ],
+     [
+      3,
+      "a@b"
+     ]
+    ]
+   },
+   "reservations.db:Accounts": {
+    "columns": [
+     "acc_id",
+     "username",
+     "email",
+     "pass_salt",
+     "pass_hash",
+     "created_at"
+    ],
+    "rows": [
+     [
+      1,
+      "jdoe",
+      "jdoe@example.org"
+     ],
+     [
+      3,
+      "a@b",
+      "ab@example.org"
+     ]
+    ]
+   },
+   "reservations.db:Reservations": {
+    "columns": [
+     "res_id",
+     "username",
+     "device_id",
+     "start_time",
+     "end_time",
+     "salt",
+     "hash"
+    ],
+    "rows": [
+     [
+      2,
+      "jdoe",
+      7
+     ]
+    ]
+   },
+   "usergroups.db:EnrollmentCodes": {
+    "columns": [
+     "code_id",
+     "code_name",
+     "group_id",
+     "uses",
+     "duration_sec",
+     "created_at"
+    ],
+    "rows": [
+     [
+      2,
+      "keep-signup",
+      2,
+      1,
+      0
+     ]
+    ]
+   },
+   "usergroups.db:UserGroups": {
+    "columns": [
+     "group_id",
+     "group_name",
+     "devices_whitelist",
+     "max_reservation_time_sec",
+     "max_reservations",
+     "lifetime_sec",
+     "created_at"
+    ],
+    "rows": [
+     [
+      2,
+      "kept-users",
+      "[7]",
+      3600,
+      2,
+      0
+     ],
+     [
+      3,
+      "console-group",
+      "[7]",
+      3600,
+      2,
+      0
+     ]
+    ]
+   },
+   "usergroups.db:UsersLookup": {
+    "columns": [
+     "user_id",
+     "group_id"
+    ],
+    "rows": [
+     [
+      1,
+      2
+     ]
+    ]
+   }
+  },
+  "files": [
+   ".config/remoterf/certs/ca.crt",
+   ".config/remoterf/certs/server.crt",
+   ".config/remoterf/certs/server.key",
+   ".config/remoterf/db/activity_logs.npy",
+   ".config/remoterf/db/perms.db",
+   ".config/remoterf/db/perms.db-shm",
+   ".config/remoterf/db/perms.db-wal",
+   ".config/remoterf/db/reservations.db",
+   ".config/remoterf/db/reservations.db-shm",
+   ".config/remoterf/db/reservations.db-wal",
+   ".config/remoterf/db/usergroups.db",
+   ".config/remoterf/db/usergroups.db-shm",
+   ".config/remoterf/db/usergroups.db-wal",
+   ".config/remoterf/devices.yml",
+   ".config/remoterf/drivers/.hackrf_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.pluto_mimo_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.pluto_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.rtl_sdr_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.ti_mmwave_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/.usrp_schema.py.remoterf-managed",
+   ".config/remoterf/drivers/hackrf_schema.py",
+   ".config/remoterf/drivers/pluto_mimo_schema.py",
+   ".config/remoterf/drivers/pluto_schema.py",
+   ".config/remoterf/drivers/rtl_sdr_schema.py",
+   ".config/remoterf/drivers/ti_mmwave_schema.py",
+   ".config/remoterf/drivers/usrp_schema.py",
+   ".config/remoterf/super_token.txt"
+  ],
+  "threads": [
+   "MainThread",
+   "Thread (_serve)",
+   "Thread (serve_forever)",
+   "ThreadPoolExecutor",
+   "remoterf-reservation-updates"
+  ],
+  "egress": []
+ }
+}
