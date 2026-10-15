@@ -593,6 +593,25 @@ def register_reservation_end_callback(callback) -> None:
             _reservation_end_callbacks.append(callback)
 
 
+def end_reservation(device_id: int | str) -> None:
+    """The lab ended this device's reservation: close its sessions, then reset it for the next holder."""
+    gid = int(device_id)
+    with _state_lock:
+        callbacks = tuple(_reservation_end_callbacks)
+        st = _devices.get(gid)
+    for callback in callbacks:
+        try:
+            callback(gid)
+        except Exception as e:
+            warn(f"reservation cleanup failed for gid={gid}: {e}", component="hostrf.device_manager")
+    reset = getattr(st.schema if st else None, "reset_for_next_holder", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception as e:
+            warn(f"resetting gid={gid} for its next holder failed: {e}", component="hostrf.device_manager")
+
+
 def make_host_bridge_token(device_id: int | str) -> str:
     """Create a tunnel-internal token; it is accepted only inside the host agent."""
     return f"{_HOST_BRIDGE_TOKEN_PREFIX}{int(device_id)}"

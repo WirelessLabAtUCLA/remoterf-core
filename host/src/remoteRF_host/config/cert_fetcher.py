@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import os
 import socket
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -39,6 +40,14 @@ def _looks_like_pem_cert(data: bytes) -> bool:
 def sha256_fingerprint_pem(pem_bytes: bytes) -> str:
     h = hashlib.sha256(pem_bytes).hexdigest()
     return ":".join(h[i:i+2] for i in range(0, len(h), 2))
+
+
+def normalize_sha256(value: str) -> str:
+    """'sha256:AB:CD..' / 'abcd..' -> 'abcd..'."""
+    v = (value or "").strip().lower()
+    if v.startswith("sha256:"):
+        v = v[len("sha256:"):]
+    return v.replace(":", "")
 
 
 def _fetch_http(host: str, port: int, timeout_sec: float) -> bytes:
@@ -111,6 +120,7 @@ def fetch_and_save_ca_cert(
 
     timeout_sec: float = 3.0,
     overwrite: bool = True,
+    expected_sha256: Optional[str] = None,
 ) -> bool:
     """
     Fetch CA cert from server bootstrap endpoint and save it into `env_dir`,
@@ -129,6 +139,8 @@ def fetch_and_save_ca_cert(
         grpc_addr: optional value for REMOTERF_ADDR
         timeout_sec: network timeout
         overwrite: overwrite existing cert file if present
+        expected_sha256: the lab's CA fingerprint; without it the CA pinned
+            by an earlier fetch (REMOTERF_CA_SHA256) must still match.
 
     Returns:
         True on success, False on any failure.
@@ -160,11 +172,25 @@ def fetch_and_save_ca_cert(
         if not data or not _looks_like_pem_cert(data):
             return False
 
+        # The fetch is plain HTTP: trust only a fingerprint from the lab admin,
+        # or the one pinned on first use.
+        lines = _read_env_lines(env_path)
+        digest = hashlib.sha256(data).hexdigest()
+        pinned = next((ln.split("=", 1)[1].strip() for ln in lines if ln.strip().startswith("REMOTERF_CA_SHA256=")), "")
+        want = normalize_sha256(expected_sha256) if expected_sha256 else normalize_sha256(pinned)
+        if want and digest != want:
+            print(
+                f"CA fingerprint mismatch: got {digest}, expected {want}. "
+                "If the lab changed its CA, pass the new one with --ca-sha256 (from `hosts token`).",
+                file=sys.stderr,
+            )
+            return False
+
         # Save cert next to .env
         cert_path.write_bytes(data)
 
         # Update the .env in the same directory
-        lines = _read_env_lines(env_path)
+        lines = _upsert_env_key(lines, "REMOTERF_CA_SHA256", digest)
         lines = _upsert_env_key(lines, "REMOTERF_CA_CERT", f"./{cert_filename}")
         if grpc_addr:
             lines = _upsert_env_key(lines, "REMOTERF_ADDR", grpc_addr)

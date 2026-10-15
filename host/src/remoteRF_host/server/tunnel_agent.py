@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import time
 import queue
 import grpc
@@ -51,6 +52,7 @@ from ..common.utils import device_name_key, get_devices_config_path, get_host_co
 from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
+from ..config.cert_fetcher import normalize_sha256
 
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
@@ -112,8 +114,9 @@ except Exception:
 from .rpc_manager import rpc_manager  # type: ignore
 
 try:
-    from .device_manager import get_configured_devices, get_device_schema, reload_devices  # type: ignore
+    from .device_manager import end_reservation, get_configured_devices, get_device_schema, reload_devices  # type: ignore
 except Exception:
+    end_reservation = None
     get_configured_devices = None
     get_device_schema = None
     reload_devices = None
@@ -612,8 +615,7 @@ class HostTunnelAgent:
         ]
 
         if not self.cfg.ca_pem_path:
-            info(f"Opening INSECURE channel to {addr}", component="hostrf.tunnel_agent")
-            return grpc.insecure_channel(addr, options=options)
+            raise FileNotFoundError("No CA cert configured: the host only connects over TLS.")
 
         ca_path = Path(self.cfg.ca_pem_path).expanduser().resolve()
         if not ca_path.exists():
@@ -650,6 +652,24 @@ class HostTunnelAgent:
             component="hostrf.tunnel_agent",
         )
         return grpc.secure_channel(addr, credentials, options=options)
+
+    # -------- control --------
+
+    def _handle_control(self, ctl) -> None:
+        kind = str(getattr(ctl, "kind", "") or "")
+        if kind != "reservation_end":
+            warn(f"Ignoring control frame kind={kind!r}", component="hostrf.tunnel_agent")
+            return
+        try:
+            gid = int(str(ctl.device_id))
+        except ValueError:
+            warn(f"reservation_end for a bad device_id={ctl.device_id!r}", component="hostrf.tunnel_agent")
+            return
+        if gid not in self._devices or not callable(end_reservation):
+            warn(f"reservation_end for unknown gid={gid}", component="hostrf.tunnel_agent")
+            return
+        info(f"Reservation ended for gid={gid}: closing its sessions and resetting it.", component="hostrf.tunnel_agent")
+        end_reservation(gid)
 
     # -------- rpc execution --------
 
@@ -859,6 +879,13 @@ class HostTunnelAgent:
                                 daemon=True,
                                 name=f"meta_{frame.meta_request.req_id}",
                             ).start()
+                        elif which == "control":
+                            threading.Thread(
+                                target=self._handle_control,
+                                args=(frame.control,),
+                                daemon=True,
+                                name="control",
+                            ).start()
                         elif which == "cancel":
                             rid = str(frame.cancel.req_id)
                             warn(f"Cancel req_id={rid}", component="hostrf.tunnel_agent")
@@ -994,6 +1021,11 @@ def main() -> None:
         _die_config(net_env, f"Invalid REMOTERF_ADDR={addr!r} ({e}).")
 
     ca_path = _resolve_path(net_env, net_kv.get("REMOTERF_CA_CERT", "").strip())
+    if not ca_path or not Path(ca_path).is_file():
+        _die_config(net_env, "No CA cert (REMOTERF_CA_CERT): the host only connects over TLS.")
+    ca_pin = normalize_sha256(net_kv.get("REMOTERF_CA_SHA256", ""))
+    if ca_pin and hashlib.sha256(Path(ca_path).read_bytes()).hexdigest() != ca_pin:
+        _die_config(net_env, f"{ca_path} does not match the pinned REMOTERF_CA_SHA256.")
     client_cert = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_CERT", "").strip())
     client_key = _resolve_path(net_env, net_kv.get("REMOTERF_CLIENT_KEY", "").strip())
 
@@ -1004,7 +1036,7 @@ def main() -> None:
         host_env_path=str(host_env),
         devices_yaml_path=str(devices_yaml),
         version=os.getenv("HOST_VERSION", "host-agent/dev"),
-        ca_pem_path=ca_path or None,
+        ca_pem_path=ca_path,
         client_cert_pem_path=client_cert or None,
         client_key_pem_path=client_key or None,
     )

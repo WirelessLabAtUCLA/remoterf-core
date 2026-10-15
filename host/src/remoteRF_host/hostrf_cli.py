@@ -74,6 +74,7 @@ def print_help() -> None:
         "\n"
         "Network options:\n"
         "  --addr <host:port>               Set REMOTERF_ADDR and fetch CA cert\n"
+        "  --ca-sha256 <hex>                With --addr: the CA fingerprint `hosts token` printed on the lab\n"
         "  --show | -s                      Show current network config\n"
         "  -w | --wipe [-y]                 Wipe ONLY network config (net.env + ca.crt)\n"
         "\n"
@@ -316,7 +317,7 @@ def _write_device_records(recs: Dict[int, Dict[str, Any]]) -> None:
 # -----------------------------
 # Actions (ONLY the ones listed)
 # -----------------------------
-def _configure_addr(addr: str) -> int:
+def _configure_addr(addr: str, ca_sha256: Optional[str] = None) -> int:
     try:
         host, grpc_port = _parse_hostport(addr)
     except Exception as e:
@@ -339,11 +340,15 @@ def _configure_addr(addr: str) -> int:
         grpc_addr=f"{host}:{grpc_port}", # also upserts REMOTERF_ADDR
         timeout_sec=3.0,
         overwrite=True,
+        expected_sha256=ca_sha256,
     )
     if not ok:
-        print(f"Failed to fetch CA cert from {host}:{cert_port}.", file=sys.stderr)
+        print(f"Failed to fetch a trusted CA cert from {host}:{cert_port}.", file=sys.stderr)
         return 1
-    
+    pinned = _read_env_kv(_net_env_path()).get("REMOTERF_CA_SHA256", "")
+    if not ca_sha256:
+        print(f"CA sha256 {pinned}: check it against `hosts token` on the lab (it is pinned now).")
+
     print("Configured network:")
     print(f"  {_net_env_path()}")
     return 0
@@ -851,6 +856,7 @@ def main() -> int:
     # config commands
     config_mode = False
     addr_value: Optional[str] = None
+    ca_sha256_value: Optional[str] = None
     config_show = False
     config_wipe = False
 
@@ -921,6 +927,14 @@ def main() -> int:
                 print("ERROR: --addr expects <host:port>", file=sys.stderr)
                 return 2
             addr_value = argv[i + 1].strip()
+            i += 2
+            continue
+
+        if config_mode and tok in ("--ca-sha256", "-ca-sha256"):
+            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                print("ERROR: --ca-sha256 expects <hex fingerprint>", file=sys.stderr)
+                return 2
+            ca_sha256_value = argv[i + 1].strip()
             i += 2
             continue
 
@@ -1165,7 +1179,7 @@ def main() -> int:
             did_any = True
 
         if addr_value is not None:
-            rc = _configure_addr(addr_value)
+            rc = _configure_addr(addr_value, ca_sha256_value)
             if rc != 0:
                 return rc
             did_any = True
