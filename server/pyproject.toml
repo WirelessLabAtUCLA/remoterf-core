@@ -9,7 +9,7 @@ description = "RemoteRF server-side control package"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.10"
 dependencies = [
-    "remoterf-federation-core==0.21.0",
+    "remoterf-federation-core==0.22.0",
   "grpcio>=1.81.1,<2.0.0",
   "protobuf>=6.33.5,<7.0.0",
   "numpy",

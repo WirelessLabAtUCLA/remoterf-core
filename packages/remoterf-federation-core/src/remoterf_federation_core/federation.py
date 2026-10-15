@@ -17,6 +17,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Mapping
 
+from .lan import validate_lan_credential
 from .contracts import (
     ContractError,
     ContractTerms,
@@ -117,7 +118,13 @@ ENROLL_PAYLOAD_FIELDS = frozenset(
 PERMISSIONS_PAYLOAD_FIELDS = ENROLL_PAYLOAD_FIELDS - {"code_name"}
 # Who is enrolling, for a lab that will list them by name (a class roster);
 # optional, so a home that shares nothing about its users still enrols.
-ENROLLEE_FIELDS = frozenset({"display_name", "email"})
+# `username`/`lan_salt`/`lan_hash` travel together: Global's account and the
+# verifier for its lab login there (see lan.py).
+LAN_CREDENTIAL_FIELDS = frozenset({"username", "lan_salt", "lan_hash"})
+ENROLLEE_FIELDS = frozenset({"display_name", "email"}) | LAN_CREDENTIAL_FIELDS
+# A federated_enroll with this code updates (or revokes) a linked account's
+# lab login instead of redeeming a code.
+LAN_UPDATE_CODE = "lan.update"
 GRANT_FIELDS = frozenset(
     {
         "token_type",
@@ -377,6 +384,14 @@ def canonical_action_request(value: object) -> CanonicalActionRequest:
         for field, limit in (("display_name", 128), ("email", 254)):
             if field in payload:
                 clean[field] = _printable(payload[field], "invalid_enrollee", limit)
+        if LAN_CREDENTIAL_FIELDS & set(payload):
+            if not LAN_CREDENTIAL_FIELDS <= set(payload):
+                raise FederationError("invalid_enrollee")
+            try:
+                clean.update(validate_lan_credential(
+                    payload["username"], payload["lan_salt"], payload["lan_hash"]))
+            except ValidationError as exc:
+                raise FederationError(str(exc)) from None
     elif is_device_action(action):
         try:
             clean.update(validate_device_payload(action, payload))

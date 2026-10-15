@@ -35,6 +35,7 @@ from .contracts import (
     validate_sha256,
     validate_trusted_key_material,
 )
+from .lan import LAN_PBKDF2_ROUNDS, MAX_LAN_PBKDF2_ROUNDS, lan_secret, lan_verifier, validate_lan_credential
 from .federation import (
     ACTION_CAPABILITIES,
     DEFAULT_ACTION_RETRY_POLICIES,
@@ -50,6 +51,8 @@ from .federation import (
     MAX_PROTOCOL_INTEGER,
     MAX_FEDERATION_INVITATION_BYTES,
     FEDERATION_INVITATION_PREFIX,
+    LAN_CREDENTIAL_FIELDS,
+    LAN_UPDATE_CODE,
     READ_ONLY_ACTIONS,
     ActionRetryPolicy,
     CanonicalActionRequest,
@@ -143,7 +146,7 @@ from .permissions import (
     validate_home_permissions_summary,
 )
 
-__version__ = "0.16.0"
+__version__ = "0.22.0"
 __all__ = ["ValidationError", "canonical_json", "strict_json", "canonical_uuid",
            "validate_capabilities", "local_capabilities", "PROTOCOL_VERSION",
            "FederatedIdentity", "federated_identity", "federated_proxy_adapter",
@@ -163,6 +166,8 @@ __all__ = ["ValidationError", "canonical_json", "strict_json", "canonical_uuid",
            "FederationError", "TransportFailure", "OwnerSignedFailure",
            "CanonicalActionRequest", "ACTION_CAPABILITIES",
            "FederationInvitation", "FEDERATION_INVITATION_PREFIX",
+           "LAN_CREDENTIAL_FIELDS", "LAN_UPDATE_CODE", "LAN_PBKDF2_ROUNDS",
+           "MAX_LAN_PBKDF2_ROUNDS", "lan_secret", "lan_verifier", "validate_lan_credential",
            "MAX_FEDERATION_INVITATION_BYTES", "build_federation_invitation",
            "parse_federation_invitation",
            "ActionRetryPolicy", "DEFAULT_ACTION_RETRY_POLICIES",
