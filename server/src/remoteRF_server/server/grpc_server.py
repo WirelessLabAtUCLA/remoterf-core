@@ -608,7 +608,7 @@ def set_acc():
             printf("Invalid input. Skipping.", Sty.RED)
         
     elif inpu == 'D':
-        if input(f"Are you sure you want to delete user: {username}? (Y/N): ") == 'Y':
+        if ask(f"Are you sure you want to delete user: {username}? (Y/N): ") == 'Y':
             printf(f"Deleting user: {username}", Sty.MAGENTA)
             reservation_handler.remove_user(username=username)
         else:

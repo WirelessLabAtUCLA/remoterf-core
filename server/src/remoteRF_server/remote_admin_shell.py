@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import getpass
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -55,7 +56,6 @@ TIERS = {
     "cluster create": WRITE, "cluster invite": WRITE, "cluster join": WRITE, "cluster kick": WRITE,
     "cluster cap": WRITE, "cluster peers": WRITE, "restart": WRITE, "reload devices": WRITE,
     "db export": WRITE, "cluster groups": WRITE, "cluster codes create": WRITE, "cluster accept": WRITE,
-    "global cluster": WRITE,
     # write, interactive in the daemon: through the control socket's prompt bridge
     "users manage": WRITE, "diag": WRITE,
     # destructive: password again, a typed word, an automatic backup, then -y
@@ -65,6 +65,7 @@ TIERS = {
     "cluster remove": DESTRUCTIVE, "gist set": DESTRUCTIVE, "gist wipe": DESTRUCTIVE,
     # never remote: they cut remote access, nuke everything, or pin admins
     "stop": NEVER, "detach": NEVER, "clear": NEVER, "wipe": NEVER, "users purge": NEVER, "db purge": NEVER,
+    "global cluster": NEVER,  # an old alias for every `cluster` verb, remove included: use `cluster …`
     "global leave": NEVER, "global join": NEVER, "global verify": NEVER, "config wipe": NEVER,
     "admins list": NEVER, "admins add": NEVER, "admins code": NEVER, "admins remove": NEVER,
     "admins devices": NEVER, "admins revoke": NEVER, "admins log": NEVER, "admins hostkey": NEVER,
@@ -75,6 +76,7 @@ DENY_FLAGS = {"--secrets"}
 TAKES_YES = {"devices wipe", "stats purge", "hosts wipe", "certs wipe", "gist wipe", "users prune-proxies",
              "hosts tokens", "certs reset"}
 KEEP_BACKUPS = 10
+PAIR_CODE = re.compile(r"[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}-[A-Z2-7]{4}")
 BUILTINS = ("help", "me", "revoke", "passwd", "log", "clear", "exit")
 
 
@@ -260,9 +262,13 @@ class Shell:
         print("Remote-admin password changed.")
 
     def do_log(self, argv):
-        """The console's last N lines (a snapshot; there is no live view)."""
+        """The console's last N lines (a snapshot; there is no live view). Full
+        admins only, and never a pairing code another admin was given there."""
         from remoteRF_server.server import console
 
+        if self.pin()["read_only"]:
+            print("`log`: not for read-only remote admins.", file=sys.stderr)
+            return
         try:
             n = max(1, min(1000, int(argv[0]))) if argv else 50
         except ValueError:
@@ -273,7 +279,7 @@ class Shell:
             return
         out = subprocess.run(["tmux", "-L", console.SOCKET, "capture-pane", "-p", "-t", console.SESSION, "-S", f"-{n}"],
                              capture_output=True, text=True, check=False).stdout
-        print("\n".join(out.rstrip("\n").splitlines()[-n:]))
+        print(PAIR_CODE.sub("XXXX-XXXX-XXXX-XXXX", "\n".join(out.rstrip("\n").splitlines()[-n:])))
 
     def do_clear(self, argv):
         print("\033[2J\033[H", end="", flush=True)

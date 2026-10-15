@@ -192,7 +192,7 @@ def _table() -> list[Command]:
         Command(("admins log",), "Audit log tail: admins log [N]", _admins("cmd_admins_log"), "Remote admin"),
         Command(("admins hostkey",), "Show the admin host key, or rotate it: admins hostkey [rotate]", _admins("cmd_admins_hostkey"), "Remote admin"),
         Command(("admins policy",), "admins policy [relay on|off] [new-device email|console]", _admins("cmd_admins_policy"), "Remote admin"),
-        Command(("admins kick",), "End live remote-admin sessions: admins kick [<user>]", _admins("cmd_admins_kick"), "Remote admin", where=D),
+        Command(("admins kick",), "End live remote-admin sessions: admins kick [<user>]", _admins("cmd_admins_kick"), "Remote admin"),
     ]
 
 

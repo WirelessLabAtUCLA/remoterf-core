@@ -82,10 +82,15 @@ def server(*, label="laptop-2"):
     return ssh._server_interface()("lan", label)
 
 
-def login(srv, name, key, *answers_by_round):
+def login(srv, name, key, *answers_by_round, signed=True):
     """Drive the auth callbacks as paramiko would. The last result."""
-    assert srv.check_auth_publickey(name, key) == paramiko.AUTH_PARTIALLY_SUCCESSFUL
-    assert srv.get_allowed_auths(name) == "keyboard-interactive"
+    public = paramiko.Ed25519Key(data=key.asbytes())  # what paramiko builds from the request
+    assert srv.check_auth_publickey(name, public) == paramiko.AUTH_PARTIALLY_SUCCESSFUL
+    if signed:  # what paramiko does next with a signed request
+        sig = key.sign_ssh_data(b"session blob")
+        sig.rewind()
+        assert public.verify_ssh_sig(b"session blob", sig)
+    assert srv.get_allowed_auths(name) == ("keyboard-interactive" if signed else "publickey")
     result = srv.check_auth_interactive(name, "")
     for answers in answers_by_round:
         if not isinstance(result, paramiko.InteractiveQuery):
@@ -172,14 +177,14 @@ def test_codes_are_single_use_expire_and_allow_five_tries(lab):
     with contextlib.closing(ra.connect()) as conn:
         admin = ra.find_pin(conn, "jdoe")["admin_id"]
         code = ra.issue_code(conn, admin, "pair", length=16, ttl=60)
-        for _ in range(4):
+        for _ in range(9):  # 80 bits: guessing cannot burn a pairing code
             assert not ra.redeem_code(conn, admin, "pair", "WRONG")
         assert ra.redeem_code(conn, admin, "pair", code.lower() + ".AbCdEf")  # case, suffix tolerated
         assert not ra.redeem_code(conn, admin, "pair", code)  # one use
-        code = ra.issue_code(conn, admin, "pair", length=16, ttl=60)
+        code = ra.issue_code(conn, admin, "device", length=10, ttl=60, device_fp="SHA256:a", session_id="s1")
         for _ in range(5):
-            assert not ra.redeem_code(conn, admin, "pair", "WRONG")
-        assert not ra.redeem_code(conn, admin, "pair", code)  # five misses: dead
+            assert not ra.redeem_code(conn, admin, "device", "WRONG", device_fp="SHA256:a", session_id="s1")
+        assert not ra.redeem_code(conn, admin, "device", code, device_fp="SHA256:a", session_id="s1")  # five misses
         code = ra.issue_code(conn, admin, "pair", length=16, ttl=-1)
         assert not ra.redeem_code(conn, admin, "pair", code)  # expired
         code = ra.issue_code(conn, admin, "device", length=10, ttl=60, device_fp="SHA256:a", session_id="s1")
@@ -212,6 +217,26 @@ def test_pairing_sets_the_password_and_approves_the_device(lab):
     assert login(server(), f"jdoe#{code}", device_key(), []) == paramiko.AUTH_FAILED
 
 
+def test_a_key_counts_only_once_it_signed(lab):
+    """paramiko asks check_auth_publickey before it checks a signature (and for a
+    probe with none): naming an approved device's public key must get nowhere."""
+    code = pin(lab, password=None)
+    key = device_key()
+    login(server(), f"jdoe#{code}", key, ["a long password!"] * 2)
+    public = paramiko.Ed25519Key(data=key.asbytes())
+    srv = server()
+    assert login(srv, "jdoe", public, signed=False) == paramiko.AUTH_FAILED
+    assert srv.check_auth_interactive_response(["a long password!"]) == paramiko.AUTH_FAILED
+    bad = paramiko.Message()
+    bad.add_string("ssh-ed25519")
+    bad.add_string(b"\0" * 64)
+    bad.rewind()
+    srv = server()
+    srv.check_auth_publickey("jdoe", public)
+    assert not public.verify_ssh_sig(b"session blob", bad)
+    assert srv.check_auth_interactive("jdoe", "") == paramiko.AUTH_FAILED
+
+
 def test_known_device_needs_the_password_every_time(lab):
     code = pin(lab, password=None)
     key = device_key()
@@ -224,6 +249,11 @@ def test_five_wrong_passwords_lock_the_admin(lab):
     code = pin(lab, password=None)
     key = device_key()
     login(server(), f"jdoe#{code}", key, ["a long password!"] * 2)
+    stranger = device_key()
+    for _ in range(5):  # someone else's key: their guesses lock only unapproved devices
+        assert login(server(), "jdoe", stranger, ["wrong"]) == paramiko.AUTH_FAILED
+    assert login(server(), "jdoe", key, ["a long password!"]) == paramiko.AUTH_SUCCESSFUL
+    ssh._sessions.clear()
     for _ in range(5):
         assert login(server(), "jdoe", key, ["wrong"]) == paramiko.AUTH_FAILED
     assert login(server(), "jdoe", key, ["a long password!"]) == paramiko.AUTH_FAILED
@@ -275,10 +305,15 @@ def test_two_sessions_per_admin(lab):
     login(server(), f"jdoe#{code}", key, ["a long password!"] * 2)
     with contextlib.closing(ra.connect()) as conn:
         admin = ra.find_pin(conn, "jdoe")["admin_id"]
-    ssh._sessions.update(a=ssh._Session(admin, "jdoe", "x", "lan", "l"), b=ssh._Session(admin, "jdoe", "x", "lan", "l"))
+    ssh._sessions.clear()
+    assert login(server(), "jdoe", key, ["a long password!"]) == paramiko.AUTH_SUCCESSFUL  # counted at auth
+    assert login(server(), "jdoe", key, ["a long password!"]) == paramiko.AUTH_SUCCESSFUL
     result = login(server(), "jdoe", key, ["a long password!"])
     assert "already has 2 sessions" in result.instructions
-    assert ssh.kick("jdoe") == 2
+    session = next(iter(ssh._sessions.values()))
+    assert ssh._still_allowed(session) is None
+    run(ra.cmd_admins_kick, ["jdoe"])
+    assert ssh._still_allowed(session) == "ended from the console"
 
 
 # -----------------------------
@@ -306,10 +341,25 @@ def events(session="sess1"):
 
 def test_shell_refuses_never_remote_and_secrets(remote):
     with mock.patch.object(commands, "dispatch") as dispatch:
-        for line in ("users purge", "stop", "admins add someone", "hosts tokens --secrets", "global leave"):
+        for line in ("users purge", "stop", "admins add someone", "hosts tokens --secrets", "global leave",
+                     "global cluster remove lab-pair"):
             assert run(lambda a: remote.run_line(a[0]), [line])[0] is True
         dispatch.assert_not_called()
-    assert [e for e, _ in events()] == ["refused"] * 5
+    assert [e for e, _ in events()] == ["refused"] * 6
+
+
+def test_log_hides_pairing_codes_and_is_for_full_admins(remote):
+    from remoteRF_server.server import console
+
+    pane = "serverrf> admins add jdoe\n  remoterf --remote-admin pair jdoe@ucla K7Q2-6XPM-4TDA-HHWZ.Qm9xYz12AbCd\n"
+    with mock.patch.object(console, "running", return_value=True), \
+         mock.patch("subprocess.run", return_value=SimpleNamespace(stdout=pane)):
+        out = run(lambda a: remote.run_line(a[0]), ["log 5"])[1]
+        assert "K7Q2" not in out and "XXXX-XXXX-XXXX-XXXX.Qm9xYz12AbCd" in out
+        with contextlib.closing(ra.connect()) as conn:
+            conn.execute("UPDATE remote_admins SET read_only=1")
+            conn.commit()
+        assert "not for read-only" in run(lambda a: remote.run_line(a[0]), ["log 5"])[1]
 
 
 def test_shell_runs_writes_and_read_only_admins_cannot(remote):
@@ -493,3 +543,4 @@ def test_a_real_openssh_session_through_the_tunnel(lab, tmp_path):
         assert "device_approved" in seen and "refused" in seen
     finally:
         server.stop(0)
+

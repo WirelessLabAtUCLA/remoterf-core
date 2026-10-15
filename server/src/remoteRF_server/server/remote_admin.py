@@ -29,6 +29,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -56,7 +57,8 @@ CREATE TABLE IF NOT EXISTS remote_admins (
     pass_hash TEXT,
     read_only INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    disabled_at INTEGER
+    disabled_at INTEGER,
+    kicked_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS remote_admin_devices (
     device_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,12 +361,15 @@ def issue_code(conn, admin_id: int, purpose: str, *, length: int, ttl: int, devi
 
 
 def redeem_code(conn, admin_id: int, purpose: str, typed: str, *, device_fp=None, session_id=None) -> bool:
-    """One use, CODE_ATTEMPTS tries, unexpired; a device code only for the device
-    and SSH session it was sent for."""
+    """One use, unexpired. A device code (50 bits) only for the device and SSH
+    session it was sent for, CODE_ATTEMPTS tries; a pairing code (80 bits) has no
+    try limit, so nobody can burn it by guessing."""
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")  # check and spend in one step: no double use, no parallel guesses
     now = int(time.time())
     sql = ("SELECT code_hash FROM remote_admin_codes WHERE admin_id=? AND purpose=? AND used_at IS NULL "
            "AND expires_at>? AND attempts<?")
-    params = [int(admin_id), purpose, now, CODE_ATTEMPTS]
+    params = [int(admin_id), purpose, now, CODE_ATTEMPTS if purpose == "device" else 1 << 30]
     if purpose == "device":
         sql += " AND device_fp=? AND session_id=?"
         params += [device_fp, session_id]
@@ -373,8 +378,8 @@ def redeem_code(conn, admin_id: int, purpose: str, typed: str, *, device_fp=None
         return False
     wanted = _code_hash(typed or "")
     if wanted in hashes:
-        conn.execute("UPDATE remote_admin_codes SET used_at=? WHERE code_hash=?", (now, wanted))
-        return True
+        return conn.execute("UPDATE remote_admin_codes SET used_at=? WHERE code_hash=? AND used_at IS NULL",
+                            (now, wanted)).rowcount == 1
     conn.executemany("UPDATE remote_admin_codes SET attempts=attempts+1 WHERE code_hash=?", [(h,) for h in hashes])
     return False
 
@@ -389,7 +394,12 @@ def email_device_code(pin, code: str, fp: str, label: str, route: str) -> str | 
 # Audit, policy
 # -----------------------------
 
+def _printable(text):
+    return None if text is None else re.sub(r"[^\x20-\x7e]", "?", str(text))[:128]
+
+
 def audit(event: str, *, admin=None, device_fp=None, route=None, session_id=None, detail=None, rc=None, conn=None) -> None:
+    admin = _printable(admin)  # an SSH user name is whatever a stranger typed
     own = conn is None
     conn = conn or connect()
     try:
@@ -656,8 +666,18 @@ def cmd_admins_policy(argv) -> int:
 
 
 def cmd_admins_kick(argv) -> int:
-    from . import remote_admin_ssh
-
-    n = remote_admin_ssh.kick(argv[0] if argv else None)
-    print(f"Ended {n} remote-admin session(s).")
+    """Through the database, like remove and revoke: each session checks it every second."""
+    if len(argv) > 1:
+        return _usage("admins kick [<username>]")
+    with closing(connect()) as conn:
+        if argv:
+            pin = _pin_or_complain(conn, argv[0])
+            if pin is None:
+                return 1
+            conn.execute("UPDATE remote_admins SET kicked_at=? WHERE admin_id=?", (int(time.time()), pin["admin_id"]))
+        else:
+            conn.execute("UPDATE remote_admins SET kicked_at=? WHERE disabled_at IS NULL", (int(time.time()),))
+        audit("kick", admin=argv[0] if argv else None, conn=conn)
+        conn.commit()
+    print(f"Remote-admin sessions{f' of {argv[0]}' if argv else ''} end within seconds.")
     return 0

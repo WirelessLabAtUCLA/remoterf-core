@@ -94,13 +94,15 @@ def _peer_host(peer: str) -> str:
     return host.rsplit(":", 1)[0].strip("[]")
 
 
-def _allow_open(peer: str) -> bool:
+def _allow_open(peer: str, relayed: bool) -> bool:
+    # ponytail: every relayed client arrives from the tunnel's own address, so
+    # they share one (larger) bucket; per-client needs the relay to say who.
     now = time.monotonic()
     with _lock:
         recent = _opens.setdefault(_peer_host(peer), collections.deque())
         while recent and now - recent[0] > 60:
             recent.popleft()
-        if len(recent) >= OPENS_PER_MINUTE:
+        if len(recent) >= OPENS_PER_MINUTE * (6 if relayed else 1):
             return False
         recent.append(now)
         if len(_opens) > 1000:
@@ -126,7 +128,7 @@ def _tunnel(request_iterator, context):
     relayed = is_relayed(context.peer())
     if relayed and ra.policy()["relay"] == "off":
         context.abort(grpc.StatusCode.PERMISSION_DENIED, "remote admin at this lab works only on its own network")
-    if not _allow_open(context.peer()):
+    if not _allow_open(context.peer(), relayed):
         context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "too many remote-admin connections; wait a minute")
     metadata = dict(context.invocation_metadata())
     label = re.sub(r"[^A-Za-z0-9._-]", "", str(metadata.get(MD_LABEL, "")))[:40] or "unnamed"
@@ -159,28 +161,24 @@ def _tunnel(request_iterator, context):
 # Authentication
 # -----------------------------
 
-def _locked(admin_id: int) -> bool:
+def _locked(admin_id: int, known: bool) -> bool:
     with _lock:
-        entry = _failures.get(admin_id)
+        entry = _failures.get((admin_id, known))
         return bool(entry and entry[1] > time.monotonic())
 
 
-def _failed_password(pin) -> None:
+def _failed_password(pin, known: bool) -> None:
+    """Approved devices and unknown ones count apart: anyone can bring a key of
+    their own, so their guesses must never lock the admin's own devices out."""
     with _lock:
-        entry = _failures.setdefault(pin["admin_id"], [0, 0.0])
+        entry = _failures.setdefault((pin["admin_id"], known), [0, 0.0])
         entry[0] += 1
-        if entry[0] >= LOCK_AFTER:
+        locked = entry[0] >= LOCK_AFTER
+        if locked:
             entry[0], entry[1] = 0, time.monotonic() + LOCK_SECONDS
-            locked = True
-        else:
-            locked = False
     if locked:
-        _notice(f"{ra.login_name(pin)}: {LOCK_AFTER} wrong remote-admin passwords; locked for {LOCK_SECONDS // 60} minutes")
-
-
-def _live(admin_id: int) -> int:
-    with _lock:
-        return sum(1 for s in _sessions.values() if s.admin_id == admin_id)
+        _notice(f"{ra.login_name(pin)}: {LOCK_AFTER} wrong remote-admin passwords from "
+                f"{'an approved' if known else 'unapproved'} device(s); those are locked for {LOCK_SECONDS // 60} minutes")
 
 
 def _server_interface():
@@ -198,7 +196,7 @@ def _server_interface():
             self.key = self.username = self.pin = None
             self.stage = None
             self.tries = 0
-            self.authed = None  # (admin_id, login, fingerprint) once in
+            self.authed = None  # the _Session, once in
             self.shell = threading.Event()
             self.channel = None
             self.term, self.size = "xterm-256color", (80, 24)
@@ -209,10 +207,19 @@ def _server_interface():
             return "keyboard-interactive" if self.key is not None else "publickey"
 
         def check_auth_publickey(self, username, key):
-            # Any key, to prove possession; whether it is approved decides the code round.
-            self.key, self.login = key, username
-            name, sep, code = username.rpartition("#")
-            self.username, self.pair_code = (name, code) if sep else (username, None)
+            # paramiko asks this before it checks the signature (and for a
+            # signature-less probe too): the key counts only once it verified one.
+            verify = key.verify_ssh_sig
+
+            def verified(blob, sig):
+                ok = verify(blob, sig)
+                if ok:
+                    name, sep, code = username.rpartition("#")
+                    self.key, self.login = key, username
+                    self.username, self.pair_code = (name, code) if sep else (username, None)
+                return ok
+
+            key.verify_ssh_sig = verified
             return paramiko.AUTH_PARTIALLY_SUCCESSFUL
 
         def check_auth_interactive(self, username, submethods):
@@ -232,8 +239,11 @@ def _server_interface():
         def _say_and_fail(self, text):
             return self._ask("fail", instructions=text)
 
+        def _who(self):
+            return ra.login_name(self.pin) if self.pin is not None else self.username
+
         def _fail(self, reason):
-            ra.audit("auth_fail", admin=self.username, device_fp=self.key.fingerprint, route=self.route,
+            ra.audit("auth_fail", admin=self._who(), device_fp=self.key.fingerprint, route=self.route,
                      session_id=self.session_id, detail={"reason": reason})
             return paramiko.AUTH_FAILED
 
@@ -267,41 +277,36 @@ def _server_interface():
                                          instructions="Those did not match, or it is too short.")
                     if problem:
                         return self._fail(problem)
-                    if _live(pin["admin_id"]) >= MAX_SESSIONS:
-                        return self._say_and_fail(f"{self.username} already has {MAX_SESSIONS} sessions open.")
                     ra.set_password(conn, pin["admin_id"], first)
                     ra.approve_device(conn, pin["admin_id"], pubkey, fp, self.label, "pair")
-                    ra.audit("device_approved", admin=self.username, device_fp=fp, route=self.route,
+                    ra.audit("device_approved", admin=self._who(), device_fp=fp, route=self.route,
                              session_id=self.session_id, detail={"via": "pair", "label": self.label}, conn=conn)
                     conn.commit()
-                    _notice(f"{self.username}: device {fp} ('{self.label}') paired over {self.route}")
+                    _notice(f"{self._who()}: device {fp} ('{self.label}') paired over {self.route}")
                     return self._in(pin, fp)
                 if stage == "password":
-                    if pin is not None and _locked(pin["admin_id"]):
+                    known = pin is not None and ra.device_for(conn, pin["admin_id"], pubkey) is not None
+                    if pin is not None and _locked(pin["admin_id"], known):
                         return self._fail("locked")
                     if not ra.check_password(pin, answers[0] if answers else ""):
                         if pin is not None:
-                            _failed_password(pin)
+                            _failed_password(pin, known)
                         return self._fail("bad password")
                     with _lock:
-                        _failures.pop(pin["admin_id"], None)
+                        _failures.pop((pin["admin_id"], known), None)
                     if problem:
                         return self._fail(problem)
-                    if _live(pin["admin_id"]) >= MAX_SESSIONS:
-                        return self._say_and_fail(f"{self.username} already has {MAX_SESSIONS} sessions open.")
-                    if ra.device_for(conn, pin["admin_id"], pubkey) is not None:
-                        return self._in(pin, fp)
-                    return self._new_device(conn, pin, fp)
+                    return self._in(pin, fp) if known else self._new_device(conn, pin, fp)
                 if stage == "device_code":
                     if problem or not ra.redeem_code(conn, pin["admin_id"], "device", answers[0] if answers else "",
                                                      device_fp=fp, session_id=self.session_id):
                         conn.commit()
                         return self._fail(problem or "bad device code")
                     ra.approve_device(conn, pin["admin_id"], pubkey, fp, self.label, "email")
-                    ra.audit("device_approved", admin=self.username, device_fp=fp, route=self.route,
+                    ra.audit("device_approved", admin=self._who(), device_fp=fp, route=self.route,
                              session_id=self.session_id, detail={"via": "email", "label": self.label}, conn=conn)
                     conn.commit()
-                    _notice(f"{self.username}: new device {fp} ('{self.label}') approved by emailed code over {self.route}")
+                    _notice(f"{self._who()}: new device {fp} ('{self.label}') approved by emailed code over {self.route}")
                     return self._in(pin, fp)
             return paramiko.AUTH_FAILED
 
@@ -316,7 +321,7 @@ def _server_interface():
             try:
                 masked = ra.email_device_code(pin, code, fp, self.label, self.route)
             except Exception as exc:  # noqa: BLE001 - Global down or refusing: the console path still works
-                ra.audit("code_email_failed", admin=self.username, device_fp=fp, route=self.route,
+                ra.audit("code_email_failed", admin=self._who(), device_fp=fp, route=self.route,
                          session_id=self.session_id, detail={"error": str(exc)[:200]})
                 masked = None
             if not masked:
@@ -326,13 +331,22 @@ def _server_interface():
                              instructions=f"New device. Code sent to {masked} (device {fp}, '{self.label}').")
 
         def _in(self, pin, fp):
+            """Counted the moment it is in, so parallel logins cannot pass the cap together."""
+            login = ra.login_name(pin)
+            with _lock:
+                if sum(1 for s in _sessions.values() if s.admin_id == pin["admin_id"]) >= MAX_SESSIONS:
+                    full = True
+                else:
+                    full = False
+                    self.authed = _sessions[self.session_id] = _Session(pin["admin_id"], login, fp, self.route,
+                                                                        self.label)
+            if full:
+                return self._say_and_fail(f"{login} already has {MAX_SESSIONS} sessions open.")
             with contextlib.closing(ra.connect()) as conn:
                 conn.execute("UPDATE remote_admin_devices SET last_used_at=? WHERE admin_id=? AND fingerprint=? "
                              "AND revoked_at IS NULL", (int(time.time()), pin["admin_id"], fp))
-                ra.audit("auth_ok", admin=self.username, device_fp=fp, route=self.route, session_id=self.session_id,
-                         conn=conn)
+                ra.audit("auth_ok", admin=login, device_fp=fp, route=self.route, session_id=self.session_id, conn=conn)
                 conn.commit()
-            self.authed = (pin["admin_id"], self.username, fp)
             return paramiko.AUTH_SUCCESSFUL
 
         # -- channel --
@@ -342,8 +356,9 @@ def _server_interface():
             return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
         def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
-            self.term = term.decode() if isinstance(term, bytes) else str(term)
-            self.size = (int(width) or 80, int(height) or 24)
+            term = term.decode(errors="replace") if isinstance(term, bytes) else str(term)
+            self.term = term if re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", term) else "xterm-256color"
+            self.size = _clamp(width, height)
             return True
 
         def check_channel_shell_request(self, channel):
@@ -352,12 +367,16 @@ def _server_interface():
             return True
 
         def check_channel_window_change_request(self, channel, width, height, pixelwidth, pixelheight):
-            self.size = (int(width) or 80, int(height) or 24)
+            self.size = _clamp(width, height)
             if self.master is not None:
                 _set_size(self.master, *self.size)
             return True
 
     return AdminServer
+
+
+def _clamp(width, height) -> tuple[int, int]:
+    return min(max(int(width or 80), 1), 1000), min(max(int(height or 24), 1), 1000)
 
 
 def _set_size(fd: int, cols: int, rows: int) -> None:
@@ -372,15 +391,9 @@ def _set_size(fd: int, cols: int, rows: int) -> None:
 class _Session:
     def __init__(self, admin_id, login, fp, route, label):
         self.admin_id, self.login, self.fp, self.route, self.label = admin_id, login, fp, route, label
-        self.ended = None  # a reason, set from another thread to end it
-
-
-def kick(login: str | None = None) -> int:
-    with _lock:
-        hits = [s for s in _sessions.values() if login is None or s.login == login]
-        for s in hits:
-            s.ended = "ended from the console"
-    return len(hits)
+        self.started, self.started_wall = time.monotonic(), time.time()
+        self.last_input = self.started
+        self.ended = None  # the reason, once the watchdog ends it
 
 
 def _serve_ssh(sock, route: str, label: str) -> None:
@@ -402,52 +415,51 @@ def _serve_ssh(sock, route: str, label: str) -> None:
         channel = transport.accept(10)
         if channel is None or not server.shell.wait(10):
             return
-        admin_id, login, fp = server.authed
-        session = _Session(admin_id, login, fp, route, label)
-        with _lock:
-            _sessions[server.session_id] = session
-        try:
-            _run_shell(server, channel, session)
-        finally:
-            with _lock:
-                _sessions.pop(server.session_id, None)
+        _run_shell(server, channel, server.authed, transport)
     except Exception as exc:  # noqa: BLE001 - one broken connection must never touch the server
         if not isinstance(exc, (EOFError, paramiko.SSHException, OSError)):
             import logging
 
             logging.getLogger("remoteRF_server.remote_admin").warning("remote-admin session failed: %r", exc)
     finally:
+        with _lock:
+            _sessions.pop(server.session_id, None)
         transport.close()
         sock.close()
 
 
-def _run_shell(server, channel, session: _Session) -> None:
+def _run_shell(server, channel, session: _Session, transport) -> None:
     sid = server.session_id
     ra.audit("session_start", admin=session.login, device_fp=session.fp, route=session.route, session_id=sid,
              detail={"label": session.label})
     _notice(f"{session.login} ({session.label}, {session.route}) connected")
-    master, slave = pty.openpty()
-    server.master = master
-    _set_size(master, *server.size)
-    env = {k: v for k, v in os.environ.items() if k != "REMOTERF_CONSOLE_ATTACHED"}
-    env.update(TERM=server.term or "xterm-256color", REMOTERF_REMOTE_ADMIN=f"{session.admin_id}:{sid}",
-               REMOTERF_REMOTE_ADMIN_DEVICE=session.fp, REMOTERF_REMOTE_ADMIN_ROUTE=session.route,
-               REMOTERF_REMOTE_ADMIN_LABEL=session.label)
-    proc = subprocess.Popen([sys.executable, "-m", "remoteRF_server.remote_admin_shell"],
-                            stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True, close_fds=True)
-    os.close(slave)
-    started = last_input = time.monotonic()
-    last_check, seen = 0.0, _last_audit_id()
-    reason = None
+    master = proc = None
+    pumped = threading.Event()
     try:
-        while reason is None:
+        master, slave = pty.openpty()
+        server.master = master
+        _set_size(master, *server.size)
+        env = {k: v for k, v in os.environ.items() if k != "REMOTERF_CONSOLE_ATTACHED"}
+        env.update(TERM=server.term, REMOTERF_REMOTE_ADMIN=f"{session.admin_id}:{sid}",
+                   REMOTERF_REMOTE_ADMIN_DEVICE=session.fp, REMOTERF_REMOTE_ADMIN_ROUTE=session.route,
+                   REMOTERF_REMOTE_ADMIN_LABEL=session.label)
+        try:
+            proc = subprocess.Popen([sys.executable, "-m", "remoteRF_server.remote_admin_shell"], stdin=slave,
+                                    stdout=slave, stderr=slave, env=env, start_new_session=True, close_fds=True)
+        finally:
+            os.close(slave)
+        # The limits live apart from the pump: a client that stops reading (or a
+        # shell that stops reading) blocks the pump, never the session's end.
+        threading.Thread(target=_watchdog, args=(sid, session, proc, channel, transport, pumped),
+                         name="remote-admin-watchdog", daemon=True).start()
+        while session.ended is None:
             readable, _, _ = select.select([master, channel], [], [], CHECK_SECONDS)
             if channel in readable:
                 data = channel.recv(4096)
                 if not data:
                     break
                 os.write(master, data)
-                last_input = time.monotonic()
+                session.last_input = time.monotonic()
             if master in readable:
                 try:
                     data = os.read(master, 65536)
@@ -456,30 +468,45 @@ def _run_shell(server, channel, session: _Session) -> None:
                 if not data:
                     break
                 channel.sendall(data)
-            now = time.monotonic()
-            if now - last_check >= CHECK_SECONDS:
-                last_check = now
-                seen = _echo_commands(sid, session, seen)
-                reason = (session.ended or _still_allowed(session)
-                          or ("idle for 15 minutes" if now - last_input > IDLE_SECONDS else None)
-                          or ("8-hour limit" if now - started > MAX_SECONDS else None))
             if proc.poll() is not None and master not in readable:
                 break
-        if reason:
+        if session.ended:
             with contextlib.suppress(Exception):
-                channel.sendall(f"\r\n[remote admin session ended: {reason}]\r\n".encode())
+                channel.sendall(f"\r\n[remote admin session ended: {session.ended}]\r\n".encode())
     finally:
-        _stop(proc)
-        with contextlib.suppress(OSError):
-            os.close(master)
+        pumped.set()
+        if proc is not None:
+            _stop(proc)
+        if master is not None:
+            with contextlib.suppress(OSError):
+                os.close(master)
         server.master = None
-        rc = proc.returncode if proc.returncode is not None and proc.returncode >= 0 else 1
+        rc = proc.returncode if proc is not None and proc.returncode is not None and proc.returncode >= 0 else 1
         with contextlib.suppress(Exception):
             channel.send_exit_status(rc)
         channel.close()
         ra.audit("session_end", admin=session.login, device_fp=session.fp, route=session.route, session_id=sid,
-                 detail={"reason": reason or "closed"})
-        _notice(f"{session.login} ({session.label}) disconnected{f': {reason}' if reason else ''}")
+                 detail={"reason": session.ended or "closed"})
+        _notice(f"{session.login} ({session.label}) disconnected{f': {session.ended}' if session.ended else ''}")
+
+
+def _watchdog(sid, session: _Session, proc, channel, transport, pumped) -> None:
+    seen = _last_audit_id()
+    while not pumped.wait(CHECK_SECONDS):
+        now = time.monotonic()
+        try:
+            seen = _echo_commands(sid, session, seen)
+            reason = (_still_allowed(session)
+                      or ("idle for 15 minutes" if now - session.last_input > IDLE_SECONDS else None)
+                      or ("8-hour limit" if now - session.started > MAX_SECONDS else None))
+        except Exception as exc:  # noqa: BLE001 - cannot check: end it (fail closed)
+            reason = f"check failed ({type(exc).__name__})"
+        if reason:
+            session.ended = reason
+            _stop(proc)
+            if not pumped.wait(3.0):
+                transport.close()  # the pump is stuck on a peer that does not read
+            return
 
 
 def _stop(proc) -> None:
@@ -501,6 +528,8 @@ def _still_allowed(session: _Session) -> str | None:
         problem = ra.pin_problem(pin)
         if problem:
             return problem
+        if pin["kicked_at"] is not None and pin["kicked_at"] >= int(session.started_wall):
+            return "ended from the console"
         alive = conn.execute("SELECT 1 FROM remote_admin_devices WHERE admin_id=? AND fingerprint=? AND revoked_at IS NULL",
                              (session.admin_id, session.fp)).fetchone()
     return None if alive else "device revoked"
