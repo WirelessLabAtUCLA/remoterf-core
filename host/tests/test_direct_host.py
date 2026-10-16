@@ -772,3 +772,56 @@ class TunnelDirectControlTests(unittest.TestCase):
                 disabled._setup_relay()
             which.assert_not_called()
             self.assertEqual(disabled._hello_frame().hello.capabilities, ["direct"])
+
+    def test_connected_is_reported_only_after_the_first_lab_frame(self):
+        import grpc
+        from remoteRF_host.common.grpc import grpc_host_pb2 as pb
+        from remoteRF_host.server import tunnel_agent
+
+        class HandshakeFailed(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "Handshake read failed"
+
+        streams = [HandshakeFailed(), [pb.HostFrame(heartbeat=pb.Heartbeat())]]
+
+        def connect(_frames):  # like gRPC: the call returns at once, failures surface on read
+            stream = streams.pop(0)
+            if isinstance(stream, Exception):
+                def failing():
+                    raise stream
+                    yield
+                return failing()
+            return iter(stream)
+
+        agent = self._agent(None)
+        agent.cfg = mock.Mock(
+            version="test", server_host="lab", server_port=1, ca_pem_path="ca",
+            reconnect_min_delay_sec=0.01, reconnect_max_delay_sec=0.01, heartbeat_interval_sec=60,
+        )
+        agent._stop = threading.Event()
+        agent._relay_supervisor = None
+        lines = []
+
+        def sleep(_seconds):  # the retry wait; the heartbeat thread sleeps too
+            if not streams and threading.current_thread() is threading.main_thread():
+                agent._stop.set()
+
+        with mock.patch.object(agent, "_reload_from_env"), mock.patch.object(
+            agent, "_drain_outbound_queue"
+        ), mock.patch.object(agent, "_make_channel"), mock.patch.object(
+            agent, "_device_announce_frame", return_value=pb.HostFrame()
+        ), mock.patch.object(agent, "_outbound_generator"), mock.patch.object(
+            tunnel_agent.host_pb2_grpc, "HostTunnelStub", return_value=mock.Mock(Connect=connect)
+        ), mock.patch.object(
+            tunnel_agent, "status", side_effect=lambda msg, **_k: lines.append(msg)
+        ), mock.patch.object(tunnel_agent.time, "sleep", side_effect=sleep), mock.patch.object(
+            tunnel_agent, "end_reservation", None
+        ):
+            agent.run_forever()
+
+        self.assertTrue(lines[1].startswith("Unable to connect to lab:1 (UNAVAILABLE: Handshake read failed)"), lines)
+        self.assertTrue(lines[2].startswith("Connected to lab:1 as 'lab-host'"), lines)
+        self.assertTrue(lines[3].startswith("Connection to lab:1 lost (server closed the stream)"), lines)

@@ -1119,6 +1119,7 @@ class HostTunnelAgent:
                 addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
                 retry_reason = ""
                 stream_established = False
+                connected = False
                 attempt += 1
 
                 try:
@@ -1143,15 +1144,12 @@ class HostTunnelAgent:
                     stream = stub.Connect(self._outbound_generator(initial=initial))
                     delay = self.cfg.reconnect_min_delay_sec
                     stream_established = True
-                    status(
-                        f"Connected to {addr} as '{self._host_id}' ({_device_count_label(len(self._devices))}).",
-                        component="hostrf",
-                    )
-                    info("HostTunnel stream established. Waiting for server frames...", component="hostrf.tunnel_agent")
+                    info("HostTunnel stream opened. Waiting for server frames...", component="hostrf.tunnel_agent")
 
                     hb_stop = threading.Event()
 
-                    def hb_loop() -> None:
+                    # The event is bound per stream: hb_stop is rebound on every attempt.
+                    def hb_loop(hb_stop: threading.Event) -> None:
                         try:
                             info(
                                 f"Heartbeat loop started (interval={self.cfg.heartbeat_interval_sec:.1f}s).",
@@ -1165,9 +1163,16 @@ class HostTunnelAgent:
                         finally:
                             info("Heartbeat loop exiting.", component="hostrf.tunnel_agent")
 
-                    threading.Thread(target=hb_loop, daemon=True, name="hb_loop").start()
+                    threading.Thread(target=hb_loop, args=(hb_stop,), daemon=True, name="hb_loop").start()
 
                     for frame in stream:
+                        if not connected:
+                            # The lab answers only once it has registered this host.
+                            connected = True
+                            status(
+                                f"Connected to {addr} as '{self._host_id}' ({_device_count_label(len(self._devices))}).",
+                                component="hostrf",
+                            )
                         which = frame.WhichOneof("msg")
                         if which == "rpc_request":
                             threading.Thread(
@@ -1267,7 +1272,7 @@ class HostTunnelAgent:
                     break
 
                 sleep_s = delay + random.uniform(0.0, min(0.5, delay * 0.2))
-                if stream_established:
+                if connected:
                     status(
                         f"Connection to {addr} lost ({retry_reason or 'disconnected'}). Retrying in {sleep_s:.1f}s.",
                         component="hostrf",
