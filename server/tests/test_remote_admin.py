@@ -536,9 +536,14 @@ def test_a_real_openssh_session_through_the_tunnel(lab, tmp_path):
         out = _expect(ssh_argv("jdoe"), [("Password for remote admin jdoe:", "a long password!"),
                                           ("jdoe@lab>", "exit")])
         assert "jdoe@lab>" in out, out
-        time.sleep(1.5)
-        with contextlib.closing(ra.connect()) as conn:
-            seen = [r[0] for r in conn.execute("SELECT event FROM remote_admin_audit ORDER BY id")]
+        # session_end is written after the server closes the channel, so ssh can exit first.
+        deadline = time.monotonic() + 20
+        while True:
+            with contextlib.closing(ra.connect()) as conn:
+                seen = [r[0] for r in conn.execute("SELECT event FROM remote_admin_audit ORDER BY id")]
+            if seen.count("session_end") >= 2 or time.monotonic() > deadline:
+                break
+            time.sleep(0.1)
         assert seen.count("session_start") == 2 and seen.count("session_end") == 2, seen
         assert "device_approved" in seen and "refused" in seen
     finally:

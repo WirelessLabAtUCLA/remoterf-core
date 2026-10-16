@@ -18,6 +18,7 @@ branches, so legs that need them are skipped where they are missing.
 import difflib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -95,12 +96,12 @@ def test_upgrade_in_place_from_pre_global(trees, tmp_path):
 def check(leg: str, part: str, got: dict) -> None:
     baseline = json.loads(BASELINE.read_text())[part]
     accepted = json.loads(ACCEPTED.read_text()) if ACCEPTED.exists() else {}
-    deltas = {name: got.get(name) for name in sorted(set(baseline) | set(got)) if got.get(name) != baseline.get(name)}
+    deltas = {name: got.get(name) for name in sorted(set(baseline) | set(got)) if not same(got.get(name), baseline.get(name))}
 
     if ACCEPT:
         old = accepted.get(leg, {})
         accepted[leg] = {
-            name: old[name] if name in old and old[name]["value"] == value
+            name: old[name] if name in old and same(old[name]["value"], value)
             else {"kind": "review", "why": "TODO", "value": value}
             for name, value in deltas.items()
         }
@@ -108,7 +109,7 @@ def check(leg: str, part: str, got: dict) -> None:
         return
 
     allowed = accepted.get(leg, {})
-    unexplained = [name for name, value in deltas.items() if allowed.get(name, {}).get("value", ...) != value]
+    unexplained = [name for name, value in deltas.items() if not same(allowed.get(name, {}).get("value", ...), value)]
     assert not unexplained, "\n\n".join(
         _diff(f"accepted {name}", allowed[name]["value"], got.get(name)) if name in allowed
         else _diff(f"pre-Global {name}", baseline.get(name), got.get(name))
@@ -116,6 +117,21 @@ def check(leg: str, part: str, got: dict) -> None:
     )
     unreviewed = [name for name in deltas if allowed[name]["why"] == "TODO"]
     assert not unreviewed, f"{leg}: accepted_deltas.json still has unreviewed entries: {unreviewed}"
+
+
+def same(a, b) -> bool:
+    return _width_free(a) == _width_free(b)
+
+
+def _width_free(value):
+    """Box borders and padding follow the LAN IP's length (masked as <ip>), not behaviour."""
+    if isinstance(value, dict):
+        return {k: _width_free(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_width_free(v) for v in value]
+    if isinstance(value, str):
+        return re.sub(r" +([│╮╯])", r" \1", re.sub(r"─+", "─", value))
+    return value
 
 
 def _diff(label, before, after) -> str:
