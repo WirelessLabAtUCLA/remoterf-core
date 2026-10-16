@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import re
 import hashlib
+import json
 import time
 import queue
 import grpc
@@ -309,6 +310,7 @@ class HostTunnelAgent:
         self._devices: Dict[int, Dict[str, str]] = {}
 
         self._host_token: str = ""
+        self._direct_host = None
 
     def stop(self) -> None:
         info("Stop requested.")
@@ -398,6 +400,23 @@ class HostTunnelAgent:
             _die_host_config(Path(self.cfg.host_env_path), "HOST_TOKEN is not set.")
         self._host_token = tok
 
+        if self._direct_host is None:
+            try:
+                from .direct_host import DirectHost, available as direct_available
+
+                if (
+                    direct_available()
+                    and hasattr(host_pb2, "Control")
+                    and "capabilities" in host_pb2.HostHello.DESCRIPTOR.fields_by_name
+                ):
+                    self._direct_host = DirectHost(
+                        host_id=self._host_id,
+                        key_path=_cfg_dir() / "direct.key",
+                        run_call=self._run_direct_call,
+                    )
+            except Exception:
+                exception("Direct path setup failed; continuing without it.", component="hostrf.tunnel_agent")
+
         mt = (
             host_env.get("HOST_MASTER_TOKEN", "").strip()
             or host_env.get("MASTER_TOKEN", "").strip()
@@ -438,6 +457,14 @@ class HostTunnelAgent:
 
         if hasattr(hello, "host_token"):
             hello.host_token = self._host_token
+
+        direct = getattr(self, "_direct_host", None)
+        if direct is not None and hasattr(hello, "capabilities") and hasattr(hello, "tls_public_key"):
+            try:
+                hello.capabilities.append("direct")
+                hello.tls_public_key = direct.public_key_pem()
+            except Exception:
+                exception("Direct path identity failed; not advertising it.", component="hostrf.tunnel_agent")
 
         return host_pb2.HostFrame(hello=hello)
 
@@ -665,6 +692,36 @@ class HostTunnelAgent:
 
     def _handle_control(self, ctl) -> None:
         kind = str(getattr(ctl, "kind", "") or "")
+        if kind == "lab_info":
+            direct = getattr(self, "_direct_host", None)
+            if direct is None:
+                return
+            try:
+                payload = json.loads(str(ctl.payload))
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not an object")
+                direct.configure(payload)
+            except Exception as exc:
+                warn(f"Invalid lab_info: {exc}", component="hostrf.tunnel_agent")
+            return
+        if kind == "direct_offer":
+            threading.Thread(
+                target=self._handle_direct_offer,
+                args=(ctl,),
+                daemon=True,
+                name=f"direct_offer_{str(getattr(ctl, 'req_id', ''))[:16]}",
+            ).start()
+            return
+        if kind == "grant":
+            direct = getattr(self, "_direct_host", None)
+            if direct is None:
+                return
+            try:
+                payload = json.loads(str(ctl.payload))
+                direct.refresh(int(str(ctl.device_id)), str(payload["grant"]))
+            except Exception as exc:
+                warn(f"Invalid direct grant: {exc}", component="hostrf.tunnel_agent")
+            return
         if kind != "reservation_end":
             warn(f"Ignoring control frame kind={kind!r}", component="hostrf.tunnel_agent")
             return
@@ -673,11 +730,34 @@ class HostTunnelAgent:
         except ValueError:
             warn(f"reservation_end for a bad device_id={ctl.device_id!r}", component="hostrf.tunnel_agent")
             return
+        direct = getattr(self, "_direct_host", None)
+        if direct is not None:
+            try:
+                direct.end(gid)
+            except Exception:
+                exception(f"Direct path cleanup failed for gid={gid}", component="hostrf.tunnel_agent")
         if gid not in self._devices or not callable(end_reservation):
             warn(f"reservation_end for unknown gid={gid}", component="hostrf.tunnel_agent")
             return
         end_reservation(gid)
         status(f"Reservation ended on device {gid}: sessions closed, device reset.", component="hostrf")
+
+    def _handle_direct_offer(self, ctl) -> None:
+        req_id = str(getattr(ctl, "req_id", "") or "")
+        try:
+            direct = getattr(self, "_direct_host", None)
+            if direct is None:
+                raise RuntimeError("direct paths are unavailable on this host")
+            payload = json.loads(str(ctl.payload))
+            if not isinstance(payload, dict):
+                raise ValueError("payload is not an object")
+            answer = direct.offer(int(str(ctl.device_id)), str(payload["ice"]), str(payload["grant"]))
+            response = {"answer": answer}
+        except Exception as exc:
+            response = {"error": str(exc)}
+        self._enqueue(host_pb2.HostFrame(control=host_pb2.Control(
+            kind="direct_answer", req_id=req_id, payload=json.dumps(response),
+        )), timeout=0.1)
 
     # -------- rpc execution --------
 
@@ -772,6 +852,20 @@ class HostTunnelAgent:
 
         finally:
             self._consume_cancel(req_id)
+
+    def _run_direct_call(self, gid: int, greq) -> Dict[str, Any]:
+        args_map = greq.args
+        gid_s = str(int(gid))
+        try:
+            args_map["gid"].CopyFrom(_argument_string(gid_s))
+        except Exception:
+            pass
+        try:
+            args_map["device_id"].CopyFrom(_coerce_argument(int(gid)))
+        except Exception:
+            pass
+        results_any = rpc_manager.run_rpc(function_name=greq.function_name, args=args_map)
+        return _coerce_argument_map(results_any)
 
     # -------- outbound stream --------
 
@@ -938,6 +1032,11 @@ class HostTunnelAgent:
                     if hb_stop is not None:
                         hb_stop.set()
                     if stream_established:
+                        if self._direct_host is not None:
+                            try:
+                                self._direct_host.close_all()
+                            except Exception:
+                                exception("Direct path tunnel-loss cleanup failed.", component="hostrf.tunnel_agent")
                         try:
                             from .dynamic_v2_bridge import close_all_bridge_sessions
 
