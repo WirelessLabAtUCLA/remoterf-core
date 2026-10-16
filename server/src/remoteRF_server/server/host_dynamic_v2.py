@@ -40,16 +40,24 @@ from .v2_errors import (
 )
 
 
-def lab_copy(gid: int, device: VirtualDevice):
-    """The lab's own schema for a host device whose driver is a built-in
-    (the host reports a manifest hash this lab's class also has), else None:
-    ask the host, which may run a custom driver."""
-    registry = hts.get_tunnel_registry(create=False)
-    reported = registry.get_host_device_schema_hash(device.device_id) if registry is not None else ""
-    if not reported or reported not in builtin_hashes():
+def lab_copy(gid: int, device: VirtualDevice, *, version: str = "v1"):
+    """The lab's own schema for a host device whose driver is a built-in (its
+    host reported, this session, the manifest hash this lab's class also has
+    for that schema version), else None: ask the host, which may run a custom driver."""
+    try:
+        registry = hts.get_tunnel_registry(create=False)
+        if registry is None:
+            return None
+        reported = registry.get_host_device_schema_hash(device.host_id, device.device_id, version=version)
+        if not reported or reported not in builtin_hashes():
+            return None
+        schema = get_device_schema(int(gid))
+        if schema is None:
+            return None
+        ours = schema.get_idl_hash() if version == "v1" else schema.get_idl_v2()["schema_hash"]
+        return schema if ours == reported else None
+    except Exception:  # noqa: BLE001 - when in doubt, the host describes its own device
         return None
-    schema = get_device_schema(int(gid))
-    return schema if schema is not None and schema.get_idl_hash() == reported else None
 
 
 @dataclass(frozen=True)
@@ -164,9 +172,9 @@ class HostDynamicV2Proxy:
         if target is None:
             raise RemoteRFReservationError("invalid token or inactive host reservation")
         gid, device = target
-        v2 = getattr(lab_copy(gid, device), "get_idl_v2", None)
-        if callable(v2):
-            schema = v2()
+        local = lab_copy(gid, device, version="v2")
+        if local is not None:
+            schema = local.get_idl_v2()
             return grpc_pb2.GetSchemaResponse(
                 schema_version=SCHEMA_VERSION,
                 schema_json=json.dumps(schema, sort_keys=True, separators=(",", ":")),

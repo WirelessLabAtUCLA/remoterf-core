@@ -20,6 +20,7 @@ one of these hashes, and Global pre-approves them at each release.
 """
 from __future__ import annotations
 
+import functools
 import importlib
 import json
 import sys
@@ -71,6 +72,7 @@ def load() -> list[dict]:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
+@functools.lru_cache(maxsize=1)
 def builtin_hashes() -> frozenset:
     return frozenset(h for row in load() for h in (row["v1"], row["v2"]) if h)
 

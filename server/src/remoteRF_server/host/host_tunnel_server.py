@@ -279,8 +279,9 @@ class HostTunnelRegistry:
         # emitted by the host's capabilities_string() helper, e.g.:
         #   "disable_dds:call0,filter:rw,hardwaregain_chan0:rw,..."
         self._host_device_caps: Dict[str, str] = {}
-        # device_id -> the schema_hash the host reports for its driver (HostMeta.kv).
-        self._host_device_schema: Dict[str, str] = {}
+        # (host_id, device_id, "v1"|"v2") -> the schema hash that host reports
+        # for its driver in this session (HostMeta.kv); cleared at each HELLO.
+        self._host_device_schema: Dict[Tuple[str, str, str], str] = {}
 
         # persistence
         cfg = cfg_dir_from_file(__file__)
@@ -483,6 +484,7 @@ class HostTunnelRegistry:
                 old.close()
 
             self._hosts[host_id] = session
+            self._drop_schema_hashes_locked(host_id)  # this session reports its own
 
             hs = self._host_status.get(host_id) or HostStatus(host_id=host_id)
             hs.online = True
@@ -586,7 +588,7 @@ class HostTunnelRegistry:
                 self._device_infos.pop(did, None)
                 self._device_status.pop(did, None)
                 self._host_device_caps.pop(did, None)
-                self._host_device_schema.pop(did, None)
+            self._drop_schema_hashes_locked(host_id)
             self._host_devices.pop(host_id, None)
             self._hosts.pop(host_id, None)
             self._host_status.pop(host_id, None)
@@ -626,13 +628,18 @@ class HostTunnelRegistry:
         with self._lock:
             self._host_device_caps[str(device_id)] = str(caps)
 
-    def store_host_device_schema_hash(self, host_id: str, device_id: str, schema_hash: str) -> None:
+    def store_host_device_schema_hash(self, host_id: str, device_id: str, schema_hash: str, *, version: str = "v1") -> None:
         with self._lock:
-            self._host_device_schema[str(device_id)] = str(schema_hash)
+            if device_id in self._host_devices.get(host_id, set()):  # a host speaks only for its own devices
+                self._host_device_schema[(host_id, str(device_id), version)] = str(schema_hash)
 
-    def get_host_device_schema_hash(self, device_id: str) -> str:
+    def get_host_device_schema_hash(self, host_id: str, device_id: str, *, version: str = "v1") -> str:
         with self._lock:
-            return self._host_device_schema.get(str(device_id), "")
+            return self._host_device_schema.get((host_id, str(device_id), version), "")
+
+    def _drop_schema_hashes_locked(self, host_id: str, device_id: Optional[str] = None) -> None:
+        for key in [k for k in self._host_device_schema if k[0] == host_id and device_id in (None, k[1])]:
+            del self._host_device_schema[key]
 
     def get_host_device_caps(self, device_id: str) -> str:
         """
@@ -704,6 +711,7 @@ class HostTunnelRegistry:
             # so a removed device stops listing online and frees its handle.
             if full_snapshot:
                 for did in self._host_devices[host_id] - {device_id for _, device_id in pairs}:
+                    self._drop_schema_hashes_locked(host_id, did)
                     self._routes.pop(did, None)
                     self._device_infos.pop(did, None)
                     self._device_status.pop(did, None)
@@ -1323,8 +1331,9 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                             f"[inbound] stored IDL caps device_id={device_id} "
                                             f"host_id={host_id!r} n_attrs={len(v.split(','))}"
                                         )
-                                    elif len(parts) == 3 and parts[0] == "device" and parts[2] == "schema_hash":
-                                        self.registry.store_host_device_schema_hash(host_id, parts[1], str(v))
+                                    elif len(parts) == 3 and parts[0] == "device" and parts[2] in ("schema_hash", "schema_hash_v2"):
+                                        self.registry.store_host_device_schema_hash(
+                                            host_id, parts[1], str(v), version="v2" if parts[2].endswith("v2") else "v1")
                             except Exception:
                                 exception("[inbound] META_RESPONSE failed reading meta.kv caps")
 

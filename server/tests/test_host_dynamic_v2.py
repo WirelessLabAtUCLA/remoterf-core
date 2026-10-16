@@ -96,7 +96,7 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
             patch(
                 "remoteRF_server.server.host_dynamic_v2.hts.get_tunnel_registry",
                 # A host that reported no schema hash: everything goes to the host.
-                return_value=type("Registry", (), {"get_host_device_schema_hash": lambda self, device_id: ""})(),
+                return_value=type("Registry", (), {"get_host_device_schema_hash": lambda self, host_id, device_id, version="v1": ""})(),
             ),
             patch(
                 "remoteRF_server.server.host_dynamic_v2.hts.handle_host_device",
@@ -226,11 +226,12 @@ class HostLabCopyTests(unittest.TestCase):
 
         self.schema = UsrpSchema()
         self.device = VirtualDevice(gid=7, host_id="lab-host", device_id="7", kind="usrp")
-        self.reported = {"7": self.schema.get_idl_hash()}
+        self.reported = {("7", "v1"): self.schema.get_idl_hash(), ("7", "v2"): self.schema.get_idl_v2()["schema_hash"]}
 
         class Registry:
-            def get_host_device_schema_hash(_self, device_id):
-                return self.reported.get(device_id, "")
+            def get_host_device_schema_hash(_self, host_id, device_id, version="v1"):
+                assert host_id == "lab-host"
+                return self.reported.get((device_id, version), "")
 
         for item in (
             patch("remoteRF_server.server.host_dynamic_v2.hts.get_tunnel_registry", return_value=Registry()),
@@ -245,14 +246,14 @@ class HostLabCopyTests(unittest.TestCase):
         from remoteRF_server.server.host_dynamic_v2 import lab_copy
 
         self.assertIs(lab_copy(7, self.device), self.schema)
-        self.reported["7"] = "sha256:" + "0" * 64  # a custom host driver
+        self.reported[("7", "v1")] = "sha256:" + "0" * 64  # a custom host driver
         self.assertIsNone(lab_copy(7, self.device))
-        self.reported["7"] = ""  # a host that reported nothing yet
+        self.reported[("7", "v1")] = ""  # a host that reported nothing yet
         self.assertIsNone(lab_copy(7, self.device))
 
         from remoteRF_server.drivers.rtl_sdr.rtl_sdr_schema import RtlSdrSchema
 
-        self.reported["7"] = RtlSdrSchema().get_idl_hash()  # built-in, but not the lab's class for this device
+        self.reported[("7", "v1")] = RtlSdrSchema().get_idl_hash()  # built-in, but not the lab's class for this device
         self.assertIsNone(lab_copy(7, self.device))
 
     def test_v2_get_schema_from_the_lab_copy_or_the_host(self):
@@ -262,7 +263,7 @@ class HostLabCopyTests(unittest.TestCase):
             local = proxy.get_schema(grpc_pb2.GetSchemaRequest(token="t", schema_versions=["2.0"]))
             self.assertEqual(local.schema_hash, self.schema.get_idl_v2()["schema_hash"])
             self.assertEqual(forwarded, [])
-            self.reported["7"] = "sha256:" + "0" * 64
+            self.reported[("7", "v2")] = "sha256:" + "0" * 64  # same v1, other v2 manifest: the host answers
             proxy.get_schema(grpc_pb2.GetSchemaRequest(token="t", schema_versions=["2.0"]))
             self.assertEqual(forwarded, ["GetSchema"])
 
@@ -276,7 +277,7 @@ class HostLabCopyTests(unittest.TestCase):
             local = rpc_manager._handle_idl("get_drivers", args)
             self.assertEqual(unmap_arg(local["schema_hash"]), self.schema.get_idl_hash())
             fetch.assert_not_called()
-            self.reported["7"] = "sha256:" + "0" * 64
+            self.reported[("7", "v1")] = "sha256:" + "0" * 64
             self.assertEqual(rpc_manager._handle_idl("get_drivers", args), {"from": map_arg("host")})
 
     def test_registry_keeps_the_reported_hash_until_forget(self):
@@ -286,8 +287,19 @@ class HostLabCopyTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(real_hts, "cfg_dir_from_file", return_value=Path(tmp)):
             registry = real_hts.HostTunnelRegistry()
+            device = lambda gid: real_hts.host_tunnel_pb2.DeviceInfo(device_id=gid, local_id=int(gid))  # noqa: E731
+            registry.register_host("lab-host", real_hts.HostSession("lab-host"))
+            registry.announce_devices("lab-host", [device("7"), device("8")], full_snapshot=True)
+            registry.register_host("other", real_hts.HostSession("other"))
             registry.store_host_device_schema_hash("lab-host", "7", "sha256:abc")
-            self.assertEqual(registry.get_host_device_schema_hash("7"), "sha256:abc")
+            registry.store_host_device_schema_hash("lab-host", "8", "sha256:def")
+            registry.store_host_device_schema_hash("other", "7", "sha256:evil")  # not its device
+            self.assertEqual(registry.get_host_device_schema_hash("lab-host", "7"), "sha256:abc")
+            self.assertEqual(registry.get_host_device_schema_hash("other", "7"), "")
+            registry.announce_devices("lab-host", [device("7")], full_snapshot=True)  # 8 went away
+            self.assertEqual(registry.get_host_device_schema_hash("lab-host", "8"), "")
+            registry.register_host("lab-host", real_hts.HostSession("lab-host"), replace_if_stale_ms=0)  # a new session
+            self.assertEqual(registry.get_host_device_schema_hash("lab-host", "7"), "")
 
 
 if __name__ == "__main__":

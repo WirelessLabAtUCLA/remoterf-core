@@ -518,7 +518,11 @@ class RpcManager:
             if isinstance(dev, VirtualDevice):
                 from .host_dynamic_v2 import lab_copy
 
-                if lab_copy(gid, dev) is None:
+                local = lab_copy(gid, dev)
+                wants_v2 = "schema_versions" in args and "2.0" in list(unmap_arg(args["schema_versions"]) or [])
+                if local is not None and wants_v2 and callable(getattr(local, "get_idl_v2", None)):
+                    local = lab_copy(gid, dev, version="v2")
+                if local is None:
                     return self._fetch_host_idl(gid=gid, dev=dev, args=args)
 
             schema = get_device_schema(gid)
