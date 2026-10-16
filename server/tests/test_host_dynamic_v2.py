@@ -95,7 +95,8 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
             ),
             patch(
                 "remoteRF_server.server.host_dynamic_v2.hts.get_tunnel_registry",
-                return_value=object(),
+                # A host that reported no schema hash: everything goes to the host.
+                return_value=type("Registry", (), {"get_host_device_schema_hash": lambda self, device_id: ""})(),
             ),
             patch(
                 "remoteRF_server.server.host_dynamic_v2.hts.handle_host_device",
@@ -214,6 +215,79 @@ class HostRegistryControlTests(unittest.TestCase):
                 grpc_server._cmd_hosts_wipe(yes=True)
             self.assertFalse(session.alive)
             self.assertEqual(registry.list_hosts(), {})
+
+
+
+class HostLabCopyTests(unittest.TestCase):
+    """Phase 2: a host device on a built-in driver is described by the lab's own copy."""
+
+    def setUp(self):
+        from remoteRF_server.drivers.usrp.usrp_schema import UsrpSchema
+
+        self.schema = UsrpSchema()
+        self.device = VirtualDevice(gid=7, host_id="lab-host", device_id="7", kind="usrp")
+        self.reported = {"7": self.schema.get_idl_hash()}
+
+        class Registry:
+            def get_host_device_schema_hash(_self, device_id):
+                return self.reported.get(device_id, "")
+
+        for item in (
+            patch("remoteRF_server.server.host_dynamic_v2.hts.get_tunnel_registry", return_value=Registry()),
+            patch("remoteRF_server.server.host_dynamic_v2.get_device_schema", side_effect=lambda gid: self.schema),
+            patch("remoteRF_server.server.host_dynamic_v2.resolve_gid_for_token", return_value=7),
+            patch("remoteRF_server.server.host_dynamic_v2.get_device_by_id", return_value=(self.device, "s", "h")),
+        ):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_only_a_built_in_hash_the_lab_also_has(self):
+        from remoteRF_server.server.host_dynamic_v2 import lab_copy
+
+        self.assertIs(lab_copy(7, self.device), self.schema)
+        self.reported["7"] = "sha256:" + "0" * 64  # a custom host driver
+        self.assertIsNone(lab_copy(7, self.device))
+        self.reported["7"] = ""  # a host that reported nothing yet
+        self.assertIsNone(lab_copy(7, self.device))
+
+        from remoteRF_server.drivers.rtl_sdr.rtl_sdr_schema import RtlSdrSchema
+
+        self.reported["7"] = RtlSdrSchema().get_idl_hash()  # built-in, but not the lab's class for this device
+        self.assertIsNone(lab_copy(7, self.device))
+
+    def test_v2_get_schema_from_the_lab_copy_or_the_host(self):
+        forwarded = []
+        proxy = HostDynamicV2Proxy()
+        with patch.object(HostDynamicV2Proxy, "_forward", side_effect=lambda *a, **k: forwarded.append(a[1]) or grpc_pb2.GetSchemaResponse()):
+            local = proxy.get_schema(grpc_pb2.GetSchemaRequest(token="t", schema_versions=["2.0"]))
+            self.assertEqual(local.schema_hash, self.schema.get_idl_v2()["schema_hash"])
+            self.assertEqual(forwarded, [])
+            self.reported["7"] = "sha256:" + "0" * 64
+            proxy.get_schema(grpc_pb2.GetSchemaRequest(token="t", schema_versions=["2.0"]))
+            self.assertEqual(forwarded, ["GetSchema"])
+
+    def test_v1_get_drivers_from_the_lab_copy_or_the_host(self):
+        from remoteRF_server.server.rpc_manager import rpc_manager
+
+        with patch("remoteRF_server.server.rpc_manager.get_device_by_id", return_value=(self.device, "s", "h")), patch(
+            "remoteRF_server.server.rpc_manager.get_device_schema", return_value=self.schema
+        ), patch.object(type(rpc_manager), "_fetch_host_idl", return_value={"from": map_arg("host")}) as fetch:
+            args = {"device_id": map_arg(7)}
+            local = rpc_manager._handle_idl("get_drivers", args)
+            self.assertEqual(unmap_arg(local["schema_hash"]), self.schema.get_idl_hash())
+            fetch.assert_not_called()
+            self.reported["7"] = "sha256:" + "0" * 64
+            self.assertEqual(rpc_manager._handle_idl("get_drivers", args), {"from": map_arg("host")})
+
+    def test_registry_keeps_the_reported_hash_until_forget(self):
+        import tempfile
+        from pathlib import Path
+        from remoteRF_server.host import host_tunnel_server as real_hts
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(real_hts, "cfg_dir_from_file", return_value=Path(tmp)):
+            registry = real_hts.HostTunnelRegistry()
+            registry.store_host_device_schema_hash("lab-host", "7", "sha256:abc")
+            self.assertEqual(registry.get_host_device_schema_hash("7"), "sha256:abc")
 
 
 if __name__ == "__main__":

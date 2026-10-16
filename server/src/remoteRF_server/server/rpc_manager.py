@@ -516,7 +516,10 @@ class RpcManager:
             dev = resolved[0] if resolved is not None else None
 
             if isinstance(dev, VirtualDevice):
-                return self._fetch_host_idl(gid=gid, dev=dev, args=args)
+                from .host_dynamic_v2 import lab_copy
+
+                if lab_copy(gid, dev) is None:
+                    return self._fetch_host_idl(gid=gid, dev=dev, args=args)
 
             schema = get_device_schema(gid)
             if schema is None:

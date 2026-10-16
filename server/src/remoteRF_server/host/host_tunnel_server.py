@@ -279,6 +279,8 @@ class HostTunnelRegistry:
         # emitted by the host's capabilities_string() helper, e.g.:
         #   "disable_dds:call0,filter:rw,hardwaregain_chan0:rw,..."
         self._host_device_caps: Dict[str, str] = {}
+        # device_id -> the schema_hash the host reports for its driver (HostMeta.kv).
+        self._host_device_schema: Dict[str, str] = {}
 
         # persistence
         cfg = cfg_dir_from_file(__file__)
@@ -584,6 +586,7 @@ class HostTunnelRegistry:
                 self._device_infos.pop(did, None)
                 self._device_status.pop(did, None)
                 self._host_device_caps.pop(did, None)
+                self._host_device_schema.pop(did, None)
             self._host_devices.pop(host_id, None)
             self._hosts.pop(host_id, None)
             self._host_status.pop(host_id, None)
@@ -622,6 +625,14 @@ class HostTunnelRegistry:
         """
         with self._lock:
             self._host_device_caps[str(device_id)] = str(caps)
+
+    def store_host_device_schema_hash(self, host_id: str, device_id: str, schema_hash: str) -> None:
+        with self._lock:
+            self._host_device_schema[str(device_id)] = str(schema_hash)
+
+    def get_host_device_schema_hash(self, device_id: str) -> str:
+        with self._lock:
+            return self._host_device_schema.get(str(device_id), "")
 
     def get_host_device_caps(self, device_id: str) -> str:
         """
@@ -1312,6 +1323,8 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                             f"[inbound] stored IDL caps device_id={device_id} "
                                             f"host_id={host_id!r} n_attrs={len(v.split(','))}"
                                         )
+                                    elif len(parts) == 3 and parts[0] == "device" and parts[2] == "schema_hash":
+                                        self.registry.store_host_device_schema_hash(host_id, parts[1], str(v))
                             except Exception:
                                 exception("[inbound] META_RESPONSE failed reading meta.kv caps")
 

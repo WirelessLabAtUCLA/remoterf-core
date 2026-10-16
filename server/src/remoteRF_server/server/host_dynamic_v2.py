@@ -16,15 +16,20 @@
 """Proxy Dynamic v2 protobuf operations to devices owned by a HostRF agent."""
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass
 
+from remoterf_device_core.manifest import builtin_hashes
+
 from ..common.grpc import grpc_pb2
+from ..common.idl.v2 import SCHEMA_VERSION
 from ..common.utils import map_arg, unmap_arg
 from ..host import host_tunnel_server as hts
 from .device_manager import (
     VirtualDevice,
     get_device_by_id,
+    get_device_schema,
     register_reservation_end_callback,
     resolve_gid_for_token,
 )
@@ -33,6 +38,18 @@ from .v2_errors import (
     RemoteRFSessionExpiredError,
     RemoteRFTransportError,
 )
+
+
+def lab_copy(gid: int, device: VirtualDevice):
+    """The lab's own schema for a host device whose driver is a built-in
+    (the host reports a manifest hash this lab's class also has), else None:
+    ask the host, which may run a custom driver."""
+    registry = hts.get_tunnel_registry(create=False)
+    reported = registry.get_host_device_schema_hash(device.device_id) if registry is not None else ""
+    if not reported or reported not in builtin_hashes():
+        return None
+    schema = get_device_schema(int(gid))
+    return schema if schema is not None and schema.get_idl_hash() == reported else None
 
 
 @dataclass(frozen=True)
@@ -146,7 +163,15 @@ class HostDynamicV2Proxy:
         target = self.route_for_token(request.token)
         if target is None:
             raise RemoteRFReservationError("invalid token or inactive host reservation")
-        _, device = target
+        gid, device = target
+        v2 = getattr(lab_copy(gid, device), "get_idl_v2", None)
+        if callable(v2):
+            schema = v2()
+            return grpc_pb2.GetSchemaResponse(
+                schema_version=SCHEMA_VERSION,
+                schema_json=json.dumps(schema, sort_keys=True, separators=(",", ":")),
+                schema_hash=schema["schema_hash"],
+            )
         return self._forward(
             device,
             "GetSchema",
