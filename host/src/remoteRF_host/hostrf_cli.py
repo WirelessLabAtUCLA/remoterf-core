@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Any
 
 from .config.cert_fetcher import fetch_and_save_ca_cert
-from .common.idl.schema import ensure_default_driver_files
+from .common.idl import ensure_default_driver_files
 from .common.utils import device_name_key
 from .common.utils.db_location import get_devices_config_path, get_host_config_dir, get_remoterf_root
 from .drivers.usrp.profiles import inventory_for_profile

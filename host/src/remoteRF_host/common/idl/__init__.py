@@ -15,7 +15,6 @@
 
 from .schema import (
     DeviceSchema,
-    ensure_default_driver_files,
     get_driver_class,
     idl_client,
     idl_client_ctor,
@@ -29,10 +28,9 @@ from .schema import (
     idl_client_strict_class,
     idl_expose,
     idl_register,
-    install_server_import_compat,
     list_registered_drivers,
-    load_drivers,
 )
+from .host_drivers import ensure_default_driver_files, install_server_import_compat, load_drivers
 from .v2 import (
     CONTROL_PROTOCOL_VERSION,
     SCHEMA_VERSION as SCHEMA_V2_VERSION,

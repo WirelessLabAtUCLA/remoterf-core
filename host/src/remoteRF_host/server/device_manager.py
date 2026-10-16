@@ -16,15 +16,13 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import re
-import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-from ..common.idl.schema import ensure_default_driver_files, get_driver_class, load_drivers
+from ..common.idl import ensure_default_driver_files, get_driver_class, load_drivers
+from ..common.idl.host_drivers import _packaged_schema_path, _seed_default_driver
 from ..common.utils import get_devices_config_path, get_drivers_dir
 from ..common.utils.host_logging import error, warn
 
@@ -192,97 +190,6 @@ def _connect_from_record(rec: Dict[str, Any]):
     schema = schema_cls()
     schema.bind(raw_dev)
     return (schema, ident, dtype)
-
-
-def _driver_registers_type(path: Path, device_type: str) -> bool:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    pattern = rf"(?:idl_register|register_driver)\(\s*['\"]{re.escape(device_type)}['\"]\s*\)"
-    return re.search(pattern, text) is not None
-
-
-def _driver_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _driver_normalized_sha256(path: Path) -> str:
-    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _managed_driver_marker(target: Path) -> Path:
-    return target.with_name(f".{target.name}.remoterf-managed")
-
-
-def _seed_default_driver(
-    filename: str,
-    device_type: str,
-    source: Path,
-    *,
-    legacy_hashes: tuple[str, ...] = (),
-) -> None:
-    """Install/refresh one packaged schema without replacing custom drivers."""
-    drivers_dir = get_drivers_dir()
-    drivers_dir.mkdir(parents=True, exist_ok=True)
-    target = drivers_dir / filename
-
-    if target.exists() or target.is_symlink():
-        marker = _managed_driver_marker(target)
-        try:
-            target_hash = _driver_sha256(target)
-            marker_hash = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
-            normalized_hash = _driver_normalized_sha256(target)
-            if (
-                target_hash != marker_hash
-                and normalized_hash != marker_hash
-                and target_hash not in legacy_hashes
-            ):
-                return
-            source_hash = _driver_sha256(source)
-            if target_hash != source_hash:
-                shutil.copy2(source, target)
-            marker.write_text(source_hash + "\n", encoding="utf-8")
-        except OSError as exc:
-            warn(f"Could not refresh managed USRP schema: {exc}", component="hostrf.device_manager")
-        return
-
-    for driver_file in drivers_dir.glob("*.py"):
-        if _driver_registers_type(driver_file, device_type):
-            return
-
-    if not source.is_file():
-        warn(
-            f"Packaged {device_type} schema is missing: {source}",
-            component="hostrf.device_manager",
-        )
-        return
-
-    try:
-        shutil.copy2(source, target)
-        _managed_driver_marker(target).write_text(
-            _driver_sha256(source) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        warn(
-            f"Could not install default {device_type} schema: {exc}",
-            component="hostrf.device_manager",
-        )
-
-
-def _packaged_schema_path(driver_dir: str, filename: str) -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / "drivers"
-        / driver_dir
-        / filename
-    )
 
 
 def _seed_default_usrp_driver() -> None:
