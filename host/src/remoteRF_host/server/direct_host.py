@@ -47,6 +47,9 @@ MAX_STREAMS_PER_PATH = 8
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_RELAY_HELLO_BYTES = 64 * 1024
 RELAY_SESSION_SECONDS = 60
+RELAY_HELLO_SECONDS = 5
+RELAY_IDLE_SECONDS = 300
+MAX_UNAUTHENTICATED_RELAY_CONNECTIONS = 16
 GRANT_ENDED = "the reservation's grant has ended"
 
 
@@ -62,11 +65,19 @@ def available() -> bool:
 
 
 class DirectHost:
-    def __init__(self, *, host_id: str, key_path: Path, run_call: Callable):
+    def __init__(
+        self, *, host_id: str, key_path: Path, run_call: Callable,
+        clock: Callable[[], float] = time.time,
+        relay_hello_seconds: float = RELAY_HELLO_SECONDS,
+        relay_idle_seconds: float = RELAY_IDLE_SECONDS,
+    ):
         self.host_id = host_id
         self.key_path = Path(key_path)
         self.cert_path = self.key_path.with_suffix(".crt")
         self.run_call = run_call  # (gid, GenericRPCRequest) -> {name: Argument}
+        self._clock = clock
+        self._relay_hello_seconds = relay_hello_seconds
+        self._relay_idle_seconds = relay_idle_seconds
         self._lock = threading.Lock()
         self._lab: dict = {}  # deployment_id, server_name, ca_pem, key (Ed25519PublicKey)
         self._grants: dict[int, dict] = {}  # gid -> claims of its newest grant
@@ -78,6 +89,8 @@ class DirectHost:
         self._relay_sessions: dict[str, tuple[int, str, float]] = {}
         self._relay_server = None
         self._relay_port: Optional[int] = None
+        self._relay_cert_mtime_ns: Optional[int] = None
+        self._relay_unauthenticated = 0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -- identity --------------------------------------------------------
@@ -111,6 +124,7 @@ class DirectHost:
         key = serialization.load_pem_public_key(str(info["grant_key"]).encode())
         self.cert_path.parent.mkdir(parents=True, exist_ok=True)
         self.cert_path.write_text(str(info["cert_pem"]))
+        self._relay_cert_mtime_ns = None
         with self._lock:
             self._lab = {
                 "deployment_id": str(info["deployment_id"]),
@@ -118,6 +132,14 @@ class DirectHost:
                 "ca_pem": str(info["ca_pem"]),
                 "key": key,
             }
+        if self._loop is not None:
+            coroutine = self._refresh_relay_context()
+            try:
+                future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+            except Exception:
+                coroutine.close()
+            else:
+                future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
 
     # -- grants ----------------------------------------------------------
 
@@ -259,30 +281,55 @@ class DirectHost:
     def issue_relay_session(self, gid: int) -> str:
         """Make a one-use, short-lived relay secret for this device's grant."""
         with self._lock:
+            now = self._clock()
+            for token, entry in list(self._relay_sessions.items()):
+                if entry[2] <= now:
+                    self._relay_sessions.pop(token, None)
             claims = self._grants.get(int(gid))
             if (
                 claims is None
-                or claims["exp"] <= time.time()
+                or claims["exp"] <= now
                 or claims["jti"] in self._revoked
             ):
                 raise PermissionError(GRANT_ENDED)
             session = secrets.token_urlsafe(24)
-            self._relay_sessions[session] = (int(gid), claims["rid"], time.time() + RELAY_SESSION_SECONDS)
+            self._relay_sessions[session] = (int(gid), claims["rid"], now + RELAY_SESSION_SECONDS)
             return session
 
     async def _start_relay(self) -> int:
         if self._relay_server is not None:
+            if self._relay_cert_changed():
+                await self._refresh_relay_context()
             return int(self._relay_port)
         if not self.cert_path.exists() or not self.key_path.exists():
             raise RuntimeError("the host TLS certificate is not configured")
+        await self._listen_relay(0)
+        return int(self._relay_port)
+
+    def _relay_cert_changed(self) -> bool:
+        try:
+            return self._relay_cert_mtime_ns != self.cert_path.stat().st_mtime_ns
+        except OSError:
+            return False
+
+    async def _listen_relay(self, port: int) -> None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(self.cert_path, self.key_path)
         context.set_alpn_protocols(["remoterf-direct/1"])
         self._relay_server = await asyncio.start_server(
-            self._relay_connection, "127.0.0.1", 0, ssl=context,
+            self._relay_connection, "127.0.0.1", port, ssl=context,
         )
         self._relay_port = int(self._relay_server.sockets[0].getsockname()[1])
-        return self._relay_port
+        self._relay_cert_mtime_ns = self.cert_path.stat().st_mtime_ns
+
+    async def _refresh_relay_context(self) -> None:
+        if self._relay_server is None or not self._relay_cert_changed():
+            return
+        port = int(self._relay_port)
+        self._relay_server.close()
+        await self._relay_server.wait_closed()
+        self._relay_server = None
+        await self._listen_relay(port)
 
     async def _stop_relay(self) -> None:
         server, self._relay_server = self._relay_server, None
@@ -293,27 +340,41 @@ class DirectHost:
 
     async def _relay_connection(self, reader, writer) -> None:
         path = None
+        unauthenticated = False
+        if self._relay_unauthenticated >= MAX_UNAUTHENTICATED_RELAY_CONNECTIONS:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            return
+        self._relay_unauthenticated += 1
+        unauthenticated = True
         try:
-            hello = json.loads((await self._read_frame(reader, MAX_RELAY_HELLO_BYTES)).decode())
+            hello = json.loads((await asyncio.wait_for(
+                self._read_frame(reader, MAX_RELAY_HELLO_BYTES), self._relay_hello_seconds,
+            )).decode())
             if not isinstance(hello, dict) or not isinstance(hello.get("session"), str):
                 raise ValueError("invalid relay session")
             with self._lock:
                 session = self._relay_sessions.pop(hello["session"], None)
-            if session is None or session[2] <= time.time() or not self._grant_is_current(session[0], session[1]):
+            if session is None or session[2] <= self._clock() or not self._grant_is_current(session[0], session[1]):
                 raise ValueError("invalid relay session")
+            self._relay_unauthenticated -= 1
+            unauthenticated = False
             path = _RelayPath(self, session[0], session[1], writer)
             self._paths.setdefault(path.gid, []).append(path)
             writer.write(self._frame(json.dumps({"ok": True}).encode()))
             await writer.drain()
             while True:
-                raw = await self._read_frame(reader, MAX_REQUEST_BYTES)
+                raw = await asyncio.wait_for(
+                    self._read_frame(reader, MAX_REQUEST_BYTES), self._relay_idle_seconds,
+                )
                 request = grpc_pb2.GenericRPCRequest.FromString(raw)
                 results, drop = await self._serve_call(path.gid, path.rid, request)
                 writer.write(self._frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
                 await writer.drain()
                 if drop:
                     break
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError):
             pass
         except Exception as exc:  # invalid hello has a small, useful response; bad RPC framing closes
             if path is None:
@@ -321,6 +382,8 @@ class DirectHost:
                     writer.write(self._frame(json.dumps({"a": str(exc)}).encode()))
                     await writer.drain()
         finally:
+            if unauthenticated:
+                self._relay_unauthenticated -= 1
             if path is not None:
                 await path.close()
             writer.close()

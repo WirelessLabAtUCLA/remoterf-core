@@ -181,6 +181,102 @@ class DirectHostGrantTests(unittest.TestCase):
         self.assertIn("invalid relay session", json.loads(writer.writes[0][4:].decode())["a"])
         self.assertNotIn(expired, self.host._relay_sessions)
 
+    def test_issuing_a_relay_session_prunes_expired_entries(self):
+        now = [100.0]
+        self.host._clock = lambda: now[0]
+        self.host.refresh(7, self._token(jti="relay-prune"))
+        self.host._relay_sessions["expired"] = (7, "reservation-1", 99.0)
+        self.host._relay_sessions["live"] = (7, "reservation-1", 101.0)
+        self.host.issue_relay_session(7)
+        self.assertNotIn("expired", self.host._relay_sessions)
+        self.assertIn("live", self.host._relay_sessions)
+
+    def test_relay_hello_deadline_and_connection_limit(self):
+        class Reader:
+            async def readexactly(self, size):
+                await asyncio.Event().wait()
+
+        class Writer:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                pass
+
+        self.host._relay_hello_seconds = 0.001
+        writer = Writer()
+        asyncio.run(self.host._relay_connection(Reader(), writer))
+        self.assertTrue(writer.closed)
+        self.assertEqual(self.host._relay_unauthenticated, 0)
+
+        self.host._relay_unauthenticated = direct_host.MAX_UNAUTHENTICATED_RELAY_CONNECTIONS
+        writer = Writer()
+        asyncio.run(self.host._relay_connection(Reader(), writer))
+        self.assertTrue(writer.closed)
+
+    def test_authenticated_relay_connection_has_an_idle_deadline(self):
+        class Reader:
+            def __init__(self, value):
+                self.parts = [len(value).to_bytes(4, "big"), value]
+
+            async def readexactly(self, size):
+                if self.parts:
+                    return self.parts.pop(0)
+                await asyncio.Event().wait()
+
+        class Writer:
+            def __init__(self):
+                self.writes = []
+                self.closed = False
+
+            def write(self, value):
+                self.writes.append(value)
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                pass
+
+        self.host.refresh(7, self._token(jti="relay-idle"))
+        self.host._relay_idle_seconds = 0.001
+        session = self.host.issue_relay_session(7)
+        writer = Writer()
+        asyncio.run(self.host._relay_connection(Reader(json.dumps({"session": session}).encode()), writer))
+        self.assertEqual(json.loads(writer.writes[0][4:].decode()), {"ok": True})
+        self.assertTrue(writer.closed)
+
+    def test_relay_context_is_rebuilt_after_a_certificate_change(self):
+        class Server:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                pass
+
+        server = Server()
+        self.host._relay_server = server
+        self.host._relay_port = 50123
+
+        async def run():
+            with mock.patch.object(self.host, "_relay_cert_changed", return_value=True), mock.patch.object(
+                self.host, "_listen_relay", new_callable=mock.AsyncMock,
+            ) as listen:
+                await self.host._refresh_relay_context()
+                listen.assert_awaited_once_with(50123)
+
+        asyncio.run(run())
+        self.assertTrue(server.closed)
+
     def test_close_is_scheduled_without_waiting(self):
         class Future:
             def add_done_callback(self, callback):
@@ -473,6 +569,24 @@ class TunnelDirectControlTests(unittest.TestCase):
             agent._handle_control(pb.Control(kind="reservation_end", device_id="7"))
         self.assertEqual(direct.ended, (7, None))
 
+    def test_direct_offer_serializes_relay_inside_answer(self):
+        from remoteRF_host.common.grpc import grpc_host_pb2 as pb
+
+        class Direct:
+            def offer(self, gid, ice, grant):
+                return {"ufrag": "u"}
+
+            def issue_relay_session(self, gid):
+                return "relay-session"
+
+        agent = self._agent(Direct())
+        agent._relay_supervisor = mock.Mock(is_up=lambda: True)
+        agent._handle_control(pb.Control(
+            kind="direct_offer", device_id="7", req_id="one", payload=json.dumps({"ice": "{}", "grant": "ok"}),
+        ))
+        answer = agent._out_q.get(timeout=2).control
+        self.assertEqual(answer.payload, '{"answer": {"ufrag": "u", "relay": {"session": "relay-session"}}}')
+
     def test_reservation_end_forwards_lab_timestamp(self):
         from remoteRF_host.common.grpc import grpc_host_pb2 as pb
 
@@ -644,9 +758,17 @@ class TunnelDirectControlTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((Path(directory) / "relay_ed25519").stat().st_mode), 0o600)
             hello = agent._hello_frame().hello
             self.assertEqual(hello.capabilities, ["direct", "relay"])
-            self.assertTrue(hello.relay_ssh_public_key.startswith("ssh-ed25519 "))
+            self.assertEqual(hello.relay_ssh_public_key, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest")
 
             unavailable = make_agent()
             with mock.patch("remoteRF_host.server.tunnel_agent.shutil.which", return_value=None):
                 unavailable._setup_relay()
             self.assertEqual(unavailable._hello_frame().hello.capabilities, ["direct"])
+
+            disabled = make_agent()
+            with mock.patch.dict(os.environ, {"HOSTRF_RELAY": "0"}), mock.patch(
+                "remoteRF_host.server.tunnel_agent.shutil.which",
+            ) as which:
+                disabled._setup_relay()
+            which.assert_not_called()
+            self.assertEqual(disabled._hello_frame().hello.capabilities, ["direct"])

@@ -60,6 +60,7 @@ from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
 from ..config.cert_fetcher import normalize_sha256, pin_ca
 
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
+_RELAY_PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]+={0,3}")
 
 
 # -------------------------
@@ -561,6 +562,13 @@ class HostTunnelAgent:
     def _setup_relay(self) -> None:
         direct = getattr(self, "_direct_host", None)
         fields = host_pb2.HostHello.DESCRIPTOR.fields_by_name
+        if os.getenv("HOSTRF_RELAY") == "0":
+            relay = getattr(self, "_relay_supervisor", None)
+            if relay is not None:
+                relay.stop()
+            self._relay_public_key = ""
+            self._relay_supervisor = None
+            return
         if (
             direct is None
             or "relay_ssh_public_key" not in fields
@@ -585,7 +593,8 @@ class HostTunnelAgent:
                     ["ssh-keygen", "-y", "-f", str(key_path)], text=True,
                 ).strip()
             parts = public_key.split()
-            if len(parts) < 2 or parts[0] != "ssh-ed25519":
+            public_key = " ".join(parts[:2])
+            if re.fullmatch(_RELAY_PUBLIC_KEY, public_key) is None:
                 raise ValueError("relay key is not an ssh-ed25519 public key")
             self._relay_public_key = public_key
             if getattr(self, "_relay_supervisor", None) is None:
@@ -943,7 +952,7 @@ class HostTunnelAgent:
             response = {"answer": answer}
             relay = getattr(self, "_relay_supervisor", None)
             if relay is not None and relay.is_up():
-                response["relay"] = {"session": direct.issue_relay_session(int(str(ctl.device_id)))}
+                answer["relay"] = {"session": direct.issue_relay_session(int(str(ctl.device_id)))}
         except Exception as exc:
             response = {"error": str(exc)}
         queued = self._enqueue(host_pb2.HostFrame(control=host_pb2.Control(
