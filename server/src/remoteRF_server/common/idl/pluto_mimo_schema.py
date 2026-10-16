@@ -13,9 +13,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# Built-in import shim for the packaged ADALM Pluto MIMO schema.
+"""Lives in remoterf-device-core (remoterf_device_core.drivers.adalm_pluto.pluto_mimo_schema); this name stays importable."""
+import importlib
+import sys
 
-from remoteRF_server.drivers.adalm_pluto.pluto_mimo_schema import (  # noqa: F401
-    PlutoMIMOSchema,
-    connect_pluto_mimo,
-)
+sys.modules[__name__] = importlib.import_module("remoterf_device_core.drivers.adalm_pluto.pluto_mimo_schema")

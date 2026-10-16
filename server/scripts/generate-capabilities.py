@@ -5,7 +5,8 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 proto = root / "src/remoteRF_server/common/grpc"
-subprocess.run([sys.executable, "-m", "grpc_tools.protoc", f"-I{proto}",
+core = root / "packages/remoterf-device-core/src/remoterf_device_core/grpc"  # grpc.proto
+subprocess.run([sys.executable, "-m", "grpc_tools.protoc", f"-I{proto}", f"-I{core}",
                 f"--python_out={proto}", f"--grpc_python_out={proto}",
                 str(proto / "deployment_capabilities.proto")], check=True)
 for name in ("deployment_capabilities_pb2.py", "deployment_capabilities_pb2_grpc.py"):

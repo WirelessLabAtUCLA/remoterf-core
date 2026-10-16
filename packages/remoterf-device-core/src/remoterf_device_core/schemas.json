@@ -1,0 +1,44 @@
+[
+ {
+  "device_type": "adalm_pluto",
+  "driver_version": "0.0.4",
+  "v1": "sha256:9cbbbbc0cd76fc7897dd702adc0c4a0aa9b5042484c6cb38d0057ca217cb92ce",
+  "v2": null
+ },
+ {
+  "device_type": "adalm_pluto_mimo",
+  "driver_version": "0.0.2",
+  "v1": "sha256:cff95f07bbfeeff5ac1f02e0c6564f262ec9c69bbbb31efc104b4a14959d772a",
+  "v2": null
+ },
+ {
+  "device_type": "hackrf",
+  "driver_version": "0.1.2",
+  "v1": "sha256:8140489d7ca985b8aed3a5c3be96622dffd9210517be73625fc9a61834735d4f",
+  "v2": null
+ },
+ {
+  "device_type": "rtl_sdr",
+  "driver_version": "0.1.1",
+  "v1": "sha256:6603ec8e642c87073c35202980de9a3d9e4bb6eb88967686d3810c389fb4fb97",
+  "v2": null
+ },
+ {
+  "device_type": "ti_mmwave",
+  "driver_version": "0.1.0",
+  "v1": "sha256:320a89d95075a472d7899ff2f98b9fdee05c0be96fa5651bf5c4f0e5d276a1c4",
+  "v2": null
+ },
+ {
+  "device_type": "usrp",
+  "driver_version": "0.0.7",
+  "v1": "sha256:344c8be1a727c32a50ea7691e72e9d78f9d10cf3baece31c4d5c83df3f3d45bf",
+  "v2": "sha256:69159a5e174635038b732093f12b78f412c422e281bf2855935f8d121f8c7144"
+ },
+ {
+  "device_type": "usrp_phaser",
+  "driver_version": "0.1.0",
+  "v1": "sha256:a9f6771afe0421c2339c26440e63282dd85f9997f8f777fc56b1b6cf6dda65f0",
+  "v2": "sha256:95ef16ed451ac9c97182f79d4a0c0b4fc7d97605c8e065dba6639ac7265d2b26"
+ }
+]

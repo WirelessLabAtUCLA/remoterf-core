@@ -7,7 +7,7 @@ from remoteRF_server.common.grpc import federation_pb2
 def test_federation_proto_source_hash_and_descriptor_are_canonical():
     root = Path(__file__).resolve().parents[1]
     proto = root / "src/remoteRF_server/common/grpc/federation.proto"
-    protected = root / "src/remoteRF_server/common/grpc/grpc.proto"
+    protected = root / "packages/remoterf-device-core/src/remoterf_device_core/grpc/grpc.proto"
     assert hashlib.sha256(proto.read_bytes()).hexdigest() == (
         "e890c399b61e8eb92e67762661c0ce99f3daacdb06b0139b34f26a749ff736c1"
     )

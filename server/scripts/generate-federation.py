@@ -6,12 +6,13 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 proto = root / "src/remoteRF_server/common/grpc"
+core = root / "packages/remoterf-device-core/src/remoterf_device_core/grpc"  # grpc.proto
 subprocess.run(
     [
         sys.executable,
         "-m",
         "grpc_tools.protoc",
-        f"-I{proto}",
+        f"-I{proto}", f"-I{core}",
         f"--python_out={proto}",
         f"--grpc_python_out={proto}",
         str(proto / "federation.proto"),

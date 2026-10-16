@@ -36,7 +36,8 @@ class CapabilityTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         path='src/remoteRF_server/common/grpc/grpc.proto'
         base=subprocess.check_output(['git','show','1452ad042782c659a2891e84e8d72f9d1ba3d9a1:'+path],cwd=root)
-        self.assertEqual(base,(root/path).read_bytes())
+        core=root/'packages/remoterf-device-core/src/remoterf_device_core/grpc/grpc.proto'  # moved here, same bytes
+        self.assertEqual(base,core.read_bytes())
         fields=pb.DeploymentCapabilitiesResponse.DESCRIPTOR.fields_by_name
         self.assertEqual(fields['capabilities_json'].number,1)
         self.assertEqual(fields['error'].number,2)

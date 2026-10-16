@@ -25,7 +25,6 @@ kept under `<drivers folder>/registry/`, where the Server never loads it.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -38,9 +37,9 @@ _NEEDS_GLOBAL = "The schema registry is part of RemoteRF Global: put this lab on
 
 def digest(schema: dict) -> str:
     """A schema's hash as a Server computes it (DeviceSchema.get_idl, idl.v2)."""
-    body = {key: value for key, value in schema.items() if key != "schema_hash"}
-    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    from remoterf_device_core.digest import schema_digest
+
+    return schema_digest({key: value for key, value in schema.items() if key != "schema_hash"})
 
 
 def registry_dir() -> Path:

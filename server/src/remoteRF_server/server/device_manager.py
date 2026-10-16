@@ -478,7 +478,9 @@ def _init_from_env() -> None:
 # Load built-in drivers, then any user-supplied drivers from the config dir.
 # Importing the module triggers @idl_register, which adds the class to the registry.
 def _packaged_driver_schema_path(filename: str) -> Path:
-    drivers_root = Path(__file__).resolve().parents[1] / "drivers"
+    import remoterf_device_core.drivers as core_drivers
+
+    drivers_root = Path(core_drivers.__file__).resolve().parent
     direct = drivers_root / filename
     if direct.exists():
         return direct
