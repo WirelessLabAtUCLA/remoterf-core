@@ -358,6 +358,29 @@ def test_a_device_made_invisible_refuses_get_drivers_and_closes(federated):
     asyncio.run(run())
 
 
+def test_a_global_account_linked_here_keeps_its_path_without_a_principal(federated):
+    # A Global account with a login at this lab has no active proxy row: it acts as the linked account.
+    fed = federated
+    from remoteRF_server.server.federation import links
+
+    async def run():
+        client = Client(fed)
+        try:
+            await client.punch()
+            assert (await client.call("Test:rx:CALL0"))["value"] == 42
+            with sqlite3.connect(fed["dest_db"]) as conn:
+                iss, sub, account = conn.execute(
+                    "SELECT issuer_deployment_id, remote_subject_id, local_account_id FROM FederatedPrincipals").fetchone()
+                conn.execute(links.SCHEMA)
+                conn.execute("INSERT INTO GlobalAccountLinks VALUES (?, ?, ?, 'jdoe', 0)", (account, iss, sub))
+                conn.execute("DELETE FROM FederatedPrincipals")  # linked accounts have no proxy row
+            assert (await client.call("Test:rx:CALL0"))["value"] == 42
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_superseded_contract_closes_the_path(federated):
     fed = federated
 

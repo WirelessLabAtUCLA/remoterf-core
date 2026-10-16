@@ -119,6 +119,8 @@ def path_authorizer(*, reservations, usergroups_path, claims, reservation_id, de
                     "WHERE issuer_deployment_id=? AND remote_subject_id=?",
                     (issuer, subject),
                 ).fetchone()
+                # A Global account with a login here acts as that account (as _principal does).
+                linked = links.account_for(conn, issuer, subject)
             try:
                 terms = ServerFederationExecutor._terms(row) if row is not None else None
             except Exception:  # noqa: BLE001 - unreadable terms are no authority
@@ -128,9 +130,12 @@ def path_authorizer(*, reservations, usergroups_path, claims, reservation_id, de
                 superseded=row["superseded_by_version"] is not None,
             ):
                 return "the agreement with your home deployment is no longer active"
-            if principal is None or principal["status"] != "active":
+            if linked is not None:
+                account_id = linked
+            elif principal is None or principal["status"] != "active":
                 return "your account at this deployment is disabled"
-            account_id = int(principal["local_account_id"])
+            else:
+                account_id = int(principal["local_account_id"])
         if function_name == IDL_FUNCTION and account_id is not None:
             visible = {
                 int(entry["local_device_id"])
