@@ -460,3 +460,41 @@ def test_offer_uses_short_wait_cooldown_and_inflight_cap(monkeypatch):
     release.set()
     for worker in workers:
         worker.join(1)
+
+
+def test_offer_resends_lab_info_a_host_missed_and_retries_once(monkeypatch):
+    host_direct._offer_cooldowns.clear()
+    session = hts.HostSession("host-a", capabilities={"direct"}, tls_public_key="key")
+    session.direct_ready = False  # lab_info never confirmed for this session
+    asks, sent = [], []
+
+    class Registry:
+        def session_for_host(self, _host_id):
+            return session
+
+        def request_control(self, *args, **kwargs):
+            asks.append(1)
+            if len(asks) == 1:
+                return {"error": "this host has no lab grant key yet"}  # it lost it on a reconnect
+            return {"answer": {"ufrag": "u", "pwd": "p", "candidates": []}}
+
+    registry = Registry()
+
+    def resend(_registry, _session):
+        sent.append(1)
+        session.direct_ready = True
+        session.direct_lab_info = {"server_name": "lab-host--lab.global.remoterf.net", "ca_pem": "ca"}
+        session.direct_lab_info_issued_at = host_direct.time.time()
+        return True
+
+    monkeypatch.setattr(hts, "get_tunnel_registry", lambda create=False: registry)
+    monkeypatch.setattr(hts, "_send_lab_info", resend)
+    monkeypatch.setattr(host_direct, "issue_grant", lambda *args: "grant")
+    monkeypatch.setattr(host_direct, "_start_refresher", lambda *args: None)
+
+    answer = host_direct.offer(
+        VirtualDevice(gid=7, host_id="host-a", device_id="7"), "{}",
+        rid="reservation-9", reservation_end=2000, still_live=lambda: True,
+    )
+    assert sent == [1, 1] and len(asks) == 2
+    assert answer["server_name"] == "lab-host--lab.global.remoterf.net"

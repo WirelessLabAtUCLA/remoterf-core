@@ -268,10 +268,9 @@ def offer(device, ice: str, *, rid: str, reservation_end: float, still_live) -> 
     if registry is None:
         return None
     session = registry.session_for_host(host_id)
-    if (
-        session is None or not session.alive or "direct" not in session.capabilities
-        or not session.tls_public_key or not session.direct_ready
-    ):
+    if session is None or not session.alive or "direct" not in session.capabilities or not session.tls_public_key:
+        return None
+    if not session.direct_ready and not hts._send_lab_info(registry, session):
         return None
     issued_at = getattr(session, "direct_lab_info_issued_at", None)
     if issued_at is not None and time.time() - issued_at > _LAB_INFO_MAX_AGE_SECONDS:
@@ -284,10 +283,17 @@ def offer(device, ice: str, *, rid: str, reservation_end: float, still_live) -> 
         return None
     failed = False
     try:
-        response = registry.request_control(
-            host_id, kind="direct_offer", device_id=str(gid), timeout=_OFFER_TIMEOUT_SECONDS,
-            payload={"ice": ice, "grant": issue_grant(host_id, gid, rid, reservation_end)},
-        )
+        def ask():
+            return registry.request_control(
+                host_id, kind="direct_offer", device_id=str(gid), timeout=_OFFER_TIMEOUT_SECONDS,
+                payload={"ice": ice, "grant": issue_grant(host_id, gid, rid, reservation_end)},
+            )
+
+        response = ask()
+        # A host that reconnected while this lab was starting may have missed lab_info.
+        if isinstance(response, dict) and "no lab grant key" in str(response.get("error", "")):
+            if hts._send_lab_info(registry, session):
+                response = ask()
     except Exception as exc:
         logger.warning("host direct offer unavailable for %s: %s", host_id, exc)
         failed = True
