@@ -671,8 +671,8 @@ class HostTunnelAgent:
         if gid not in self._devices or not callable(end_reservation):
             warn(f"reservation_end for unknown gid={gid}", component="hostrf.tunnel_agent")
             return
-        info(f"Reservation ended for gid={gid}: closing its sessions and resetting it.", component="hostrf.tunnel_agent")
         end_reservation(gid)
+        status(f"Reservation ended on device {gid}: sessions closed, device reset.", component="hostrf")
 
     # -------- rpc execution --------
 
