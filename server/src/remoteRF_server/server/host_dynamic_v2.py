@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass
 
 from remoterf_device_core.manifest import builtin_hashes
@@ -300,7 +301,10 @@ def _end_host_reservation(gid: int) -> None:
     device = HostDynamicV2Proxy._virtual_for_gid(gid)
     registry = hts.get_tunnel_registry(create=False)
     if device is not None and registry is not None:
-        registry.send_control(device.host_id, kind="reservation_end", device_id=device.device_id)
+        registry.send_control(
+            device.host_id, kind="reservation_end", device_id=device.device_id,
+            payload={"at": time.time()},
+        )
     host_session_proxy.close_gid(gid)
 
 

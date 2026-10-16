@@ -618,7 +618,7 @@ class ServerDirectOpenHandler(_DeviceHandlerBase):
                 from .. import host_direct
 
                 answer = host_direct.offer(
-                    device, payload["ice"], reservation_end=live["end_time"],
+                    device, payload["ice"], rid=str(reservation_id), reservation_end=live["end_time"],
                     still_live=lambda: authorize("get_time_now") is None,
                 )
                 if answer is not None:

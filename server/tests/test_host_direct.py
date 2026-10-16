@@ -78,12 +78,16 @@ def test_lab_info_and_grant_use_lab_identity(tmp_path, monkeypatch):
     ca.public_key().verify(
         cert.signature, cert.tbs_certificate_bytes, padding.PKCS1v15(), cert.signature_hash_algorithm,
     )
+    assert cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "RemoteRF host"
 
     monkeypatch.setattr(host_direct.time, "time", lambda: 1000.25)
-    claims = verify_eddsa_jwt(host_direct.issue_grant("lab-host", 7, 5000), load_private_key(identity_dir).public_key())
+    claims = verify_eddsa_jwt(
+        host_direct.issue_grant("lab-host", 7, "reservation-9", 5000),
+        load_private_key(identity_dir).public_key(),
+    )
     assert claims == {
-        "iss": "deployment-1", "aud": "lab-host", "gid": 7, "jti": claims["jti"],
-        "iat": 1000.25, "exp": 1600,
+        "iss": "deployment-1", "aud": "lab-host", "gid": 7, "rid": "reservation-9", "jti": claims["jti"],
+        "iat": 1000.25, "exp": 1120,
     }
     assert len(claims["jti"]) == 32
 
@@ -96,6 +100,14 @@ def test_lab_info_skips_unenrolled_or_missing_direct_capability(tmp_path, monkey
     session = hts.HostSession("lab-host", tls_public_key="a key")
     assert not hts._send_lab_info(registry, session)
     assert session.out_q.empty()
+
+
+def test_lab_info_skips_invalid_direct_dns_names(tmp_path, monkeypatch):
+    identity_dir, _ = _enrolled(tmp_path, monkeypatch)
+    assert host_direct.lab_info("x" * 61, "not a key") is None
+    assert host_direct.lab_info("host--part", "not a key") is None
+    save_state(identity_dir, DeploymentState(deployment_id="deployment-1", slug="part--two"))
+    assert host_direct.lab_info("host-a", "not a key") is None
 
 
 def test_control_waiter_resolves_and_close_fails(tmp_path, monkeypatch):
@@ -126,6 +138,7 @@ def test_control_waiter_resolves_and_close_fails(tmp_path, monkeypatch):
 def test_offer_times_out_to_the_lab_fallback(monkeypatch):
     session = hts.HostSession("lab-host", capabilities={"direct"}, tls_public_key="key")
     session.direct_ready = True
+    session.direct_lab_info = {"server_name": "host.global.remoterf.net", "ca_pem": "ca"}
 
     class Registry:
         def session_for_host(self, host_id):
@@ -138,5 +151,177 @@ def test_offer_times_out_to_the_lab_fallback(monkeypatch):
     monkeypatch.setattr(host_direct, "issue_grant", lambda *args: "grant")
     assert host_direct.offer(
         VirtualDevice(gid=7, host_id="lab-host", device_id="7"), "{}",
-        reservation_end=2000, still_live=lambda: True,
+        rid="reservation-9", reservation_end=2000, still_live=lambda: True,
     ) is None
+
+
+def test_refresher_retries_then_revokes_when_reservation_ends(monkeypatch):
+    scheduled = []
+    sent = []
+    liveness = iter((True, True, False))
+
+    class Timer:
+        def __init__(self, _seconds, function):
+            self.function = function
+            self.daemon = False
+            scheduled.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    class Registry:
+        def send_control(self, _host_id, *, kind, device_id, payload):
+            sent.append((kind, device_id, payload))
+            return kind != "grant" or len([item for item in sent if item[0] == "grant"]) > 1
+
+    monkeypatch.setattr(host_direct.threading, "Timer", Timer)
+    monkeypatch.setattr(hts, "get_tunnel_registry", lambda create=False: Registry())
+    monkeypatch.setattr(host_direct, "issue_grant", lambda *args: "grant")
+    monkeypatch.setattr(host_direct.time, "time", lambda: 1000)
+    host_direct._start_refresher("host-a", 7, "reservation-9", 2000, lambda: next(liveness), object())
+    scheduled.pop(0).function()
+    scheduled.pop(0).function()
+    scheduled.pop(0).function()
+
+    assert sent == [
+        ("grant", "7", {"grant": "grant"}),
+        ("grant", "7", {"grant": "grant"}),
+        ("revoke", "7", {"rid": "reservation-9", "at": 1000}),
+    ]
+    assert ("host-a", 7) not in host_direct._refreshers
+
+
+def test_offer_pins_and_validates_host_answer(monkeypatch):
+    host_direct._offer_cooldowns.clear()
+    session = hts.HostSession("host-a", capabilities={"direct"}, tls_public_key="key")
+    session.direct_ready = True
+    session.direct_lab_info = {"server_name": "host-a.global.remoterf.net", "ca_pem": "lab-ca"}
+
+    class Registry:
+        response = {"answer": {"ufrag": "u", "pwd": "p", "candidates": [], "server_name": "wrong", "ca_pem": "wrong"}}
+
+        def session_for_host(self, _host_id):
+            return session
+
+        def request_control(self, *args, **kwargs):
+            return self.response
+
+    registry = Registry()
+    monkeypatch.setattr(hts, "get_tunnel_registry", lambda create=False: registry)
+    monkeypatch.setattr(host_direct, "issue_grant", lambda *args: "grant")
+    monkeypatch.setattr(host_direct, "_start_refresher", lambda *args: None)
+    device = VirtualDevice(gid=7, host_id="host-a", device_id="7")
+
+    answer = host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True)
+    assert answer["server_name"] == "host-a.global.remoterf.net"
+    assert answer["ca_pem"] == "lab-ca"
+
+    host_direct._offer_cooldowns.clear()
+    registry.response = {"answer": {"ufrag": "u", "pwd": "p", "candidates": ["x" * 513]}}
+    assert host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True) is None
+
+    host_direct._offer_cooldowns.clear()
+    registry.response = {"answer": {"ufrag": "u", "pwd": "p", "candidates": [], "padding": "x" * (16 * 1024)}}
+    assert host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True) is None
+
+
+def test_offer_refreshes_old_lab_info(monkeypatch):
+    now = 15 * 24 * 60 * 60 + 1
+    host_direct._offer_cooldowns.clear()
+    session = hts.HostSession("host-a", capabilities={"direct"}, tls_public_key="key")
+    session.direct_ready = True
+    session.direct_lab_info = {"server_name": "old", "ca_pem": "old"}
+    session.direct_lab_info_issued_at = 0
+    refreshed = []
+
+    class Registry:
+        def session_for_host(self, _host_id):
+            return session
+
+        def request_control(self, *args, **kwargs):
+            return {"answer": {"ufrag": "u", "pwd": "p", "candidates": []}}
+
+    registry = Registry()
+
+    def resend(_registry, _session):
+        refreshed.append(True)
+        session.direct_lab_info = {"server_name": "fresh", "ca_pem": "fresh"}
+        session.direct_lab_info_issued_at = now
+        return True
+
+    monkeypatch.setattr(host_direct.time, "time", lambda: now)
+    monkeypatch.setattr(hts, "get_tunnel_registry", lambda create=False: registry)
+    monkeypatch.setattr(hts, "_send_lab_info", resend)
+    monkeypatch.setattr(host_direct, "issue_grant", lambda *args: "grant")
+    monkeypatch.setattr(host_direct, "_start_refresher", lambda *args: None)
+
+    answer = host_direct.offer(
+        VirtualDevice(gid=7, host_id="host-a", device_id="7"), "{}",
+        rid="reservation-9", reservation_end=2000, still_live=lambda: True,
+    )
+    assert refreshed == [True]
+    assert answer["server_name"] == "fresh"
+
+def test_offer_uses_short_wait_cooldown_and_inflight_cap(monkeypatch):
+    now = [1000]
+    host_direct._offer_cooldowns.clear()
+    host_direct._offer_inflight.clear()
+    session = hts.HostSession("host-a", capabilities={"direct"}, tls_public_key="key")
+    session.direct_ready = True
+    session.direct_lab_info = {"server_name": "host-a.global.remoterf.net", "ca_pem": "lab-ca"}
+    calls = []
+
+    class Registry:
+        response = None
+
+        def session_for_host(self, _host_id):
+            return session
+
+        def request_control(self, *args, **kwargs):
+            calls.append(kwargs["timeout"])
+            return self.response
+
+    registry = Registry()
+    monkeypatch.setattr(hts, "get_tunnel_registry", lambda create=False: registry)
+    monkeypatch.setattr(host_direct, "issue_grant", lambda *args: "grant")
+    monkeypatch.setattr(host_direct.time, "time", lambda: now[0])
+    device = VirtualDevice(gid=7, host_id="host-a", device_id="7")
+
+    assert host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True) is None
+    assert calls == [8]
+    assert host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True) is None
+    assert calls == [8]
+    now[0] += 60
+
+    blocked = threading.Event()
+    both_blocked = threading.Event()
+    release = threading.Event()
+    entered = [0]
+    entered_lock = threading.Lock()
+    registry.response = {"answer": {"ufrag": "u", "pwd": "p", "candidates": []}}
+
+    def wait_for_answer(*args, **kwargs):
+        with entered_lock:
+            entered[0] += 1
+            blocked.set()
+            if entered[0] == 2:
+                both_blocked.set()
+        release.wait(1)
+        return registry.response
+
+    registry.request_control = wait_for_answer
+    monkeypatch.setattr(host_direct, "_start_refresher", lambda *args: None)
+    workers = [threading.Thread(target=host_direct.offer, args=(device, "{}"), kwargs={
+        "rid": "reservation-9", "reservation_end": 2000, "still_live": lambda: True,
+    }) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    assert blocked.wait(1)
+    assert both_blocked.wait(1)
+    assert host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True) is None
+    release.set()
+    for worker in workers:
+        worker.join(1)

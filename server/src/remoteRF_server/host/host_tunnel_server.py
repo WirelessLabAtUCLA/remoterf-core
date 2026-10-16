@@ -168,6 +168,9 @@ def _send_lab_info(registry, session) -> bool:
         session.direct_ready = registry.send_control(
             session.host_id, kind="lab_info", device_id="", payload=payload,
         )
+        if session.direct_ready:
+            session.direct_lab_info = payload
+            session.direct_lab_info_issued_at = time.time()
         return session.direct_ready
     except Exception:
         warn(f"[inbound] unable to prepare direct path for host_id={session.host_id!r}")
@@ -233,6 +236,8 @@ class HostSession:
         self.capabilities = frozenset(capabilities or ())
         self.tls_public_key = str(tls_public_key or "")
         self.direct_ready = False
+        self.direct_lab_info = None
+        self.direct_lab_info_issued_at = None
         self.last_heartbeat_ms = now_ms()
         self.alive = True
         self.outbound_max = int(outbound_max)

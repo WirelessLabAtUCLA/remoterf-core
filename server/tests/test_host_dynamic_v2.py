@@ -164,8 +164,8 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
         sent = []
 
         class Registry:
-            def send_control(self, host_id, *, kind, device_id):
-                sent.append((host_id, kind, device_id, [item[2] for item in calls]))
+            def send_control(self, host_id, *, kind, device_id, payload):
+                sent.append((host_id, kind, device_id, payload, [item[2] for item in calls]))
                 return True
 
         calls = self.forwarded
@@ -175,7 +175,10 @@ class HostDynamicV2ProxyTests(unittest.TestCase):
             host_dynamic_v2._end_host_reservation(7)
         self.assertFalse(self.proxy.is_remote_session("host-session"))
         # The frame goes before the lab closes its routes (its CloseSession forward).
-        self.assertEqual(sent, [("lab-host", "reservation_end", "7", ["OpenSession"])])
+        self.assertEqual(sent[0][:3], ("lab-host", "reservation_end", "7"))
+        self.assertEqual(set(sent[0][3]), {"at"})
+        self.assertIsInstance(sent[0][3]["at"], float)
+        self.assertEqual(sent[0][4], ["OpenSession"])
         self.assertEqual([item[2] for item in calls], ["OpenSession", "CloseSession"])
 
 
