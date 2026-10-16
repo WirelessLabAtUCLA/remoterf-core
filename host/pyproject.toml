@@ -23,6 +23,8 @@ dependencies = [
   "grpcio-tools",
   "pyyaml",
   "pyadi-iio",
+  # pylibiio 1.0 binds libiio 1.x; Ubuntu/Debian ship libiio 0.2x.
+  "pylibiio>=0.25,<1",
   "pyrtlsdr>=0.5,<0.6",
   "pyrtlsdrlib>=0.0.5,<0.1",
   "pyhackrf2>=1.0.3,<2.0",
