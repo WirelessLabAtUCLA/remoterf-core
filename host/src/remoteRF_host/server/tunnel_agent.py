@@ -554,6 +554,11 @@ class HostTunnelAgent:
                     _set_kv(f"device.{gid}.driver_version", driver_version)
                 if schema_hash:
                     _set_kv(f"device.{gid}.schema_hash", schema_hash)
+                if callable(getattr(schema, "get_idl_v2", None)):
+                    try:
+                        _set_kv(f"device.{gid}.schema_hash_v2", str(schema.get_idl_v2()["schema_hash"]))
+                    except Exception:
+                        exception(f"Failed computing schema v2 hash for gid={gid}", component="hostrf.tunnel_agent")
                 info(
                     f"IDL meta for gid={gid} type={dtype}: "
                     f"{len(caps.split(',')) if caps else 0} attribute(s)",
