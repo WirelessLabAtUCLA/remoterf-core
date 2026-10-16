@@ -29,20 +29,23 @@ from . import schema as _schema
 from ..utils import get_drivers_dir
 from ..utils.host_logging import warn
 
-# Every Pluto schema file a released hostrf copied here (copy-if-missing, never
+# Every Pluto schema file a released or committed hostrf copied here (copy-if-missing, never
 # refreshed): an exact match is ours to upgrade; an edited copy is a custom driver.
 _LEGACY_PLUTO_SCHEMA_HASHES = (
+    "07b12fb5a4d1be9539eedfa39d99914c05f7fd2d7b7bcf5822c477f1dbf10630",
     "1260d687419c4bfe3e7dc60df58a55f5757b741898474e70f36c91603be70894",
     "48f351bda3485080849d797af853dfe2ce9652fded0bb04299b873315527cf63",
     "676dd91507842312c880ebd51733e9fedc4dff8fdece19902e4501e0256857e2",
     "75138b02e9d3dff830d7b1fda1778163a28e1c1e74c1ccbdeb91f7de46616fe8",
     "a3697eeef55827e0db7705685f8fe64b615468dd26057211de8b5805b9ecf583",
     "c165ab2596d8a3d1a7ef04f9be51264b0d375ae5585175c4a9badbfc0a7a3005",
+    "cd1bf1d0edef3fda1010e92941dfb7e38aaf80eed2c80aaddd68ec698fb06e1f",
     "d94bf5933c26f29516c2ddd159d43ba24b6c9e6a522bcfd9355cdb2e7e9b90ae",
     "e66c0dee2516a1c6a33dba0c5127d2c7a87d8536c9fb60fd71b22dce54b59789",
     "fc8e879e31fe4a2a0e94e2f12772aa7276c132f8209add1b77db69feab351c86",
 )
 _LEGACY_PLUTO_MIMO_SCHEMA_HASHES = (
+    "32e3dcb3ca2872844b7147bf49ae76cc54a330cb953de9df1e7939546263f0b2",
     "4c342dcccf2af9cac5bfe97d1ec9ad2d14f499582131226aa4532abfb1519fcb",
     "64d47cafad51b782082595181370eb561ebd114cb4a64c55f5f2bfff195c23a6",
 )
