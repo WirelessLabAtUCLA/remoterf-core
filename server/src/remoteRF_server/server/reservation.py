@@ -1916,7 +1916,10 @@ class ReservationHandler:
             return None
         if not live:
             return None
-        return {"local_account_id": int(row[0]), "device_id": int(row[1]), "username": row[2]}
+        return {
+            "local_account_id": int(row[0]), "device_id": int(row[1]), "username": row[2],
+            "end_time": _parse_reservation_datetime(row[4]).timestamp(),
+        }
 
     @db_connection
     def federated_active_reservation(

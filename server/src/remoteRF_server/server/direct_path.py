@@ -36,21 +36,17 @@ ICE stays for Servers the client cannot reach that way.
 from __future__ import annotations
 
 import asyncio
-import collections
 import contextlib
-import ipaddress
 import json
 import logging
 import os
 import secrets
-import socket
 import threading
 from pathlib import Path
 from typing import Optional
 
 from aioice import Candidate, Connection
 from aioquic.asyncio import serve as quic_serve
-from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.buffer import Buffer
 from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
@@ -59,69 +55,16 @@ from aioquic.quic.packet import QuicPacketType, pull_quic_header
 
 from ..common.grpc import grpc_pb2
 from ..common.utils.process_arg import map_arg
+from remoterf_device_core.direct import (
+    ALPN, DEFAULT_STUN, MAX_FRAME, STUN_SECONDS, Ice, _IceTransport,
+    _Protocol, cancel_tasks, close_ice, default_route_address, frame,
+    peer_address, quiet_aioice_errors, read_frame, stun_server,
+)
 from .global_onboarding import RELAYED, hostname, is_offsite
 
 logger = logging.getLogger("remoteRF_server.direct")
 
 
-async def close_ice(ice) -> None:
-    """Close an aioice Connection without the library's after-close noise.
-
-    A cancelled ``connect()`` (a punch that timed out) never reaches aioice's
-    own "cancel remaining checks" loop, so its check tasks keep running and
-    its STUN timers stay armed against sockets close() is about to take. Stop
-    both before closing."""
-    # Cancel the connectivity checks first. Failing their STUN transactions
-    # instead only makes aioice start replacement checks, which then hang on
-    # a closed socket and die "pending" when they are collected.
-    checks = [pair.task for pair in list(getattr(ice, "_check_list", [])) if pair.task is not None]
-    for task in checks:
-        task.cancel()
-    if checks:
-        await asyncio.gather(*checks, return_exceptions=True)
-    for protocol in list(getattr(ice, "_protocols", [])):
-        for transaction in list(getattr(protocol, "transactions", {}).values()):
-            handle = getattr(transaction, "_Transaction__timeout_handle", None)
-            if handle is not None:
-                handle.cancel()  # a retry would fire on the socket close() is about to take
-    await ice.close()
-
-
-async def cancel_tasks(tasks) -> None:
-    """Cancel these tasks and wait for them to finish.
-
-    A task that is cancelled but never awaited can be collected while still
-    pending, and Python prints a traceback for it that nobody can act on.
-    The caller's own task is never cancelled, so this is safe to call from
-    inside one of the tasks being torn down."""
-    current = asyncio.current_task()
-    tasks = [task for task in tasks if task is not None and task is not current and not task.done()]
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-def quiet_aioice_errors(loop) -> None:
-    """A STUN retry on an already-closed socket is not an error worth a
-    traceback in someone's shell; everything else keeps the default handler.
-
-    The retry fires from a TimerHandle named for aioice's Transaction and
-    dies inside asyncio's own transport code once the socket is gone (an
-    AttributeError on the closed transport or its dropped loop)."""
-    default = loop.default_exception_handler
-
-    def handler(loop, context):
-        exc = context.get("exception")
-        where = repr(context.get("handle", "")) + str(context.get("message", ""))
-        if isinstance(exc, (AttributeError, OSError)) and "Transaction.__retry" in where:
-            return
-        default(context)
-
-    loop.set_exception_handler(handler)
-
-ALPN = "remoterf-direct/1"
-MAX_FRAME = 100 * 1024 * 1024  # the gRPC message ceiling
 IDLE_SECONDS = 600
 CONNECT_SECONDS = 30  # ICE checks, then the QUIC handshake; a silent client is dropped
 # How long the punch waits for the client's first check when the answer also
@@ -139,9 +82,6 @@ HOLD_SECONDS = 3.0
 # leave after its first check has, and before its retransmit at 0.5 s.
 RACE_HOLD_SECONDS = 0.4
 MAX_PATHS_PER_SESSION = 8  # processes of one login; the oldest path makes room
-DEFAULT_STUN = "stun.l.google.com:19302"
-STUN_SECONDS = 1.5  # a STUN server answers in milliseconds or not at all
-
 HELLO_SECONDS = 5  # a fixed-port connection that never says which session it is
 SESSION_SECONDS = 60  # how long an offer's session secret stays redeemable
 
@@ -156,77 +96,6 @@ _paths: dict[str, "_Path"] = {}
 _sessions: dict[str, dict] = {}  # secret -> the path a fixed-port hello may claim
 _listener = None
 _listener_port = 0
-
-
-def frame(payload: bytes) -> bytes:
-    return len(payload).to_bytes(4, "big") + payload
-
-
-async def read_frame(reader: asyncio.StreamReader) -> bytes:
-    size = int.from_bytes(await reader.readexactly(4), "big")
-    if size > MAX_FRAME:
-        raise ValueError(f"frame of {size} bytes exceeds {MAX_FRAME}")
-    return await reader.readexactly(size)
-
-
-def default_route_address() -> Optional[str]:
-    """The IPv4 address the default route leaves from, or None without one."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("8.8.8.8", 80))
-            return probe.getsockname()[0]
-    except OSError:
-        return None
-
-
-def stun_server(address: Optional[str] = None) -> Optional[tuple[str, int]]:
-    """The STUN server to learn this Server's public address from, or None.
-
-    A Server whose own address is already public learns nothing from STUN.
-    """
-    value = os.getenv("REMOTERF_STUN_SERVER", DEFAULT_STUN).strip()
-    if value.lower() in {"", "off", "none", "0"}:
-        return None
-    if address is not None and ipaddress.ip_address(address).is_global:
-        return None
-    host, _, port = value.rpartition(":")
-    return host, int(port)
-
-
-class Ice(Connection):
-    """aioice's Connection, gathering on the default-route interface only.
-
-    Every other interface (a VPN, an overlay, a bridge) cannot reach the STUN
-    server, and aioice would hold gathering for its whole 5 s timeout on each
-    one, on every offer. One interface and a short STUN wait instead; a
-    machine without a default route gathers the way aioice does.
-
-    ``heard`` is set by the peer's first check, which may arrive before
-    connect() (aioice holds it as an early check until then).
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.heard = asyncio.Event()
-
-    async def gather_candidates(self) -> None:
-        address = default_route_address()
-        if address is None or self._local_candidates_start:
-            return await super().gather_candidates()
-        self._local_candidates_start = True
-        self._local_candidates += await self.get_component_candidates(
-            component=1, addresses=[address], timeout=STUN_SECONDS
-        )
-        self._local_candidates_end = True
-
-    def request_received(self, *args) -> None:
-        super().request_received(*args)
-        self.heard.set()
-
-
-def peer_address(ice: Connection) -> tuple[str, int]:
-    """The remote end of the nominated pair (aioice keeps it private)."""
-    return ice._nominated[1].remote_addr
 
 
 class PathRefused(Exception):
@@ -261,38 +130,6 @@ def _dispatch(request: grpc_pb2.GenericRPCRequest, peer_host: str, bound: Option
         RELAYED.reset(token)
 
 
-class _IceTransport:
-    """The sendto() surface aioquic's protocol needs, on a nominated ICE pair."""
-
-    def __init__(self, ice: Connection):
-        self._ice = ice
-        self._loop = asyncio.get_running_loop()
-        self._queue: collections.deque[bytes] = collections.deque()
-        self._pump: Optional[asyncio.Task] = None
-        self._closed = False
-
-    def sendto(self, data: bytes, addr=None) -> None:
-        if self._closed:
-            return
-        self._queue.append(data)
-        if self._pump is None:
-            self._pump = self._loop.create_task(self._drain())
-
-    def close(self) -> None:
-        """Drop the transport: QUIC's later timers must not touch a dead pair."""
-        self._closed = True
-        self._queue.clear()
-
-    async def _drain(self) -> None:
-        try:
-            while self._queue:
-                await self._ice.sendto(self._queue.popleft(), 1)
-        except ConnectionError:
-            self._queue.clear()
-        finally:
-            self._pump = None
-
-
 def _cert_dir() -> Path:
     return CERT_DIR or Path(
         os.getenv(
@@ -309,19 +146,6 @@ def _server_configuration() -> QuicConfiguration:
     )
     configuration.load_cert_chain(cert_dir / "server.crt", cert_dir / "server.key")
     return configuration
-
-
-class _Protocol(QuicConnectionProtocol):
-    """aioquic's protocol, remembering why the connection ended."""
-
-    terminated = ""
-
-    def quic_event_received(self, event) -> None:
-        if isinstance(event, events.ConnectionTerminated):
-            self.terminated = event.reason_phrase or (
-                f"QUIC error {event.error_code:#x}" if event.error_code else ""
-            )
-        super().quic_event_received(event)
 
 
 class _Path:

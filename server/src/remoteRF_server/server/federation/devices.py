@@ -605,7 +605,19 @@ class ServerDirectOpenHandler(_DeviceHandlerBase):
             return run_bound_rpc(rpc, device_id=device_id, function_name=function_name, args=args)
 
         try:
-            from .. import direct_path
+            from .. import device_manager, direct_path
+
+            resolved = device_manager.get_device_by_id(device_id)
+            device = resolved[0] if isinstance(resolved, tuple) else resolved
+            if isinstance(device, device_manager.VirtualDevice):
+                from .. import host_direct
+
+                answer = host_direct.offer(
+                    device, payload["ice"], reservation_end=live["end_time"],
+                    still_live=lambda: authorize("get_time_now") is None,
+                )
+                if answer is not None:
+                    return {**result, "status": "ok", "error_code": None, "payload": {"ice": json.dumps(answer)}}
 
             answer = direct_path.offer_bound(
                 f"federated/{claims['iss']}/{claims['sub']}/{reservation_id}",

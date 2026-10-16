@@ -23,6 +23,8 @@ message HostHello {
   string host_id = 1;
   string version = 2;
   string host_token = 3;
+  repeated string capabilities = 4;
+  string tls_public_key = 5;
 }
 
 message DeviceInfo {
@@ -101,6 +103,8 @@ message MetaResponse {
 message Control {
   string kind = 1;
   string device_id = 2;
+  string req_id = 3;
+  string payload = 4;
 }
 
 message HostFrame {

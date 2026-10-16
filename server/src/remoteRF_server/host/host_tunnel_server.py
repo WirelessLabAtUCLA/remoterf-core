@@ -22,6 +22,7 @@ import threading
 import queue
 import time
 import secrets
+import json
 import traceback
 import hashlib
 import re
@@ -154,6 +155,24 @@ def exception(msg: str) -> None:
     _log("ERROR", msg)
     traceback.print_exc(limit=80, file=sys.stderr)
 
+
+def _send_lab_info(registry, session) -> bool:
+    if "direct" not in session.capabilities or not session.tls_public_key:
+        return False
+    try:
+        from ..server import host_direct
+
+        payload = host_direct.lab_info(session.host_id, session.tls_public_key)
+        if payload is None:
+            return False
+        session.direct_ready = registry.send_control(
+            session.host_id, kind="lab_info", device_id="", payload=payload,
+        )
+        return session.direct_ready
+    except Exception:
+        warn(f"[inbound] unable to prepare direct path for host_id={session.host_id!r}")
+        return False
+
 # Helpers
 
 def host_key(host_id: str) -> str:
@@ -200,7 +219,8 @@ class DeviceStatus:
 # Session
 
 class HostSession:
-    def __init__(self, host_id: str, *, peer: str = "<?>", session_uuid: str = "", outbound_max: int = 2048) -> None:
+    def __init__(self, host_id: str, *, peer: str = "<?>", session_uuid: str = "", outbound_max: int = 2048,
+                 capabilities: Optional[set[str]] = None, tls_public_key: str = "") -> None:
         self.host_id = host_id
         self.peer = peer
         self.session_uuid = (session_uuid or uuid.uuid4().hex[:10])
@@ -208,6 +228,11 @@ class HostSession:
         self.out_q: "queue.Queue[Optional[host_tunnel_pb2.HostFrame]]" = queue.Queue(maxsize=int(outbound_max))
         self.inflight: Dict[str, Future] = {}
         self.inflight_lock = threading.Lock()
+        self.control_waiters: Dict[str, Future] = {}
+        self.control_lock = threading.Lock()
+        self.capabilities = frozenset(capabilities or ())
+        self.tls_public_key = str(tls_public_key or "")
+        self.direct_ready = False
         self.last_heartbeat_ms = now_ms()
         self.alive = True
         self.outbound_max = int(outbound_max)
@@ -252,8 +277,21 @@ class HostSession:
                 if not fut.done():
                     fut.set_exception(RuntimeError(f"Host '{self.host_id}' disconnected (req_id={rid})"))
             self.inflight.clear()
+        with self.control_lock:
+            for rid, fut in list(self.control_waiters.items()):
+                if not fut.done():
+                    fut.set_exception(RuntimeError(f"Host '{self.host_id}' disconnected (req_id={rid})"))
+            self.control_waiters.clear()
 
         info(f"[session] closed host_id={self.host_id!r} sess={self.session_uuid}")
+
+    def resolve_control(self, req_id: str, payload: dict) -> bool:
+        with self.control_lock:
+            future = self.control_waiters.get(req_id)
+        if future is None or future.done():
+            return False
+        future.set_result(payload)
+        return True
 
 # Registry
 
@@ -553,14 +591,48 @@ class HostTunnelRegistry:
             sess.close()
         return len(sessions)
 
-    def send_control(self, host_id: str, *, kind: str, device_id: str) -> bool:
+    def session_for_host(self, host_id: str) -> Optional[HostSession]:
+        with self._lock:
+            return self._hosts.get(host_id)
+
+    def send_control(self, host_id: str, *, kind: str, device_id: str, payload: Optional[dict] = None) -> bool:
         with self._lock:
             sess = self._hosts.get(host_id)
         if sess is None or not sess.alive:
             return False
         return sess.send(host_tunnel_pb2.HostFrame(
-            control=host_tunnel_pb2.Control(kind=str(kind), device_id=str(device_id))
+            control=host_tunnel_pb2.Control(
+                kind=str(kind), device_id=str(device_id),
+                payload=json.dumps(payload) if payload is not None else "",
+            )
         ))
+
+    def request_control(self, host_id: str, *, kind: str, device_id: str, payload: dict, timeout: float) -> Optional[dict]:
+        with self._lock:
+            sess = self._hosts.get(host_id)
+        if sess is None or not sess.alive:
+            return None
+        req_id = uuid.uuid4().hex
+        future = Future()
+        with sess.control_lock:
+            if not sess.alive:
+                return None
+            sess.control_waiters[req_id] = future
+        frame = host_tunnel_pb2.HostFrame(control=host_tunnel_pb2.Control(
+            kind=str(kind), device_id=str(device_id), req_id=req_id, payload=json.dumps(payload),
+        ))
+        if not sess.send(frame, timeout=min(float(timeout), 2.0)):
+            with sess.control_lock:
+                sess.control_waiters.pop(req_id, None)
+            return None
+        try:
+            return future.result(timeout=timeout)
+        except Exception as exc:
+            warn(f"[control] wait failed host_id={host_id!r} req_id={req_id} err={exc!r}")
+            return None
+        finally:
+            with sess.control_lock:
+                sess.control_waiters.pop(req_id, None)
 
     def forget_host(self, host_id: str) -> Optional[List[str]]:
         """Remove a host and its devices from the directory, in memory and persisted.
@@ -1145,7 +1217,15 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                         info(f"[inbound] HELLO host_id={host_id!r} version={ver!r} peer={peer} stream_sess={stream_uuid}")
 
                         # ONE session per stream
-                        session = HostSession(host_id, peer=peer, session_uuid=stream_uuid)
+                        capabilities = {
+                            str(capability).strip() for capability in getattr(hello, "capabilities", [])
+                            if str(capability).strip()
+                        }
+                        tls_public_key = str(getattr(hello, "tls_public_key", "") or "")
+                        session = HostSession(
+                            host_id, peer=peer, session_uuid=stream_uuid,
+                            capabilities=capabilities, tls_public_key=tls_public_key,
+                        )
 
                         # ONE register per stream
                         try:
@@ -1163,6 +1243,8 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                             return
 
                         self.registry.persist_host_meta_from_hello(hello)
+
+                        _send_lab_info(self.registry, session)
 
                         # Ask host for metadata immediately on join
                         try:
@@ -1336,6 +1418,25 @@ class HostTunnelServicer(host_tunnel_pb2_grpc.HostTunnelServicer):
                                             host_id, parts[1], str(v), version="v2" if parts[2].endswith("v2") else "v1")
                             except Exception:
                                 exception("[inbound] META_RESPONSE failed reading meta.kv caps")
+
+                    elif which == "control":
+                        if session is None:
+                            warn(f"[inbound] control before session: ignoring peer={peer} stream_sess={stream_uuid}")
+                            continue
+                        control = frame.control
+                        req_id = str(getattr(control, "req_id", "") or "")
+                        if not req_id:
+                            warn(f"[inbound] control without req_id ignored stream_sess={stream_uuid}")
+                            continue
+                        try:
+                            payload = json.loads(str(getattr(control, "payload", "") or ""))
+                            if not isinstance(payload, dict):
+                                raise ValueError("payload is not an object")
+                        except Exception:
+                            warn(f"[inbound] invalid control payload req_id={req_id} stream_sess={stream_uuid}")
+                            continue
+                        if not session.resolve_control(req_id, payload):
+                            warn(f"[inbound] control has no waiter req_id={req_id} stream_sess={stream_uuid}")
 
                     elif which == "heartbeat":
                         if session is not None and host_id is not None:
