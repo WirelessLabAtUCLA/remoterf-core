@@ -27,6 +27,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import os
 import threading
 import time
@@ -40,6 +41,8 @@ CONNECT_SECONDS = 30
 OFFER_SECONDS = 18
 IDLE_SECONDS = 600
 MAX_PATHS_PER_DEVICE = 4  # one holder's processes; the oldest makes room
+MAX_STREAMS_PER_PATH = 8
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
 GRANT_ENDED = "the reservation's grant has ended"
 
 
@@ -65,7 +68,9 @@ class DirectHost:
         self._grants: dict[int, dict] = {}  # gid -> claims of its newest grant
         self._revoked: set[str] = set()
         self._ended: dict[int, float] = {}
+        self._accepted_iat: dict[int, float] = {}
         self._paths: dict[int, list] = {}
+        self._call_locks: dict[int, asyncio.Lock] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -- identity --------------------------------------------------------
@@ -78,8 +83,15 @@ class DirectHost:
         if not self.key_path.exists():
             key = ec.generate_private_key(ec.SECP256R1())
             self.key_path.parent.mkdir(parents=True, exist_ok=True)
-            self.key_path.write_bytes(key.private_bytes(
-                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            pem = key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+            try:
+                fd = os.open(self.key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(fd, "wb") as key_file:
+                    key_file.write(pem)
         os.chmod(self.key_path, 0o600)
         key = serialization.load_pem_private_key(self.key_path.read_bytes(), None)
         return key.public_key().public_bytes(
@@ -130,6 +142,7 @@ class DirectHost:
             or claims["aud"] != self.host_id
             or type(claims.get("gid")) is not int
             or claims["gid"] != int(gid)
+            or type(claims.get("rid")) is not str
             or type(claims.get("jti")) is not str
             or not claims["jti"]
             or type(claims.get("exp")) is not int
@@ -148,14 +161,22 @@ class DirectHost:
             if claims["iat"] <= self._ended.get(int(gid), float("-inf")) or claims["jti"] in self._revoked:
                 raise PermissionError("grant is not for this device now")
             self._grants[int(gid)] = claims
+            self._accepted_iat[int(gid)] = max(
+                float(claims["iat"]), self._accepted_iat.get(int(gid), float("-inf")),
+            )
 
-    def _refusal(self, gid: int, function_name: str) -> Optional[str]:
+    def _refusal(self, gid: int, rid: str, function_name: str) -> Optional[str]:
         parts = function_name.split(":", 2)
         if len(parts) != 3 or not all(parts) or parts[0] in ("IDL", "ACC"):
             return f"{function_name} is not available on the direct path"
         with self._lock:
             claims = self._grants.get(int(gid))
-            if claims is None or claims["exp"] <= time.time() or claims["jti"] in self._revoked:
+            if (
+                claims is None
+                or claims["rid"] != rid
+                or claims["exp"] <= time.time()
+                or claims["jti"] in self._revoked
+            ):
                 return GRANT_ENDED
         return None
 
@@ -166,8 +187,9 @@ class DirectHost:
         self.refresh(gid, grant)
         with self._lock:
             pin = {"server_name": self._lab["server_name"], "ca_pem": self._lab["ca_pem"]}
+            rid = self._grants[int(gid)]["rid"]
         remote = json.loads(ice)
-        future = asyncio.run_coroutine_threadsafe(self._offer(int(gid), remote), self._get_loop())
+        future = asyncio.run_coroutine_threadsafe(self._offer(int(gid), rid, remote), self._get_loop())
         try:
             answer = future.result(OFFER_SECONDS)
         except TimeoutError:
@@ -175,14 +197,29 @@ class DirectHost:
             raise TimeoutError("direct offer timed out") from None
         return {**answer, **pin}
 
-    def end(self, gid: int) -> None:
+    def _record_end(self, gid: int, at: Optional[float]) -> None:
+        fallback = self._accepted_iat.get(gid, float("-inf"))
+        ended = fallback if at is None or not math.isfinite(float(at)) else float(at)
+        self._ended[gid] = max(ended, self._ended.get(gid, float("-inf")))
+
+    def end(self, gid: int, at: Optional[float] = None) -> None:
         """The reservation ended (or the lab revoked it): drop its grant and paths."""
         with self._lock:
             claims = self._grants.pop(int(gid), None)
-            self._ended[int(gid)] = time.time()
+            self._record_end(int(gid), at)
             if claims is not None:
                 self._revoked.add(claims["jti"])
         self._close(lambda path: path.gid == int(gid))
+
+    def revoke(self, gid: int, rid: str, at: Optional[float] = None) -> None:
+        """Drop paths for one reservation without resetting the device."""
+        with self._lock:
+            self._record_end(int(gid), at)
+            claims = self._grants.get(int(gid))
+            if claims is not None and claims["rid"] == rid:
+                self._grants.pop(int(gid), None)
+                self._revoked.add(claims["jti"])
+        self._close(lambda path: path.gid == int(gid) and path.rid == rid)
 
     def close_all(self) -> None:
         """The tunnel dropped: no lab, no grants."""
@@ -202,8 +239,13 @@ class DirectHost:
                 for path in [p for p in paths if which(p)]:
                     await path.close()
 
-        with contextlib.suppress(Exception):
-            asyncio.run_coroutine_threadsafe(close(), self._loop).result(10)
+        coroutine = close()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except Exception:
+            coroutine.close()
+            return
+        future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         from remoterf_device_core import direct as core
@@ -215,30 +257,47 @@ class DirectHost:
                 threading.Thread(target=self._loop.run_forever, name="hostrf-direct", daemon=True).start()
             return self._loop
 
-    async def _offer(self, gid: int, remote: dict) -> dict:
+    def _grant_is_current(self, gid: int, rid: str) -> bool:
+        with self._lock:
+            claims = self._grants.get(gid)
+            return bool(
+                claims is not None
+                and claims["rid"] == rid
+                and claims["exp"] > time.time()
+                and claims["jti"] not in self._revoked
+            )
+
+    def _require_current_grant(self, gid: int, rid: str) -> None:
+        if not self._grant_is_current(gid, rid):
+            raise PermissionError(GRANT_ENDED)
+
+    async def _offer(self, gid: int, rid: str, remote: dict) -> dict:
         from aioice import Candidate
 
         from remoterf_device_core import direct as core
 
-        with self._lock:
-            claims = self._grants.get(gid)
-            if claims is None or claims["exp"] <= time.time() or claims["jti"] in self._revoked:
-                raise PermissionError(GRANT_ENDED)
+        self._require_current_grant(gid, rid)
         paths = self._paths.setdefault(gid, [])
-        for old in paths[: max(0, len(paths) - MAX_PATHS_PER_DEVICE + 1)]:
-            await old.close()
-        ice = core.Ice(ice_controlling=False, stun_server=core.stun_server(core.default_route_address()))
+        ice = None
         try:
+            for old in paths[: max(0, len(paths) - MAX_PATHS_PER_DEVICE + 1)]:
+                await old.close()
+                self._require_current_grant(gid, rid)
+            ice = core.Ice(ice_controlling=False, stun_server=core.stun_server(core.default_route_address()))
             await ice.gather_candidates()
+            self._require_current_grant(gid, rid)
             ice.remote_username = str(remote["ufrag"])
             ice.remote_password = str(remote["pwd"])
             for sdp in remote["candidates"]:
                 await ice.add_remote_candidate(Candidate.from_sdp(str(sdp)))
+                self._require_current_grant(gid, rid)
             await ice.add_remote_candidate(None)
+            self._require_current_grant(gid, rid)
         except Exception:
-            await core.close_ice(ice)
+            if ice is not None:
+                await core.close_ice(ice)
             raise
-        path = _HostPath(self, gid, ice)
+        path = _HostPath(self, gid, rid, ice)
         paths.append(path)
         path.task = asyncio.ensure_future(path.run())
         return {
@@ -260,8 +319,8 @@ class DirectHost:
 class _HostPath:
     """One punched pair and its QUIC connection, for one device."""
 
-    def __init__(self, owner: DirectHost, gid: int, ice):
-        self.owner, self.gid, self.ice = owner, gid, ice
+    def __init__(self, owner: DirectHost, gid: int, rid: str, ice):
+        self.owner, self.gid, self.rid, self.ice = owner, gid, rid, ice
         self.peer = None
         self.task: Optional[asyncio.Task] = None
         self.transport = None
@@ -325,9 +384,17 @@ class _HostPath:
                 protocol.datagram_received(data, self.peer)
 
     def _stream(self, reader, writer) -> None:
-        task = asyncio.ensure_future(self._serve(reader, writer))
+        serve = self._serve if len(self.streams) < MAX_STREAMS_PER_PATH else self._busy
+        task = asyncio.ensure_future(serve(reader, writer))
         self.streams.add(task)
         task.add_done_callback(self.streams.discard)
+
+    async def _busy(self, reader, writer) -> None:
+        from remoterf_device_core import direct as core
+
+        writer.write(core.frame(grpc_pb2.GenericRPCResponse(results={"a": map_arg("busy")}).SerializeToString()))
+        writer.write_eof()
+        writer.close()
 
     async def _serve(self, reader, writer) -> None:
         from remoterf_device_core import direct as core
@@ -335,19 +402,30 @@ class _HostPath:
         drop = False
         try:
             try:
-                request = grpc_pb2.GenericRPCRequest.FromString(await core.read_frame(reader))
+                size = int.from_bytes(await reader.readexactly(4), "big")
+                if size > MAX_REQUEST_BYTES:
+                    raise ValueError("direct request frame is too large")
+                request = grpc_pb2.GenericRPCRequest.FromString(await reader.readexactly(size))
             except asyncio.IncompleteReadError:
                 return
-            refused = self.owner._refusal(self.gid, request.function_name)
+            refused = self.owner._refusal(self.gid, self.rid, request.function_name)
             drop = refused == GRANT_ENDED
             if refused is not None:
                 results = {"a": map_arg(refused)}
             else:
-                try:
-                    results = await asyncio.get_running_loop().run_in_executor(
-                        None, self.owner.run_call, self.gid, request)
-                except Exception as exc:  # device exceptions are normal RPC results
-                    results = {"a": map_arg(str(exc))}
+                lock = self.owner._call_locks.setdefault(self.gid, asyncio.Lock())
+                async with lock:
+                    refused = self.owner._refusal(self.gid, self.rid, request.function_name)
+                    if refused is None:
+                        try:
+                            results = await asyncio.get_running_loop().run_in_executor(
+                                None, self.owner.run_call, self.gid, request)
+                        except Exception as exc:  # device exceptions are normal RPC results
+                            results = {"a": map_arg(str(exc))}
+                        refused = self.owner._refusal(self.gid, self.rid, request.function_name)
+                    if refused is not None:
+                        results = {"a": map_arg(refused)}
+                        drop = refused == GRANT_ENDED
             writer.write(core.frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
             writer.write_eof()
         except Exception:  # noqa: BLE001 - not our framing: answer nothing more on this path

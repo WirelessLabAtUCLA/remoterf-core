@@ -38,6 +38,7 @@ import os
 import re
 import hashlib
 import json
+import math
 import time
 import queue
 import grpc
@@ -722,20 +723,41 @@ class HostTunnelAgent:
             except Exception as exc:
                 warn(f"Invalid direct grant: {exc}", component="hostrf.tunnel_agent")
             return
-        if kind != "reservation_end":
+        if kind not in ("reservation_end", "revoke"):
             warn(f"Ignoring control frame kind={kind!r}", component="hostrf.tunnel_agent")
             return
         try:
             gid = int(str(ctl.device_id))
         except ValueError:
-            warn(f"reservation_end for a bad device_id={ctl.device_id!r}", component="hostrf.tunnel_agent")
+            warn(f"{kind} for a bad device_id={ctl.device_id!r}", component="hostrf.tunnel_agent")
             return
+        try:
+            payload = json.loads(str(ctl.payload)) if ctl.payload else {}
+            if not isinstance(payload, dict):
+                raise ValueError("payload is not an object")
+            at = payload.get("at")
+            if at is not None and (
+                isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at)
+            ):
+                raise ValueError("at is not a number")
+        except Exception as exc:
+            warn(f"Invalid {kind} payload: {exc}", component="hostrf.tunnel_agent")
+            payload = {}
+            at = None
         direct = getattr(self, "_direct_host", None)
         if direct is not None:
             try:
-                direct.end(gid)
+                if kind == "revoke":
+                    rid = payload.get("rid") if isinstance(payload, dict) else None
+                    if not isinstance(rid, str):
+                        raise ValueError("revoke has no rid")
+                    direct.revoke(gid, rid, at)
+                else:
+                    direct.end(gid, at)
             except Exception:
                 exception(f"Direct path cleanup failed for gid={gid}", component="hostrf.tunnel_agent")
+        if kind == "revoke":
+            return
         if gid not in self._devices or not callable(end_reservation):
             warn(f"reservation_end for unknown gid={gid}", component="hostrf.tunnel_agent")
             return
@@ -755,9 +777,11 @@ class HostTunnelAgent:
             response = {"answer": answer}
         except Exception as exc:
             response = {"error": str(exc)}
-        self._enqueue(host_pb2.HostFrame(control=host_pb2.Control(
+        queued = self._enqueue(host_pb2.HostFrame(control=host_pb2.Control(
             kind="direct_answer", req_id=req_id, payload=json.dumps(response),
         )), timeout=0.1)
+        if not queued:
+            warn(f"Could not queue direct answer req_id={req_id}", component="hostrf.tunnel_agent")
 
     # -------- rpc execution --------
 
@@ -854,16 +878,16 @@ class HostTunnelAgent:
             self._consume_cancel(req_id)
 
     def _run_direct_call(self, gid: int, greq) -> Dict[str, Any]:
-        args_map = greq.args
+        excluded = {"a", "token", "device_name", "g", "gid", "device_id"}
+        args_map = {
+            str(key): value
+            for key, value in greq.args.items()
+            if str(key) not in excluded
+        }
         gid_s = str(int(gid))
-        try:
-            args_map["gid"].CopyFrom(_argument_string(gid_s))
-        except Exception:
-            pass
-        try:
-            args_map["device_id"].CopyFrom(_coerce_argument(int(gid)))
-        except Exception:
-            pass
+        args_map["g"] = _argument_string(gid_s)
+        args_map["gid"] = _argument_string(gid_s)
+        args_map["device_id"] = _coerce_argument(int(gid))
         results_any = rpc_manager.run_rpc(function_name=greq.function_name, args=args_map)
         return _coerce_argument_map(results_any)
 

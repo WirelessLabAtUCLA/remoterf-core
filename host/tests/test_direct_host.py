@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import queue
+import stat
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -69,7 +71,7 @@ class DirectHostGrantTests(unittest.TestCase):
     def _token(self, **changes):
         claims = {
             "iss": "deployment-1", "aud": "lab-host", "gid": 7, "jti": "grant-1",
-            "iat": time.time(), "exp": int(time.time() + 60),
+            "rid": "reservation-1", "iat": time.time(), "exp": int(time.time() + 60),
         }
         claims.update(changes)
         return jwt.encode(
@@ -99,6 +101,149 @@ class DirectHostGrantTests(unittest.TestCase):
         )
         with self.assertRaises(PermissionError):
             self.host.verify(bad, 7)
+
+    def test_path_rid_must_match_current_grant(self):
+        self.host.refresh(7, self._token(rid="reservation-one", jti="one"))
+        self.host.refresh(7, self._token(rid="reservation-two", jti="two"))
+        self.assertEqual(
+            self.host._refusal(7, "reservation-one", "radio:gain:GET"),
+            direct_host.GRANT_ENDED,
+        )
+        self.assertIsNone(self.host._refusal(7, "reservation-two", "radio:gain:GET"))
+
+    def test_revoke_closes_only_matching_reservation_paths(self):
+        self.host.refresh(7, self._token(rid="reservation-one", jti="one"))
+        first = mock.Mock(gid=7, rid="reservation-one")
+        second = mock.Mock(gid=7, rid="reservation-two")
+        with mock.patch.object(self.host, "_close") as close:
+            self.host.revoke(7, "reservation-one", 123.0)
+        self.assertNotIn(7, self.host._grants)
+        self.assertEqual(self.host._ended[7], 123.0)
+        self.assertTrue(close.call_args.args[0](first))
+        self.assertFalse(close.call_args.args[0](second))
+
+    def test_end_uses_lab_timestamp(self):
+        self.host.refresh(7, self._token(iat=100.0, jti="old"))
+        with mock.patch.object(self.host, "_close"):
+            self.host.end(7, 200.0)
+        self.assertEqual(self.host._ended[7], 200.0)
+        with self.assertRaises(PermissionError):
+            self.host.verify(self._token(iat=200.0, jti="replacement"), 7)
+
+    def test_private_key_is_created_0600(self):
+        key_path = Path(self.tmp.name) / "new" / "direct.key"
+        host = direct_host.DirectHost(host_id="lab-host", key_path=key_path, run_call=lambda *_: {})
+        host.public_key_pem()
+        self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o600)
+
+    def test_close_is_scheduled_without_waiting(self):
+        class Future:
+            def add_done_callback(self, callback):
+                self.callback = callback
+
+        future = Future()
+
+        def schedule(coroutine, loop):
+            coroutine.close()
+            return future
+
+        self.host._loop = object()
+        with mock.patch("remoteRF_host.server.direct_host.asyncio.run_coroutine_threadsafe", side_effect=schedule):
+            self.host._close(lambda path: True)
+        self.assertTrue(hasattr(future, "callback"))
+
+    def test_large_request_closes_path(self):
+        class Reader:
+            async def readexactly(self, size):
+                return (direct_host.MAX_REQUEST_BYTES + 1).to_bytes(4, "big")
+
+        class Writer:
+            def close(self):
+                self.closed = True
+
+        class Ice:
+            _check_list = []
+            _protocols = []
+
+            async def close(self):
+                self.closed = True
+
+        self.host.refresh(7, self._token())
+        path = direct_host._HostPath(self.host, 7, "reservation-1", Ice())
+        self.host._paths[7] = [path]
+        writer = Writer()
+        asyncio.run(path._serve(Reader(), writer))
+        self.assertTrue(path.closed)
+        self.assertTrue(writer.closed)
+
+    def test_calls_for_a_device_are_serialized(self):
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def run_call(gid, request):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return {"value": map_arg("ok")}
+
+        class Reader:
+            def __init__(self, request):
+                self.parts = [len(request).to_bytes(4, "big"), request]
+
+            async def readexactly(self, size):
+                return self.parts.pop(0)
+
+        class Writer:
+            def write(self, data):
+                self.data = data
+
+            def write_eof(self):
+                pass
+
+            def close(self):
+                pass
+
+        self.host.run_call = run_call
+        self.host.refresh(7, self._token())
+        first = direct_host._HostPath(self.host, 7, "reservation-1", mock.Mock())
+        second = direct_host._HostPath(self.host, 7, "reservation-1", mock.Mock())
+        request = grpc_pb2.GenericRPCRequest(function_name="radio:gain:GET").SerializeToString()
+        async def serve_both():
+            await asyncio.gather(
+                first._serve(Reader(request), Writer()), second._serve(Reader(request), Writer()),
+            )
+
+        asyncio.run(serve_both())
+        self.assertEqual(maximum, 1)
+
+    def test_path_refuses_extra_streams(self):
+        path = direct_host._HostPath(self.host, 7, "reservation-1", mock.Mock())
+        started = asyncio.Event()
+        busy = []
+
+        async def serve(reader, writer):
+            await started.wait()
+
+        async def refuse(reader, writer):
+            busy.append(True)
+
+        path._serve = serve
+        path._busy = refuse
+
+        async def open_streams():
+            for _ in range(direct_host.MAX_STREAMS_PER_PATH + 1):
+                path._stream(None, None)
+            await asyncio.sleep(0)
+            self.assertEqual(busy, [True])
+            started.set()
+            await asyncio.gather(*path.streams)
+
+        asyncio.run(open_streams())
 
 
 @unittest.skipUnless(direct_host.available(), "direct path dependencies are unavailable")
@@ -219,8 +364,11 @@ class TunnelDirectControlTests(unittest.TestCase):
                     raise PermissionError("invalid grant")
                 return {"ufrag": "u"}
 
-            def end(self, gid):
-                self.ended = gid
+            def end(self, gid, at=None):
+                self.ended = (gid, at)
+
+            def revoke(self, gid, rid, at=None):
+                self.revoked = (gid, rid, at)
 
         direct = Direct()
         agent = self._agent(direct)
@@ -232,4 +380,68 @@ class TunnelDirectControlTests(unittest.TestCase):
         self.assertEqual(json.loads(answer.payload), {"error": "invalid grant"})
         with mock.patch("remoteRF_host.server.tunnel_agent.end_reservation"):
             agent._handle_control(pb.Control(kind="reservation_end", device_id="7"))
-        self.assertEqual(direct.ended, 7)
+        self.assertEqual(direct.ended, (7, None))
+
+    def test_reservation_end_forwards_lab_timestamp(self):
+        from remoteRF_host.common.grpc import grpc_host_pb2 as pb
+
+        class Direct:
+            def end(self, gid, at=None):
+                self.ended = (gid, at)
+
+        direct = Direct()
+        agent = self._agent(direct)
+        with mock.patch("remoteRF_host.server.tunnel_agent.end_reservation"):
+            agent._handle_control(pb.Control(
+                kind="reservation_end", device_id="7", payload=json.dumps({"at": 12.5}),
+            ))
+        self.assertEqual(direct.ended, (7, 12.5))
+
+    def test_revoke_does_not_reset_device(self):
+        from remoteRF_host.common.grpc import grpc_host_pb2 as pb
+
+        class Direct:
+            def revoke(self, gid, rid, at=None):
+                self.revoked = (gid, rid, at)
+
+        direct = Direct()
+        agent = self._agent(direct)
+        with mock.patch("remoteRF_host.server.tunnel_agent.end_reservation") as end:
+            agent._handle_control(pb.Control(
+                kind="revoke", device_id="7", payload=json.dumps({"rid": "reservation-1", "at": 12.5}),
+            ))
+        self.assertEqual(direct.revoked, (7, "reservation-1", 12.5))
+        end.assert_not_called()
+
+    def test_direct_call_uses_path_gid(self):
+        agent = self._agent(None)
+        request = grpc_pb2.GenericRPCRequest(function_name="radio:gain:GET")
+        request.args["g"].CopyFrom(map_arg("99"))
+        request.args["gid"].CopyFrom(map_arg("98"))
+        request.args["device_id"].CopyFrom(map_arg(97))
+        request.args["token"].CopyFrom(map_arg("untrusted"))
+        request.args["gain"].CopyFrom(map_arg(1))
+        with mock.patch("remoteRF_host.server.tunnel_agent.rpc_manager.run_rpc", return_value={}) as run:
+            agent._run_direct_call(7, request)
+        args = run.call_args.kwargs["args"]
+        self.assertEqual(unmap_arg(args["g"]), "7")
+        self.assertEqual(unmap_arg(args["gid"]), "7")
+        self.assertEqual(unmap_arg(args["device_id"]), 7)
+        self.assertEqual(unmap_arg(args["gain"]), 1)
+        self.assertNotIn("token", args)
+
+    def test_direct_answer_queue_failure_is_logged(self):
+        from remoteRF_host.common.grpc import grpc_host_pb2 as pb
+
+        class Direct:
+            def offer(self, gid, ice, grant):
+                return {"ufrag": "u"}
+
+        agent = self._agent(Direct())
+        with mock.patch.object(agent, "_enqueue", return_value=False), mock.patch(
+            "remoteRF_host.server.tunnel_agent.warn"
+        ) as warn:
+            agent._handle_direct_offer(pb.Control(
+                kind="direct_offer", device_id="7", req_id="answer", payload=json.dumps({"ice": "{}", "grant": "ok"}),
+            ))
+        self.assertIn("Could not queue direct answer", warn.call_args.args[0])
