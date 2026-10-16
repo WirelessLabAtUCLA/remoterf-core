@@ -25,6 +25,7 @@ message HostHello {
   string host_token = 3;
   repeated string capabilities = 4;
   string tls_public_key = 5;
+  string relay_ssh_public_key = 6;
 }
 
 message DeviceInfo {

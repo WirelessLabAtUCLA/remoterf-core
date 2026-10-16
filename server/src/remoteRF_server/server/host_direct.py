@@ -241,6 +241,13 @@ def _valid_answer(answer: object) -> bool:
         return False
     if any(type(candidate) is not str or len(candidate) > 512 for candidate in candidates):
         return False
+    relay = answer.get("relay")
+    if relay is not None and (
+        not isinstance(relay, dict)
+        or type(relay.get("session")) is not str
+        or len(relay["session"]) > 64
+    ):
+        return False
     try:
         return len(json.dumps(answer).encode("utf-8")) <= 16 * 1024
     except (TypeError, ValueError):
@@ -286,6 +293,10 @@ def offer(device, ice: str, *, rid: str, reservation_end: float, still_live) -> 
         answer = dict(response["answer"])
         answer["server_name"] = pin["server_name"]
         answer["ca_pem"] = pin["ca_pem"]
+        relay = answer.pop("relay", None)
+        slot = getattr(registry, "relay_slot_for_host", lambda _host_id: None)(host_id)
+        if isinstance(relay, dict) and slot is not None:
+            answer["relay"] = {"session": relay["session"], "endpoint": slot["endpoint"]}
         _start_refresher(host_id, gid, rid, reservation_end, still_live, session)
         return answer
     finally:
