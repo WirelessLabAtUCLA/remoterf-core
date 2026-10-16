@@ -43,8 +43,11 @@ import time
 import queue
 import grpc
 import random
+import shutil
+import subprocess
 import threading
 import traceback
+import contextlib
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -149,6 +152,102 @@ def _grpc_reason(code: Optional[grpc.StatusCode], details: str) -> str:
     if detail:
         return f"{name}: {detail}"
     return name
+
+
+class RelaySupervisor:
+    """Keeps the host's reverse SSH forwarding process alive."""
+
+    def __init__(self, direct, cfg_dir: Path, command_runner=None) -> None:
+        self.direct = direct
+        self.key_path = cfg_dir / "relay_ed25519"
+        self.known_hosts_path = cfg_dir / "relay_known_hosts"
+        self.command_runner = command_runner or self._run_command
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._process = None
+        self._thread = None
+        self._info = None
+
+    @staticmethod
+    def _run_command(argv):
+        return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def start(self, payload: dict) -> None:
+        fields = ("tunnel_host", "tunnel_port", "tunnel_user", "host_key", "port", "server_name", "endpoint")
+        if not all(isinstance(payload.get(name), (str, int)) and str(payload[name]) for name in fields):
+            raise ValueError("relay_info is missing tunnel details")
+        info = {name: str(payload[name]) for name in fields}
+        if any("\n" in value or "\r" in value for value in info.values()):
+            raise ValueError("relay_info contains a newline")
+        with self._lock:
+            if info == self._info:
+                return
+        self.stop(close_listener=False)
+        self.known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        self.known_hosts_path.write_text(
+            f"[{info['tunnel_host']}]:{info['tunnel_port']} {info['host_key']}\n"
+        )
+        os.chmod(self.known_hosts_path, 0o600)
+        listener_port = self.direct.start_relay()
+        with self._lock:
+            self._info = info
+            self._listener_port = listener_port
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=self._supervise, args=(self._stop,), name="hostrf-relay", daemon=True,
+            )
+            self._thread.start()
+
+    def is_up(self) -> bool:
+        with self._lock:
+            process = self._process
+            return process is not None and process.poll() is None
+
+    def stop(self, *, close_listener: bool = True) -> None:
+        with self._lock:
+            self._stop.set()
+            process = self._process
+            self._process = None
+            self._info = None
+        if process is not None and process.poll() is None:
+            with contextlib.suppress(Exception):
+                process.terminate()
+        if close_listener:
+            self.direct.stop_relay()
+
+    def _argv(self) -> list[str]:
+        with self._lock:
+            info = dict(self._info or {})
+            listener_port = self._listener_port
+        return [
+            "ssh", "-NT", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self.known_hosts_path}",
+            "-o", "IdentitiesOnly=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3", "-i", str(self.key_path), "-p", info["tunnel_port"], "-R",
+            f"127.0.0.1:{info['port']}:127.0.0.1:{listener_port}", f"{info['tunnel_user']}@{info['tunnel_host']}",
+        ]
+
+    def _supervise(self, stop: threading.Event) -> None:
+        delay = 5
+        while not stop.is_set():
+            process = None
+            try:
+                process = self.command_runner(self._argv())
+                with self._lock:
+                    if stop.is_set():
+                        with contextlib.suppress(Exception):
+                            process.terminate()
+                        return
+                    self._process = process
+                process.wait()
+            except Exception:
+                warn("Relay SSH process failed to start.", component="hostrf.tunnel_agent")
+            finally:
+                with self._lock:
+                    if process is not None and self._process is process:
+                        self._process = None
+            if stop.wait(delay):
+                return
+            delay = min(delay * 2, 300)
 
 
 # -------------------------
@@ -297,7 +396,7 @@ class AgentConfig:
 
 
 class HostTunnelAgent:
-    def __init__(self, cfg: AgentConfig) -> None:
+    def __init__(self, cfg: AgentConfig, *, relay_command_runner=None) -> None:
         self.cfg = cfg
         self._stop = threading.Event()
         self._out_q: "queue.Queue[Optional[host_pb2.HostFrame]]" = queue.Queue(maxsize=cfg.outbound_max)
@@ -312,10 +411,16 @@ class HostTunnelAgent:
 
         self._host_token: str = ""
         self._direct_host = None
+        self._relay_supervisor = None
+        self._relay_public_key = ""
+        self._relay_command_runner = relay_command_runner
 
     def stop(self) -> None:
         info("Stop requested.")
         self._stop.set()
+        relay = getattr(self, "_relay_supervisor", None)
+        if relay is not None:
+            relay.stop()
         try:
             self._out_q.put_nowait(None)
         except Exception:
@@ -418,6 +523,8 @@ class HostTunnelAgent:
             except Exception:
                 exception("Direct path setup failed; continuing without it.", component="hostrf.tunnel_agent")
 
+        self._setup_relay()
+
         mt = (
             host_env.get("HOST_MASTER_TOKEN", "").strip()
             or host_env.get("MASTER_TOKEN", "").strip()
@@ -451,6 +558,45 @@ class HostTunnelAgent:
             component="hostrf.tunnel_agent",
         )
 
+    def _setup_relay(self) -> None:
+        direct = getattr(self, "_direct_host", None)
+        fields = host_pb2.HostHello.DESCRIPTOR.fields_by_name
+        if (
+            direct is None
+            or "relay_ssh_public_key" not in fields
+            or shutil.which("ssh") is None
+            or shutil.which("ssh-keygen") is None
+        ):
+            return
+        key_path = _cfg_dir() / "relay_ed25519"
+        try:
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            public_path = key_path.with_name(key_path.name + ".pub")
+            if not key_path.exists():
+                subprocess.run(
+                    ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                )
+            os.chmod(key_path, 0o600)
+            if public_path.exists():
+                public_key = public_path.read_text().strip()
+            else:
+                public_key = subprocess.check_output(
+                    ["ssh-keygen", "-y", "-f", str(key_path)], text=True,
+                ).strip()
+            parts = public_key.split()
+            if len(parts) < 2 or parts[0] != "ssh-ed25519":
+                raise ValueError("relay key is not an ssh-ed25519 public key")
+            self._relay_public_key = public_key
+            if getattr(self, "_relay_supervisor", None) is None:
+                self._relay_supervisor = RelaySupervisor(
+                    direct, key_path.parent, getattr(self, "_relay_command_runner", None),
+                )
+        except Exception:
+            self._relay_public_key = ""
+            self._relay_supervisor = None
+            exception("Relay setup failed; continuing without it.", component="hostrf.tunnel_agent")
+
     # -------- frames --------
 
     def _hello_frame(self) -> host_pb2.HostFrame:
@@ -466,6 +612,14 @@ class HostTunnelAgent:
                 hello.tls_public_key = direct.public_key_pem()
             except Exception:
                 exception("Direct path identity failed; not advertising it.", component="hostrf.tunnel_agent")
+
+        if (
+            getattr(self, "_relay_public_key", "")
+            and hasattr(hello, "relay_ssh_public_key")
+            and hasattr(hello, "capabilities")
+        ):
+            hello.capabilities.append("relay")
+            hello.relay_ssh_public_key = self._relay_public_key
 
         return host_pb2.HostFrame(hello=hello)
 
@@ -705,6 +859,18 @@ class HostTunnelAgent:
             except Exception as exc:
                 warn(f"Invalid lab_info: {exc}", component="hostrf.tunnel_agent")
             return
+        if kind == "relay_info":
+            relay = getattr(self, "_relay_supervisor", None)
+            if relay is None:
+                return
+            try:
+                payload = json.loads(str(ctl.payload))
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not an object")
+                relay.start(payload)
+            except Exception as exc:
+                warn(f"Invalid relay_info: {exc}", component="hostrf.tunnel_agent")
+            return
         if kind == "direct_offer":
             threading.Thread(
                 target=self._handle_direct_offer,
@@ -775,6 +941,9 @@ class HostTunnelAgent:
                 raise ValueError("payload is not an object")
             answer = direct.offer(int(str(ctl.device_id)), str(payload["ice"]), str(payload["grant"]))
             response = {"answer": answer}
+            relay = getattr(self, "_relay_supervisor", None)
+            if relay is not None and relay.is_up():
+                response["relay"] = {"session": direct.issue_relay_session(int(str(ctl.device_id)))}
         except Exception as exc:
             response = {"error": str(exc)}
         queued = self._enqueue(host_pb2.HostFrame(control=host_pb2.Control(
@@ -1103,6 +1272,9 @@ class HostTunnelAgent:
                 delay = min(delay * 1.7, self.cfg.reconnect_max_delay_sec)
         finally:
             info("HostTunnelAgent exiting.", component="hostrf.tunnel_agent")
+            relay = getattr(self, "_relay_supervisor", None)
+            if relay is not None:
+                relay.stop()
             if status_started:
                 status("Stopped.", component="hostrf")
 

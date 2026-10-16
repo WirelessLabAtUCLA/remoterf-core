@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import queue
+import ssl
 import stat
 import tempfile
 import threading
@@ -135,6 +136,50 @@ class DirectHostGrantTests(unittest.TestCase):
         host = direct_host.DirectHost(host_id="lab-host", key_path=key_path, run_call=lambda *_: {})
         host.public_key_pem()
         self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o600)
+
+    def test_relay_session_is_one_use_expiring_and_grant_bound(self):
+        self.host.refresh(7, self._token(jti="relay-one"))
+        session = self.host.issue_relay_session(7)
+        gid, rid, expires = self.host._relay_sessions[session]
+        self.assertEqual((gid, rid), (7, "reservation-1"))
+        self.assertAlmostEqual(expires - time.time(), direct_host.RELAY_SESSION_SECONDS, delta=1)
+        self.host.refresh(7, self._token(rid="reservation-2", jti="relay-two"))
+        self.assertFalse(self.host._grant_is_current(gid, rid))
+
+        class Reader:
+            def __init__(self, value):
+                self.parts = [len(value).to_bytes(4, "big"), value]
+
+            async def readexactly(self, size):
+                if not self.parts:
+                    raise asyncio.IncompleteReadError(b"", size)
+                return self.parts.pop(0)
+
+        class Writer:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        writer = Writer()
+        asyncio.run(self.host._relay_connection(Reader(json.dumps({"session": session}).encode()), writer))
+        self.assertIn("invalid relay session", json.loads(writer.writes[0][4:].decode())["a"])
+        self.assertNotIn(session, self.host._relay_sessions)
+
+        expired = self.host.issue_relay_session(7)
+        old_gid, old_rid, _ = self.host._relay_sessions[expired]
+        self.host._relay_sessions[expired] = (old_gid, old_rid, time.time() - 1)
+        writer = Writer()
+        asyncio.run(self.host._relay_connection(Reader(json.dumps({"session": expired}).encode()), writer))
+        self.assertIn("invalid relay session", json.loads(writer.writes[0][4:].decode())["a"])
+        self.assertNotIn(expired, self.host._relay_sessions)
 
     def test_close_is_scheduled_without_waiting(self):
         class Future:
@@ -329,6 +374,52 @@ class DirectHostLoopbackTests(DirectHostGrantTests):
         except (OSError, asyncio.TimeoutError) as exc:
             self.skipTest(f"loopback ICE is unavailable: {exc}")
 
+    async def _relay_client(self, session: str):
+        context = ssl.create_default_context()
+        context.load_verify_locations(cadata=self.ca_cert.public_bytes(serialization.Encoding.PEM).decode())
+        context.check_hostname = True
+        port = self.host.start_relay()
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", port, ssl=context, server_hostname="lab-host--lab.global.remoterf.net",
+        )
+        writer.write(direct_host.DirectHost._frame(json.dumps({"session": session}).encode()))
+        await writer.drain()
+        return reader, writer
+
+    def test_tls_relay_serves_calls_and_closes_on_revoke(self):
+        async def run():
+            self.host.refresh(7, self._token(jti="relay-tls"))
+            reader, writer = await self._relay_client(self.host.issue_relay_session(7))
+            self.assertEqual(json.loads((await direct_host.DirectHost._read_frame(reader, 1024)).decode()), {"ok": True})
+
+            async def call(name):
+                writer.write(direct_host.DirectHost._frame(
+                    grpc_pb2.GenericRPCRequest(function_name=name).SerializeToString()))
+                await writer.drain()
+                response = grpc_pb2.GenericRPCResponse.FromString(
+                    await direct_host.DirectHost._read_frame(reader, direct_host.MAX_REQUEST_BYTES))
+                return {key: unmap_arg(value) for key, value in response.results.items()}
+
+            self.assertEqual((await call("radio:gain:GET"))["value"], "ok")
+            self.assertIn("not available", (await call("IDL:get_drivers"))["a"])
+            self.host.revoke(7, "reservation-1")
+            self.assertEqual(await asyncio.wait_for(reader.read(), 2), b"")
+            writer.close()
+            await writer.wait_closed()
+
+            bad_reader, bad_writer = await self._relay_client("not-a-session")
+            self.assertIn("invalid relay session", json.loads(
+                (await direct_host.DirectHost._read_frame(bad_reader, 1024)).decode())["a"])
+            bad_writer.close()
+            await bad_writer.wait_closed()
+
+        try:
+            asyncio.run(run())
+        except OSError as exc:
+            self.skipTest(f"loopback TLS is unavailable: {exc}")
+        finally:
+            self.host.stop_relay()
+
 
 class TunnelDirectControlTests(unittest.TestCase):
     def _agent(self, direct):
@@ -445,3 +536,117 @@ class TunnelDirectControlTests(unittest.TestCase):
                 kind="direct_offer", device_id="7", req_id="answer", payload=json.dumps({"ice": "{}", "grant": "ok"}),
             ))
         self.assertIn("Could not queue direct answer", warn.call_args.args[0])
+
+    def test_relay_info_writes_known_hosts_and_uses_expected_ssh_argv(self):
+        from remoteRF_host.server.tunnel_agent import RelaySupervisor
+
+        class Direct:
+            def start_relay(self):
+                return 50123
+
+            def stop_relay(self):
+                self.stopped = True
+
+        class Process:
+            def __init__(self):
+                self.done = threading.Event()
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def wait(self):
+                self.done.wait(2)
+
+            def terminate(self):
+                self.terminated = True
+                self.done.set()
+
+        calls, started = [], threading.Event()
+
+        def runner(argv):
+            calls.append(argv)
+            started.set()
+            return Process()
+
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = RelaySupervisor(Direct(), Path(directory), runner)
+            supervisor.start({
+                "tunnel_host": "tunnel.example", "tunnel_port": 2200, "tunnel_user": "relay",
+                "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest", "port": 62010,
+                "server_name": "lab-host--lab.global.remoterf.net", "endpoint": "lab-host--lab.global.remoterf.net:12321",
+            })
+            self.assertTrue(started.wait(2))
+            self.assertEqual(
+                calls[0],
+                [
+                    "ssh", "-NT", "-o", "StrictHostKeyChecking=yes", "-o",
+                    f"UserKnownHostsFile={Path(directory) / 'relay_known_hosts'}", "-o", "IdentitiesOnly=yes",
+                    "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o",
+                    "ServerAliveCountMax=3", "-i", str(Path(directory) / "relay_ed25519"), "-p", "2200", "-R",
+                    "127.0.0.1:62010:127.0.0.1:50123", "relay@tunnel.example",
+                ],
+            )
+            self.assertEqual(
+                (Path(directory) / "relay_known_hosts").read_text(),
+                "[tunnel.example]:2200 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n",
+            )
+            supervisor.stop()
+
+    def test_relay_key_and_hello_are_available_only_with_ssh_tools(self):
+        from remoteRF_host.server import tunnel_agent
+
+        class Hello:
+            DESCRIPTOR = type("Descriptor", (), {"fields_by_name": {"relay_ssh_public_key": object()}})()
+
+            def __init__(self, **fields):
+                self.host_id = fields["host_id"]
+                self.version = fields["version"]
+                self.host_token = ""
+                self.capabilities = []
+                self.tls_public_key = ""
+                self.relay_ssh_public_key = ""
+
+        class Frame:
+            def __init__(self, *, hello):
+                self.hello = hello
+
+        class Direct:
+            def public_key_pem(self):
+                return "direct public key"
+
+        def make_agent():
+            agent = tunnel_agent.HostTunnelAgent.__new__(tunnel_agent.HostTunnelAgent)
+            agent._direct_host = Direct()
+            agent._relay_command_runner = None
+            agent._relay_public_key = ""
+            agent._relay_supervisor = None
+            agent._host_id = "lab-host"
+            agent._host_token = "token"
+            agent.cfg = mock.Mock(version="test")
+            return agent
+
+        def generate(argv, **kwargs):
+            key_path = Path(argv[-1])
+            key_path.write_text("private")
+            key_path.with_name(key_path.name + ".pub").write_text(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest relay\n")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            tunnel_agent.host_pb2, "HostHello", Hello,
+        ), mock.patch.object(tunnel_agent.host_pb2, "HostFrame", Frame), mock.patch(
+            "remoteRF_host.server.tunnel_agent._cfg_dir", return_value=Path(directory),
+        ), mock.patch("remoteRF_host.server.tunnel_agent.shutil.which", return_value="/usr/bin/ssh"), mock.patch(
+            "remoteRF_host.server.tunnel_agent.subprocess.run", side_effect=generate,
+        ):
+            agent = make_agent()
+            agent._setup_relay()
+            self.assertEqual(stat.S_IMODE((Path(directory) / "relay_ed25519").stat().st_mode), 0o600)
+            hello = agent._hello_frame().hello
+            self.assertEqual(hello.capabilities, ["direct", "relay"])
+            self.assertTrue(hello.relay_ssh_public_key.startswith("ssh-ed25519 "))
+
+            unavailable = make_agent()
+            with mock.patch("remoteRF_host.server.tunnel_agent.shutil.which", return_value=None):
+                unavailable._setup_relay()
+            self.assertEqual(unavailable._hello_frame().hello.capabilities, ["direct"])

@@ -29,6 +29,8 @@ import contextlib
 import json
 import math
 import os
+import secrets
+import ssl
 import threading
 import time
 from pathlib import Path
@@ -43,6 +45,8 @@ IDLE_SECONDS = 600
 MAX_PATHS_PER_DEVICE = 4  # one holder's processes; the oldest makes room
 MAX_STREAMS_PER_PATH = 8
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
+MAX_RELAY_HELLO_BYTES = 64 * 1024
+RELAY_SESSION_SECONDS = 60
 GRANT_ENDED = "the reservation's grant has ended"
 
 
@@ -71,6 +75,9 @@ class DirectHost:
         self._accepted_iat: dict[int, float] = {}
         self._paths: dict[int, list] = {}
         self._call_locks: dict[int, asyncio.Lock] = {}
+        self._relay_sessions: dict[str, tuple[int, str, float]] = {}
+        self._relay_server = None
+        self._relay_port: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -- identity --------------------------------------------------------
@@ -228,7 +235,108 @@ class DirectHost:
                 self._revoked.add(claims["jti"])
             self._grants.clear()
             self._lab.clear()
+            self._relay_sessions.clear()
         self._close(lambda path: True)
+
+    # -- relay -----------------------------------------------------------
+
+    def start_relay(self) -> int:
+        """Start the loopback TLS endpoint used by the SSH relay."""
+        future = asyncio.run_coroutine_threadsafe(self._start_relay(), self._get_loop())
+        return int(future.result(CONNECT_SECONDS))
+
+    def stop_relay(self) -> None:
+        if self._loop is None:
+            return
+        coroutine = self._stop_relay()
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except Exception:
+            coroutine.close()
+            return
+        future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+
+    def issue_relay_session(self, gid: int) -> str:
+        """Make a one-use, short-lived relay secret for this device's grant."""
+        with self._lock:
+            claims = self._grants.get(int(gid))
+            if (
+                claims is None
+                or claims["exp"] <= time.time()
+                or claims["jti"] in self._revoked
+            ):
+                raise PermissionError(GRANT_ENDED)
+            session = secrets.token_urlsafe(24)
+            self._relay_sessions[session] = (int(gid), claims["rid"], time.time() + RELAY_SESSION_SECONDS)
+            return session
+
+    async def _start_relay(self) -> int:
+        if self._relay_server is not None:
+            return int(self._relay_port)
+        if not self.cert_path.exists() or not self.key_path.exists():
+            raise RuntimeError("the host TLS certificate is not configured")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.cert_path, self.key_path)
+        context.set_alpn_protocols(["remoterf-direct/1"])
+        self._relay_server = await asyncio.start_server(
+            self._relay_connection, "127.0.0.1", 0, ssl=context,
+        )
+        self._relay_port = int(self._relay_server.sockets[0].getsockname()[1])
+        return self._relay_port
+
+    async def _stop_relay(self) -> None:
+        server, self._relay_server = self._relay_server, None
+        self._relay_port = None
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+
+    async def _relay_connection(self, reader, writer) -> None:
+        path = None
+        try:
+            hello = json.loads((await self._read_frame(reader, MAX_RELAY_HELLO_BYTES)).decode())
+            if not isinstance(hello, dict) or not isinstance(hello.get("session"), str):
+                raise ValueError("invalid relay session")
+            with self._lock:
+                session = self._relay_sessions.pop(hello["session"], None)
+            if session is None or session[2] <= time.time() or not self._grant_is_current(session[0], session[1]):
+                raise ValueError("invalid relay session")
+            path = _RelayPath(self, session[0], session[1], writer)
+            self._paths.setdefault(path.gid, []).append(path)
+            writer.write(self._frame(json.dumps({"ok": True}).encode()))
+            await writer.drain()
+            while True:
+                raw = await self._read_frame(reader, MAX_REQUEST_BYTES)
+                request = grpc_pb2.GenericRPCRequest.FromString(raw)
+                results, drop = await self._serve_call(path.gid, path.rid, request)
+                writer.write(self._frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
+                await writer.drain()
+                if drop:
+                    break
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        except Exception as exc:  # invalid hello has a small, useful response; bad RPC framing closes
+            if path is None:
+                with contextlib.suppress(Exception):
+                    writer.write(self._frame(json.dumps({"a": str(exc)}).encode()))
+                    await writer.drain()
+        finally:
+            if path is not None:
+                await path.close()
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    @staticmethod
+    def _frame(payload: bytes) -> bytes:
+        return len(payload).to_bytes(4, "big") + payload
+
+    @staticmethod
+    async def _read_frame(reader, limit: int) -> bytes:
+        size = int.from_bytes(await reader.readexactly(4), "big")
+        if size > limit:
+            raise ValueError("direct request frame is too large")
+        return await reader.readexactly(size)
 
     def _close(self, which) -> None:
         if self._loop is None:
@@ -270,6 +378,24 @@ class DirectHost:
     def _require_current_grant(self, gid: int, rid: str) -> None:
         if not self._grant_is_current(gid, rid):
             raise PermissionError(GRANT_ENDED)
+
+    async def _serve_call(self, gid: int, rid: str, request) -> tuple[dict, bool]:
+        refused = self._refusal(gid, rid, request.function_name)
+        drop = refused == GRANT_ENDED
+        if refused is not None:
+            return {"a": map_arg(refused)}, drop
+        lock = self._call_locks.setdefault(gid, asyncio.Lock())
+        async with lock:
+            refused = self._refusal(gid, rid, request.function_name)
+            if refused is None:
+                try:
+                    results = await asyncio.get_running_loop().run_in_executor(None, self.run_call, gid, request)
+                except Exception as exc:  # device exceptions are normal RPC results
+                    results = {"a": map_arg(str(exc))}
+                refused = self._refusal(gid, rid, request.function_name)
+            if refused is not None:
+                return {"a": map_arg(refused)}, refused == GRANT_ENDED
+            return results, False
 
     async def _offer(self, gid: int, rid: str, remote: dict) -> dict:
         from aioice import Candidate
@@ -408,24 +534,7 @@ class _HostPath:
                 request = grpc_pb2.GenericRPCRequest.FromString(await reader.readexactly(size))
             except asyncio.IncompleteReadError:
                 return
-            refused = self.owner._refusal(self.gid, self.rid, request.function_name)
-            drop = refused == GRANT_ENDED
-            if refused is not None:
-                results = {"a": map_arg(refused)}
-            else:
-                lock = self.owner._call_locks.setdefault(self.gid, asyncio.Lock())
-                async with lock:
-                    refused = self.owner._refusal(self.gid, self.rid, request.function_name)
-                    if refused is None:
-                        try:
-                            results = await asyncio.get_running_loop().run_in_executor(
-                                None, self.owner.run_call, self.gid, request)
-                        except Exception as exc:  # device exceptions are normal RPC results
-                            results = {"a": map_arg(str(exc))}
-                        refused = self.owner._refusal(self.gid, self.rid, request.function_name)
-                    if refused is not None:
-                        results = {"a": map_arg(refused)}
-                        drop = refused == GRANT_ENDED
+            results, drop = await self.owner._serve_call(self.gid, self.rid, request)
             writer.write(core.frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
             writer.write_eof()
         except Exception:  # noqa: BLE001 - not our framing: answer nothing more on this path
@@ -450,3 +559,20 @@ class _HostPath:
             await asyncio.wait({task})
         await core.cancel_tasks(list(self.streams))
         await core.close_ice(self.ice)
+
+
+class _RelayPath:
+    """A TCP relay connection, closed by the same grant cleanup as QUIC paths."""
+
+    def __init__(self, owner: DirectHost, gid: int, rid: str, writer) -> None:
+        self.owner, self.gid, self.rid, self.writer = owner, gid, rid, writer
+        self.closed = False
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        paths = self.owner._paths.get(self.gid, [])
+        if self in paths:
+            paths.remove(self)
+        self.writer.close()
