@@ -436,8 +436,9 @@ REPORT_PATH = "/v2/broker/deployments/report"
 class GlobalError(RuntimeError):
     """A refusal that came from Global, carrying its stable error code."""
 
-    def __init__(self, code: str, message: str = ""):
+    def __init__(self, code: str, message: str = "", *, status_code: int | None = None):
         self.code = code
+        self.status_code = status_code
         super().__init__(message or code)
 
 
@@ -519,8 +520,10 @@ def call(method: str, path: str, payload: Optional[dict] = None, *, timeout: flo
         try:
             error = response.json()["error"]
         except Exception:  # noqa: BLE001
-            raise GlobalError("http_" + str(response.status_code))
-        raise GlobalError(error.get("code", "unknown"), error.get("message", ""))
+            raise GlobalError("http_" + str(response.status_code), status_code=response.status_code)
+        raise GlobalError(
+            error.get("code", "unknown"), error.get("message", ""), status_code=response.status_code,
+        )
     return response.json() if response.content else {}
 
 

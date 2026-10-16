@@ -64,9 +64,12 @@ from .host_auth_token import is_host_token_valid, list_hosts
 LOG_MODE = "OFF" 
 _LOG_LOCK = threading.Lock()
 HOST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")  # adjust if you want
+RELAY_HOST_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+RELAY_SSH_PUBLIC_KEY_RE = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]+={0,3}")
 _RELAY_SYNC_INITIAL_DELAY_SECONDS = 0.1
 _RELAY_SYNC_MIN_BACKOFF_SECONDS = 5
 _RELAY_SYNC_MAX_BACKOFF_SECONDS = 300
+_RELAY_SYNC_HTTP_400_BACKOFF_SECONDS = 60 * 60
 
 def _grpc_err_summary(e: grpc.RpcError) -> str:
     try:
@@ -119,6 +122,22 @@ def _validate_host_id(raw: str) -> str:
             f"Got: {hid!r}"
         )
     return hid
+
+
+def _is_valid_relay_host_id(host_id: str) -> bool:
+    return (
+        isinstance(host_id, str)
+        and bool(RELAY_HOST_ID_RE.fullmatch(host_id))
+        and "--" not in host_id
+    )
+
+
+def _relay_ssh_public_key(value: object) -> str:
+    parts = str(value or "").split(None, 2)
+    if len(parts) < 2:
+        return ""
+    key = f"{parts[0]} {parts[1]}"
+    return key if RELAY_SSH_PUBLIC_KEY_RE.fullmatch(key) else ""
 
 def _ts() -> str:
     t = time.time()
@@ -339,6 +358,8 @@ class HostTunnelRegistry:
         self._relay_sync_running = False
         self._relay_sync_pending = False
         self._relay_sync_backoff = _RELAY_SYNC_MIN_BACKOFF_SECONDS
+        self._relay_sync_retry_delay: Optional[float] = None
+        self._invalid_relay_key_warnings: Set[str] = set()
 
         # persistence
         cfg = cfg_dir_from_file(__file__)
@@ -399,8 +420,9 @@ class HostTunnelRegistry:
                 if key.startswith("HOST_") and key.endswith("_RELAY_SSH_PUBLIC_KEY") and value:
                     prefix = key.removesuffix("_RELAY_SSH_PUBLIC_KEY")
                     host_id = kv_meta.get(prefix + "_ID", "").strip()
-                    if host_id:
-                        self._relay_host_keys[host_id] = value
+                    relay_key = _relay_ssh_public_key(value)
+                    if host_id and relay_key:
+                        self._relay_host_keys[host_id] = relay_key
 
             devices_from_host_lists: Set[str] = set()
             for k, v in kv_lists.items():
@@ -474,7 +496,12 @@ class HostTunnelRegistry:
         if version:
             self._env_meta.upsert_kv(f"HOST_{hk}_VERSION", version)
         if relay_ssh_public_key is not None:
-            self._env_meta.upsert_kv(f"HOST_{hk}_RELAY_SSH_PUBLIC_KEY", relay_ssh_public_key)
+            relay_key = _relay_ssh_public_key(relay_ssh_public_key)
+            relay_key_name = f"HOST_{hk}_RELAY_SSH_PUBLIC_KEY"
+            if relay_key:
+                self._env_meta.upsert_kv(relay_key_name, relay_key)
+            else:
+                self._env_meta.remove_keys([relay_key_name])
 
     def persist_host_meta_from_hello(self, hello: Any) -> None:
         try:
@@ -485,8 +512,14 @@ class HostTunnelRegistry:
                     str(capability).strip() for capability in getattr(hello, "capabilities", [])
                     if str(capability).strip()
                 }
-                relay_key = str(getattr(hello, "relay_ssh_public_key", "") or "").strip()
-                relay_key = relay_key if "relay" in capabilities else ""
+                raw_relay_key = getattr(hello, "relay_ssh_public_key", "")
+                relay_key = _relay_ssh_public_key(raw_relay_key) if "relay" in capabilities else ""
+                if "relay" in capabilities and str(raw_relay_key or "").strip() and not relay_key:
+                    with self._lock:
+                        first_warning = hid not in self._invalid_relay_key_warnings
+                        self._invalid_relay_key_warnings.add(hid)
+                    if first_warning:
+                        warn(f"[relay] ignoring invalid SSH public key for host_id={hid!r}")
                 with self._lock:
                     changed = self._relay_host_keys.get(hid, "") != relay_key
                     if relay_key:
@@ -502,7 +535,7 @@ class HostTunnelRegistry:
 
     @staticmethod
     def _valid_relay_host_id(host_id: str) -> bool:
-        if not HOST_ID_RE.fullmatch(host_id) or "--" in host_id:
+        if not _is_valid_relay_host_id(host_id):
             return False
         try:
             from ..server import global_onboarding
@@ -514,12 +547,19 @@ class HostTunnelRegistry:
 
     def _relay_hosts_payload(self) -> list[dict]:
         with self._lock:
-            items = sorted(self._relay_host_keys.items())
+            keys = dict(self._relay_host_keys)
+            slot_holders = list(self._relay_slots)
+        eligible = {
+            host_id: ssh_public_key
+            for host_id, ssh_public_key in keys.items()
+            if self._valid_relay_host_id(host_id) and _relay_ssh_public_key(ssh_public_key)
+        }
+        host_ids = [host_id for host_id in slot_holders if host_id in eligible]
+        host_ids.extend(sorted(set(eligible) - set(host_ids)))
         return [
-            {"host_id": host_id, "ssh_public_key": ssh_public_key}
-            for host_id, ssh_public_key in items
-            if self._valid_relay_host_id(host_id) and ssh_public_key
-        ][:8]
+            {"host_id": host_id, "ssh_public_key": eligible[host_id]}
+            for host_id in host_ids[:8]
+        ]
 
     def _schedule_relay_sync(self, *, initial: bool = False, delay: Optional[float] = None) -> None:
         try:
@@ -546,6 +586,7 @@ class HostTunnelRegistry:
             self._relay_sync_timer = None
             self._relay_sync_running = True
             self._relay_sync_pending = False
+            self._relay_sync_retry_delay = None
         success = False
         try:
             success = self.sync_relay_hosts()
@@ -553,12 +594,12 @@ class HostTunnelRegistry:
             with self._relay_sync_lock:
                 self._relay_sync_running = False
                 pending = self._relay_sync_pending
-            if pending:
-                self._schedule_relay_sync()
-            elif not success:
-                delay = self._relay_sync_backoff
+            if not success:
+                delay = self._relay_sync_retry_delay or self._relay_sync_backoff
                 self._relay_sync_backoff = min(_RELAY_SYNC_MAX_BACKOFF_SECONDS, delay * 2)
                 self._schedule_relay_sync(delay=delay)
+            elif pending:
+                self._schedule_relay_sync()
 
     def sync_relay_hosts(self) -> bool:
         """Publish the desired host relay set. Called only by the background worker."""
@@ -567,13 +608,18 @@ class HostTunnelRegistry:
 
             if global_onboarding.state() != "active":
                 return True
+            hosts = self._relay_hosts_payload()
+            with self._lock:
+                has_slots = bool(self._relay_slots)
+            if not hosts and not has_slots:
+                return True
             result = global_onboarding.call(
-                "POST", global_onboarding.ME_PATH, {"hosts": self._relay_hosts_payload()},
+                "POST", global_onboarding.ME_PATH, {"hosts": hosts},
             )
             relays = result.get("host_relays") if isinstance(result, dict) else None
             if not isinstance(relays, list):
                 raise ValueError("invalid host relay response")
-            requested = {item["host_id"] for item in self._relay_hosts_payload()}
+            requested = {item["host_id"] for item in hosts}
             slots = {}
             for relay in relays:
                 if not isinstance(relay, dict):
@@ -598,6 +644,8 @@ class HostTunnelRegistry:
                 self.send_relay_info(session)
             return True
         except Exception as exc:
+            if getattr(exc, "status_code", None) == 400 or getattr(exc, "code", None) == "http_400":
+                self._relay_sync_retry_delay = _RELAY_SYNC_HTTP_400_BACKOFF_SECONDS
             warn(f"[relay] host slot sync failed: {exc}")
             return False
 

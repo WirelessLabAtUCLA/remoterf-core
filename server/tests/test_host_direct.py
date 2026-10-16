@@ -123,6 +123,7 @@ def test_lab_info_names_the_host_under_the_relay_hostname_global_assigned(tmp_pa
 
 def test_lab_info_skips_invalid_direct_dns_names(tmp_path, monkeypatch):
     identity_dir, _ = _enrolled(tmp_path, monkeypatch)
+    assert host_direct.lab_info("Host", "not a key") is None
     assert host_direct.lab_info("x" * 61, "not a key") is None
     assert host_direct.lab_info("host--part", "not a key") is None
     save_state(identity_dir, DeploymentState(deployment_id="deployment-1", slug="part--two"))
@@ -256,7 +257,7 @@ def test_offer_sanitizes_host_relay_answer(monkeypatch):
     class Registry:
         response = {"answer": {
             "ufrag": "u", "pwd": "p", "candidates": [],
-            "relay": {"session": "one-use", "untrusted": "drop-me"},
+            "relay": {"session": "one-use"},
         }}
 
         def session_for_host(self, _host_id):
@@ -274,6 +275,14 @@ def test_offer_sanitizes_host_relay_answer(monkeypatch):
     monkeypatch.setattr(host_direct, "_start_refresher", lambda *args: None)
     device = VirtualDevice(gid=7, host_id="relay-node", device_id="7")
 
+    answer = host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True)
+    assert answer["relay"] == {"session": "one-use", "endpoint": "relay-node--lab.global.remoterf.net:12321"}
+
+    host_direct._offer_cooldowns.clear()
+    registry.response = {
+        "answer": {"ufrag": "u", "pwd": "p", "candidates": []},
+        "relay": {"session": "one-use", "untrusted": "drop-me"},
+    }
     answer = host_direct.offer(device, "{}", rid="reservation-9", reservation_end=2000, still_live=lambda: True)
     assert answer["relay"] == {"session": "one-use", "endpoint": "relay-node--lab.global.remoterf.net:12321"}
 
@@ -361,6 +370,83 @@ def test_relay_sync_skips_labs_not_active_on_global(tmp_path, monkeypatch):
         host_id="relay-node", capabilities=["relay"], relay_ssh_public_key="ssh-ed25519 AAAAkey",
     ))
     assert registry.sync_relay_hosts()
+
+
+def test_relay_keys_and_host_names_are_validated_before_sync(tmp_path, monkeypatch):
+    from remoteRF_server.server import global_onboarding
+
+    monkeypatch.setattr(hts, "cfg_dir_from_file", lambda _path: tmp_path)
+    monkeypatch.setattr(global_onboarding, "state", lambda: "unregistered")
+    registry = hts.HostTunnelRegistry()
+    monkeypatch.setattr(global_onboarding, "lab_slug", lambda: "lab")
+    warnings = []
+    monkeypatch.setattr(hts, "warn", warnings.append)
+
+    registry.persist_host_meta_from_hello(hts.host_tunnel_pb2.HostHello(
+        host_id="relay-node", capabilities=["relay"],
+        relay_ssh_public_key="ssh-ed25519 AAAAkey comment\nignored",
+    ))
+    registry.persist_host_meta_from_hello(hts.host_tunnel_pb2.HostHello(
+        host_id="bad--host", capabilities=["relay"], relay_ssh_public_key="ssh-ed25519 AAAAkey",
+    ))
+    registry.persist_host_meta_from_hello(hts.host_tunnel_pb2.HostHello(
+        host_id="invalid-key", capabilities=["relay"], relay_ssh_public_key="ssh-ed25519 bad$key\nINJECTED=1",
+    ))
+    registry.persist_host_meta_from_hello(hts.host_tunnel_pb2.HostHello(
+        host_id="invalid-key", capabilities=["relay"], relay_ssh_public_key="ssh-ed25519 bad$key",
+    ))
+
+    assert registry._relay_hosts_payload() == [
+        {"host_id": "relay-node", "ssh_public_key": "ssh-ed25519 AAAAkey"},
+    ]
+    meta = (tmp_path / "host_directory_meta.env").read_text()
+    assert "RELAY_SSH_PUBLIC_KEY=ssh-ed25519 AAAAkey\n" in meta
+    assert "comment" not in meta and "INJECTED" not in meta
+    assert len(warnings) == 1
+
+
+def test_relay_sync_keeps_slot_holders_and_waits_after_http_400(tmp_path, monkeypatch):
+    from remoteRF_server.server import global_onboarding
+
+    monkeypatch.setattr(hts, "cfg_dir_from_file", lambda _path: tmp_path)
+    monkeypatch.setattr(global_onboarding, "state", lambda: "unregistered")
+    registry = hts.HostTunnelRegistry()
+    monkeypatch.setattr(global_onboarding, "state", lambda: "active")
+    monkeypatch.setattr(global_onboarding, "lab_slug", lambda: "lab")
+    monkeypatch.setattr(
+        global_onboarding, "call", lambda *_args: (_ for _ in ()).throw(AssertionError("broker call")),
+    )
+    assert registry.sync_relay_hosts()
+    registry._relay_host_keys = {
+        f"relay-{number:02d}": f"ssh-ed25519 AAAA{number:02d}"
+        for number in range(10)
+    }
+    registry._relay_slots = {
+        "relay-07": {"endpoint": "relay-07--lab.global.remoterf.net:12321"},
+        "relay-08": {"endpoint": "relay-08--lab.global.remoterf.net:12321"},
+    }
+    assert [item["host_id"] for item in registry._relay_hosts_payload()] == [
+        "relay-07", "relay-08", "relay-00", "relay-01", "relay-02", "relay-03", "relay-04", "relay-05",
+    ]
+
+    scheduled = []
+
+    class Timer:
+        def __init__(self, delay, function):
+            scheduled.append(delay)
+            self.function = function
+            self.daemon = False
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(hts.threading, "Timer", Timer)
+    monkeypatch.setattr(
+        global_onboarding, "call",
+        lambda *_args: (_ for _ in ()).throw(global_onboarding.GlobalError("duplicate_key", status_code=400)),
+    )
+    registry._relay_sync_worker()
+    assert scheduled == [60 * 60]
 
 
 def test_offer_refreshes_old_lab_info(monkeypatch):

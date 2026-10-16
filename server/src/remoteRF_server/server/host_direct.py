@@ -101,7 +101,7 @@ def lab_info(host_id: str, tls_public_key: str) -> dict | None:
         state_dir, state, hostname = _identity()
         slug = hostname.split(".", 1)[0]
         load_private_key(state_dir)
-        if "--" in host_id or "--" in slug or len(f"{host_id}--{slug}") > 63:
+        if not hts._is_valid_relay_host_id(host_id) or "--" in slug or len(f"{host_id}--{slug}") > 63:
             key = (host_id, slug)
             with _invalid_name_lock:
                 first_warning = key not in _invalid_name_warnings
@@ -305,7 +305,12 @@ def offer(device, ice: str, *, rid: str, reservation_end: float, still_live) -> 
         answer = dict(response["answer"])
         answer["server_name"] = pin["server_name"]
         answer["ca_pem"] = pin["ca_pem"]
-        relay = answer.pop("relay", None)
+        relay = answer.pop("relay", response.get("relay"))
+        if relay is not None and not _valid_answer({
+            "ufrag": answer["ufrag"], "pwd": answer["pwd"], "candidates": answer["candidates"], "relay": relay,
+        }):
+            failed = True
+            return None
         slot = getattr(registry, "relay_slot_for_host", lambda _host_id: None)(host_id)
         if isinstance(relay, dict) and slot is not None:
             answer["relay"] = {"session": relay["session"], "endpoint": slot["endpoint"]}
