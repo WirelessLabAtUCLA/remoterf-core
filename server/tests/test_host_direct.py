@@ -57,6 +57,10 @@ def _enrolled(tmp_path, monkeypatch):
     cert_dir.mkdir()
     ca = _ca(cert_dir)
     monkeypatch.setenv("REMOTERF_CERT_DIR", str(cert_dir))
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "global.env").write_text("GLOBAL_STATE=active\n")
+    monkeypatch.setenv("REMOTERF_CONFIG_DIR", str(config))
     return identity_dir, ca
 
 
@@ -101,6 +105,20 @@ def test_lab_info_skips_unenrolled_or_missing_direct_capability(tmp_path, monkey
     session = hts.HostSession("lab-host", tls_public_key="a key")
     assert not hts._send_lab_info(registry, session)
     assert session.out_q.empty()
+
+
+def test_lab_info_names_the_host_under_the_relay_hostname_global_assigned(tmp_path, monkeypatch):
+    # A lab enrolled before slugs were stored has none in its identity; global.env has the name.
+    identity_dir, _ = _enrolled(tmp_path, monkeypatch)
+    save_state(identity_dir, DeploymentState(deployment_id="deployment-1"))
+    (tmp_path / "config" / "global.env").write_text("GLOBAL_STATE=active\nGLOBAL_RELAY_HOSTNAME=ucla.global.remoterf.net\n")
+    host_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    info = host_direct.lab_info("lab-host", host_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode())
+    assert info is not None and info["server_name"] == "lab-host--ucla.global.remoterf.net"
+    (tmp_path / "config" / "global.env").write_text("GLOBAL_STATE=left\nGLOBAL_RELAY_HOSTNAME=ucla.global.remoterf.net\n")
+    assert host_direct.lab_info("lab-host", "not a key") is None
 
 
 def test_lab_info_skips_invalid_direct_dns_names(tmp_path, monkeypatch):

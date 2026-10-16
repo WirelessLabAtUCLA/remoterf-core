@@ -55,11 +55,16 @@ def _cert_dir() -> Path:
 
 
 def _identity():
+    """(identity dir, state, this lab's relay hostname); the hostname comes from
+    what Global assigned (global.env), as the identity's own slug may be unset."""
     state_dir = global_onboarding.identity_dir()
     state = load_state(state_dir)
-    if not state.enrolled or not state.deployment_id or not state.slug:
-        raise RuntimeError("deployment is not enrolled on RemoteRF Global")
-    return state_dir, state
+    kv = global_onboarding.load()
+    hostname = kv.get("GLOBAL_RELAY_HOSTNAME", "").strip().lower() or (
+        f"{state.slug}.global.remoterf.net" if state.slug else "")
+    if not state.enrolled or not state.deployment_id or not hostname or kv.get("GLOBAL_STATE") != "active":
+        raise RuntimeError("deployment is not active on RemoteRF Global")
+    return state_dir, state, hostname
 
 
 def _certificate(server_name: str, tls_public_key: str) -> str:
@@ -93,17 +98,18 @@ def _certificate(server_name: str, tls_public_key: str) -> str:
 def lab_info(host_id: str, tls_public_key: str) -> dict | None:
     """Build the host's direct-path trust bundle, or skip unavailable setup."""
     try:
-        state_dir, state = _identity()
+        state_dir, state, hostname = _identity()
+        slug = hostname.split(".", 1)[0]
         load_private_key(state_dir)
-        if "--" in host_id or "--" in state.slug or len(f"{host_id}--{state.slug}") > 63:
-            key = (host_id, state.slug)
+        if "--" in host_id or "--" in slug or len(f"{host_id}--{slug}") > 63:
+            key = (host_id, slug)
             with _invalid_name_lock:
                 first_warning = key not in _invalid_name_warnings
                 _invalid_name_warnings.add(key)
             if first_warning:
                 logger.warning("host direct path unavailable for %s: invalid direct DNS name", host_id)
             return None
-        server_name = f"{host_id}--{state.slug}.global.remoterf.net"
+        server_name = f"{host_id}--{hostname}"
         return {
             "deployment_id": state.deployment_id,
             "grant_key": public_key_pem(state_dir),
@@ -117,7 +123,7 @@ def lab_info(host_id: str, tls_public_key: str) -> dict | None:
 
 
 def issue_grant(host_id: str, gid: int, rid: str, reservation_end: float) -> str:
-    state_dir, state = _identity()
+    state_dir, state, _hostname = _identity()
     now = time.time()
     claims = {
         "iss": state.deployment_id,
