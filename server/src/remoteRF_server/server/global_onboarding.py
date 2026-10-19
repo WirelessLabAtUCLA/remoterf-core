@@ -65,8 +65,9 @@ time reserved so far (a single number), and your LAN address. Nothing else leave
 server -- no credentials, no user or reservation details -- and the
 connection only goes outward.
 
-A RemoteRF admin reviews each new deployment by hand, so there is a short wait
-before your address goes live. You can join or leave whenever you like:
+A RemoteRF admin will review your new deployment before its address goes live.
+If you opt out, you cannot opt back in without a full data reset. You may leave
+at any time:
 
     serverrf global join
     serverrf global leave"""
