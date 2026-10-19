@@ -120,11 +120,18 @@ except Exception:
 from .rpc_manager import rpc_manager  # type: ignore
 
 try:
-    from .device_manager import end_reservation, get_configured_devices, get_device_schema, reload_devices  # type: ignore
+    from .device_manager import (  # type: ignore
+        end_reservation,
+        get_configured_devices,
+        get_device_schema,
+        prepare_reservation,
+        reload_devices,
+    )
 except Exception:
     end_reservation = None
     get_configured_devices = None
     get_device_schema = None
+    prepare_reservation = None
     reload_devices = None
 
 
@@ -898,13 +905,20 @@ class HostTunnelAgent:
             except Exception as exc:
                 warn(f"Invalid direct grant: {exc}", component="hostrf.tunnel_agent")
             return
-        if kind not in ("reservation_end", "revoke"):
+        if kind not in ("reservation_start", "reservation_end", "revoke"):
             warn(f"Ignoring control frame kind={kind!r}", component="hostrf.tunnel_agent")
             return
         try:
             gid = int(str(ctl.device_id))
         except ValueError:
             warn(f"{kind} for a bad device_id={ctl.device_id!r}", component="hostrf.tunnel_agent")
+            return
+        if kind == "reservation_start":
+            if gid not in self._devices or not callable(prepare_reservation):
+                warn(f"reservation_start for unknown gid={gid}", component="hostrf.tunnel_agent")
+                return
+            prepare_reservation(gid)  # queued: the boot runs off this loop
+            info(f"Reservation started on device {gid}: preparing device.", component="hostrf")
             return
         try:
             payload = json.loads(str(ctl.payload)) if ctl.payload else {}

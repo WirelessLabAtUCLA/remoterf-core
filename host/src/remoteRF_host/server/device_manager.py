@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..common.idl import ensure_default_driver_files, get_driver_class, load_drivers
 from ..common.idl.host_drivers import _packaged_schema_path, _seed_default_driver
@@ -28,6 +29,7 @@ from ..common.utils.host_logging import error, warn
 
 _state_lock = threading.RLock()
 _reservation_end_callbacks: list = []
+_reservation_hooks: Dict[int, ThreadPoolExecutor] = {}
 _HOST_BRIDGE_TOKEN_PREFIX = "__remoterf_host_v2_gid__:"
 
 
@@ -500,23 +502,43 @@ def register_reservation_end_callback(callback) -> None:
             _reservation_end_callbacks.append(callback)
 
 
-def end_reservation(device_id: int | str) -> None:
+def _run_hook(gid: int, name: str, failed: str) -> Optional[Future]:
+    """Queue a device's reservation hook on its own worker: hooks for one device
+    run in arrival order, and a boot that takes seconds never holds up the tunnel."""
+    with _state_lock:
+        st = _devices.get(gid)
+        hook = getattr(st.schema if st else None, name, None)
+        if not callable(hook):
+            return None
+        worker = _reservation_hooks.get(gid)
+        if worker is None:
+            worker = _reservation_hooks[gid] = ThreadPoolExecutor(1, thread_name_prefix=f"hostrf-gid{gid}")
+
+    def run() -> None:
+        try:
+            hook()
+        except Exception as e:
+            warn(f"{failed} gid={gid} failed: {e}", component="hostrf.device_manager")
+
+    return worker.submit(run)
+
+
+def prepare_reservation(device_id: int | str) -> Optional[Future]:
+    """The lab started a reservation on this device: ready it (a switched Pluto boots) for the holder."""
+    return _run_hook(int(device_id), "prepare_for_holder", "preparing")
+
+
+def end_reservation(device_id: int | str) -> Optional[Future]:
     """The lab ended this device's reservation: close its sessions, then reset it for the next holder."""
     gid = int(device_id)
     with _state_lock:
         callbacks = tuple(_reservation_end_callbacks)
-        st = _devices.get(gid)
     for callback in callbacks:
         try:
             callback(gid)
         except Exception as e:
             warn(f"reservation cleanup failed for gid={gid}: {e}", component="hostrf.device_manager")
-    reset = getattr(st.schema if st else None, "reset_for_next_holder", None)
-    if callable(reset):
-        try:
-            reset()
-        except Exception as e:
-            warn(f"resetting gid={gid} for its next holder failed: {e}", component="hostrf.device_manager")
+    return _run_hook(gid, "reset_for_next_holder", "resetting")
 
 
 def make_host_bridge_token(device_id: int | str) -> str:
