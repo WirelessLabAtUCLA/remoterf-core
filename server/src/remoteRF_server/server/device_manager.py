@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import re
 import secrets
@@ -36,6 +37,8 @@ from remoterf_federation_core import is_device_handle
 from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir, device_name_key
 from ..common.idl.schema import get_driver_class, load_drivers
 from ..host import host_tunnel_server as hts
+
+logger = logging.getLogger(__name__)
 
 _state_lock = threading.RLock()
 _reservation_end_callbacks: list = []
@@ -807,6 +810,7 @@ def set_device(device_id: int, salt: str, hash: str):
             return
 
     notify_end = False
+    host_start = None
     with _state_lock:
         st = _devices.get(int(device_id))
         if not st:
@@ -819,6 +823,8 @@ def set_device(device_id: int, salt: str, hash: str):
             all(held) and previous != held and st.origin == "local"
             and callable(getattr(st.dev, "prepare_for_holder", None))
         )
+        if all(held) and previous != held and st.origin == "host" and isinstance(st.dev, VirtualDevice):
+            host_start = st.dev
         # The holder changed: the reservation ended, or a back-to-back one
         # replaced it without the device ever being free.
         notify_end = any(previous) and previous != (st.salt, st.hsh)
@@ -836,8 +842,22 @@ def set_device(device_id: int, salt: str, hash: str):
         # Now, not at the next call: a transmitter left running must stop
         # even when nobody reserves the device next.
         threading.Thread(target=_reset_if_pending, args=(int(device_id),), daemon=True).start()
+    if host_start is not None:
+        _start_host_reservation(host_start)
     if prepare:
         threading.Thread(target=_prepare_for_holder, args=(int(device_id), held), daemon=True).start()
+
+
+def _start_host_reservation(device: VirtualDevice) -> None:
+    try:
+        registry = hts.get_tunnel_registry(create=False)
+        if registry is None or not registry.send_control(
+            device.host_id, kind="reservation_start", device_id=device.device_id,
+            payload={"at": time.time()},
+        ):
+            logger.warning("host reservation start unavailable for %s", device.host_id)
+    except Exception as exc:
+        logger.warning("host reservation start unavailable for %s: %s", device.host_id, exc)
 
 
 def _prepare_for_holder(device_id: int, held: Tuple[str, str]) -> None:

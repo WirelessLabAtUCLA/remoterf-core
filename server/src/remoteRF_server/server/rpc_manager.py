@@ -252,14 +252,23 @@ class RpcManager:
             fwd_args = dict(args)
             fwd_args.pop('a', None)
             fwd_args['g'] = map_arg(int(gid))
-            return hts.handle_host_device(
+            results = hts.handle_host_device(
                 hts.get_tunnel_registry(create=False),
                 host_id=dev.host_id,
                 device_id=dev.device_id,
                 function_name=function_name,
                 args=fwd_args,
-                timeout_sec=10.0,
+                timeout_sec=25.0,
             )
+            failed = "Error" in results
+            if "Ok" in results:
+                failed = failed or not bool(unmap_arg(results["Ok"]))
+            if failed:
+                error = str(unmap_arg(results["Error"]) or "") if "Error" in results else ""
+                return {"a": map_arg(
+                    error or "The device did not answer in time; it may still be powering on. Try again."
+                )}
+            return results
 
         return self._dispatch_local_schema(function_name=function_name, args=args, gid=gid, dev=dev)
 

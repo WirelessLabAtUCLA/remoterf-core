@@ -122,6 +122,31 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual(self._wait_log(2), ["reset"])
 
 
+class HostReservationStartTests(unittest.TestCase):
+    def test_start_is_sent_once_for_a_new_holder_only(self):
+        sent = []
+
+        class Registry:
+            def send_control(self, host_id, *, kind, device_id, payload):
+                sent.append((host_id, kind, device_id, payload))
+                return True
+
+        device_manager._devices[GID] = device_manager._DeviceState(
+            dev=device_manager.VirtualDevice(GID, "host-1", "d1"), origin="host", online=True,
+            salt="", hsh="", name="dev", ident="X", dtype="adalm_pluto",
+        )
+        self.addCleanup(device_manager._devices.pop, GID, None)
+        with patch.object(device_manager, "_sync_host_devices"), patch.object(
+            device_manager, "_reservation_end_callbacks", []
+        ), patch.object(device_manager.hts, "get_tunnel_registry", return_value=Registry()):
+            device_manager.set_device(GID, "s1", "h1")
+            device_manager.set_device(GID, "s1", "h1")
+            device_manager.set_device(GID, "", "")
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][:3], ("host-1", "reservation_start", "d1"))
+        self.assertEqual(set(sent[0][3]), {"at"})
+
 
 if __name__ == "__main__":
     unittest.main()

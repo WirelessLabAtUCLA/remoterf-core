@@ -86,7 +86,7 @@ class RxNTests(unittest.TestCase):
             sent.append(None)
             sent.append(None)  # the next host rx answers with an Error first
             first_error = rx_n(dev, 4, gid=5)
-        self.assertEqual(unmap_arg(first_error["Error"]), "host overflow")
+        self.assertEqual(unmap_arg(first_error["a"]), "host overflow")
 
 
 if __name__ == "__main__":
