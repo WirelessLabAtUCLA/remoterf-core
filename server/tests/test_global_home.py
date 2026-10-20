@@ -81,6 +81,21 @@ class GlobalHomeContractTests(unittest.TestCase):
         self.assertEqual([c["contract_id"] for c in self.broker.call("GET", "/v2/broker/contracts")["contracts"]],
                          [party["contract_id"]])
 
+    def test_a_global_cluster_joined_under_an_earlier_home_is_rejoined_with_its_groups(self):
+        with self.server(H):
+            home_identity = cluster._identity()
+            cluster._public_note(cluster.GLOBAL, "open")
+        self._standing(B, home_identity)
+        with self.server(B):
+            # State from before a Global reset: the cluster names a home that is gone.
+            cluster.save({cluster.GLOBAL: {"role": "member", "state": "active", "public": True, "peer": C,
+                                           "contract_id": "8a2e3f10-0000-4000-8000-0000000000ff",
+                                           "published": [], "groups": [7]}})
+            cluster.tick(self.notes.append)
+            item = cluster.load()[cluster.GLOBAL]
+            self.assertEqual((item["peer"], item["contract_id"], item["groups"]), (H, global_home.contract_id(), [7]))
+            self.assertNotIn("public_groups", global_home.load())
+
     def _standing(self, lab, home_identity):
         """The lab proposes its standing contract; the home accepts; the lab sees it active."""
         with self.server(lab), mock.patch.object(global_home, "fetch_identity", return_value=home_identity):

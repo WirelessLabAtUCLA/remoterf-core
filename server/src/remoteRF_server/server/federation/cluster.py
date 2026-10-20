@@ -1303,13 +1303,22 @@ def _walk_in(pools: list[dict], notify) -> None:
     active. Any other open door (an older lab's own) is ignored."""
     from . import global_home
 
-    if GLOBAL in load():
-        return
     state = global_home.load()
     home = (state.get("identity") or {}).get("deployment_id")
     party = state.get("party") or {}
+    clusters = load()
+    if GLOBAL in clusters and (clusters[GLOBAL].get("peer") == home or not home):
+        return
     if not home or party.get("state") != "active":
         return
+    if GLOBAL in clusters:
+        # Joined under an earlier Global home (this lab's state outlived a Global
+        # reset): drop it and rejoin the current one, keeping what it shared.
+        stale = clusters.pop(GLOBAL)
+        queued = state.setdefault("public_groups", [])
+        queued += [group_id for group_id in stale.get("groups", []) if group_id not in queued]
+        save(clusters)
+        global_home.save(state)
     for pool in pools:
         owner = (pool.get("owner") or {}).get("identity") or {}
         if pool.get("cluster_name") != GLOBAL or owner.get("deployment_id") != home:
