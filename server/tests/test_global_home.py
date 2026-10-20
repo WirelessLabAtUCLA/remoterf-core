@@ -67,6 +67,20 @@ class GlobalHomeContractTests(unittest.TestCase):
             self.assertEqual(global_home.contract_id(), party["contract_id"])
         self.assertIn("[cluster] RemoteRF Global is active", self.notes)
 
+    def test_a_contract_neither_the_lab_nor_global_has_is_dropped_and_proposed_again(self):
+        with self.server(H):
+            home_identity = cluster._identity()
+        with self.server(A), mock.patch.object(global_home, "fetch_identity", return_value=home_identity):
+            # The lab's database was reset; its federation state still names the old contract.
+            global_home.save({"party": {"state": "proposed", "display_name": global_home.LABEL,
+                                        "contract_id": "8a2e3f10-0000-4000-8000-0000000000ff", "published": []}})
+            global_home.tick(self.notes.append)
+            party = global_home.load()["party"]
+            self.assertEqual(party["state"], "proposed")
+            self.assertNotEqual(party["contract_id"], "8a2e3f10-0000-4000-8000-0000000000ff")
+        self.assertEqual([c["contract_id"] for c in self.broker.call("GET", "/v2/broker/contracts")["contracts"]],
+                         [party["contract_id"]])
+
     def _standing(self, lab, home_identity):
         """The lab proposes its standing contract; the home accepts; the lab sees it active."""
         with self.server(lab), mock.patch.object(global_home, "fetch_identity", return_value=home_identity):

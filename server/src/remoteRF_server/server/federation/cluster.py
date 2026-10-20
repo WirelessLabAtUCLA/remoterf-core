@@ -1080,7 +1080,16 @@ def _sync_contract(party: dict, peer: str, directory: list[dict]) -> str:
     for item in directory:
         if item["contract_id"] == party["contract_id"] and item.get("terms"):
             _import(store, item["terms"], item["events"])
-    return store.show(party["contract_id"], 1)["state"]
+    try:
+        return store.show(party["contract_id"], 1)["state"]
+    except ContractError as exc:
+        if exc.code != "unknown_contract":
+            raise
+    # Neither this store nor Global has it: the lab's database was reset while its
+    # federation state survived. Forget it; a member adopts afresh, a proposer proposes again.
+    party.pop("contract_id")
+    party.update(state="created", published=[])
+    return _sync_contract(party, peer, directory)
 
 
 def _event_order(signed_event: str) -> tuple:
@@ -1112,6 +1121,9 @@ def _advance(party: dict, peer: str, directory: list[dict], *, label: str, notif
     if before in ("pending", "revoked"):
         return
     state = _sync_contract(party, peer, directory)
+    if not party.get("contract_id") and not is_member and (other := _identity_of(peer)) is not None:
+        _contract_with(party, other)  # the stale contract was dropped: propose a new one
+        state = "proposed"
     store = _contracts()
     if state == "proposed" and is_member:
         store.accept(party["contract_id"], 1, actor_admin_ref="cluster")
