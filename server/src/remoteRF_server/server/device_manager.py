@@ -33,8 +33,9 @@ from typing import Dict, Tuple, Optional, Any, List, Iterator
 from contextlib import contextmanager
 
 from remoterf_federation_core import is_device_handle
+from prompt_toolkit import print_formatted_text
 
-from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir, device_name_key
+from ..common.utils import validate_token, get_remoterf_root, get_drivers_dir, device_name_key, stylize, Sty
 from ..common.idl.schema import get_driver_class, load_drivers
 from ..host import host_tunnel_server as hts
 
@@ -403,7 +404,9 @@ def _connect_from_record(rec: Dict[str, Any], *, connect: bool = True):
     try:
         schema_cls = get_driver_class(dtype)
     except KeyError:
-        print(f"No driver registered for device_type={dtype!r} — skipping")
+        print_formatted_text(stylize(
+            f"  – {dtype}: driver not installed; device skipped", Sty.GRAY
+        ))
         return (None, ident, dtype)
 
     if bool(getattr(schema_cls, "session_scoped", False)):
@@ -636,6 +639,10 @@ def _seed_default_rtl_sdr_driver() -> None:
     _seed_default_driver("rtl_sdr_schema.py", "rtl_sdr")
 
 
+def _seed_default_wifi_dongle_driver() -> None:
+    _seed_default_driver("wifi_dongle_schema.py", "wifi_dongle")
+
+
 def _seed_default_hackrf_driver() -> None:
     _seed_default_driver(
         "hackrf_schema.py",
@@ -664,6 +671,7 @@ def _load_all_drivers() -> None:
     _seed_default_pluto_drivers()
     _seed_default_usrp_driver()
     _seed_default_rtl_sdr_driver()
+    _seed_default_wifi_dongle_driver()
     _seed_default_hackrf_driver()
     _seed_default_ti_mmwave_driver()
     _seed_default_usrp_phaser_driver()
@@ -671,6 +679,7 @@ def _load_all_drivers() -> None:
     # The Pluto drivers need the native libiio behind pylibiio; without it
     # every one of them fails the same way, which is worth one line, not four.
     seen_libiio = False
+    unavailable: list[str] = []
 
     def _warn(line: str, error: str) -> None:
         nonlocal seen_libiio
@@ -680,7 +689,7 @@ def _load_all_drivers() -> None:
                 print(f"Warning: libiio is not installed, so this server cannot host a Pluto of its own. "
                       f"Plutos shared by other deployments still work for your users. To host one here: {_LIBIIO_FIX}")
             return
-        print(line)
+        unavailable.append(line.removeprefix("Driver load ").removeprefix("Warning: "))
 
     for label, module in (
         ("built-in pluto driver", "..common.idl.pluto_schema"),
@@ -699,6 +708,15 @@ def _load_all_drivers() -> None:
     for fname, status in load_drivers().items():
         if status != "ok":
             _warn(f"Driver load {fname}: {status}", status)
+
+    if unavailable:
+        print_formatted_text(stylize(
+            "\n  Optional drivers unavailable (install their dependencies to enable them):",
+            Sty.GRAY,
+        ))
+        for item in unavailable:
+            print_formatted_text(stylize(f"    · {item}", Sty.GRAY))
+        print_formatted_text(stylize("  Details are in the startup log.", Sty.GRAY))
 
 
 _load_all_drivers()

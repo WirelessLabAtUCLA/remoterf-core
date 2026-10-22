@@ -29,6 +29,10 @@ from .global_onboarding import RELAYED
 
 DEFAULT_HORIZON_SEC = 7 * 86400  # how far ahead a reservation may start; 0 = no limit
 
+
+class UserGroupError(RuntimeError):
+    """Safe, actionable reason an interactive user-group operation failed."""
+
 import os
 import sys
 
@@ -114,19 +118,27 @@ class UserGroupHandler:
         lifetime_sec: int,
         lan_only: bool = False,
         max_horizon_sec: int = DEFAULT_HORIZON_SEC,
+        raise_on_error: bool = False,
     ) -> Optional[int]:
+        def fail(message: str) -> None:
+            if raise_on_error:
+                raise UserGroupError(message)
+
         try:
             if not isinstance(group_name, str) or not group_name.strip():
+                fail("Group name cannot be empty.")
                 return None
 
             if devices_whitelist is None:
                 devices_whitelist = []
             if not isinstance(devices_whitelist, (list, tuple)):
+                fail("Device whitelist must be a list of device IDs.")
                 return None
 
             try:
                 devices_whitelist = sorted({int(d) for d in devices_whitelist})
             except Exception:
+                fail("Device whitelist contains an invalid device ID.")
                 return None
 
             try:
@@ -135,13 +147,17 @@ class UserGroupHandler:
                 lifetime_sec = int(lifetime_sec)
                 max_horizon_sec = int(max_horizon_sec)
             except Exception:
+                fail("Reservation limits and lifetimes must be integers.")
                 return None
 
             if max_reservation_time_sec <= 0:
+                fail("Maximum reservation time must be greater than zero.")
                 return None
             if max_reservations < 0:
+                fail("Maximum concurrent reservations cannot be negative.")
                 return None
             if lifetime_sec < 0 or max_horizon_sec < 0:
+                fail("Group lifetime and reservation horizon cannot be negative.")
                 return None
 
             devices_json = json.dumps(devices_whitelist)
@@ -167,7 +183,19 @@ class UserGroupHandler:
             group_id = self.cursor.lastrowid
             return int(group_id) if group_id is not None else None
 
-        except Exception:
+        except sqlite3.IntegrityError as exc:
+            if "UserGroups.group_name" in str(exc):
+                fail(f"A user group named {group_name.strip()!r} already exists.")
+            else:
+                fail(f"The database rejected this group: {exc}")
+            return None
+        except UserGroupError:
+            raise
+        except sqlite3.Error as exc:
+            fail(f"Database error: {exc}")
+            return None
+        except Exception as exc:
+            fail(f"Unexpected error: {exc}")
             return None
 
     def _user_group_ids(self, uid: int) -> list[int]:

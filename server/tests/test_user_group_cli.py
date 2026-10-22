@@ -9,7 +9,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 
-from remoteRF_server.server.user_group_cli import edit_user_group_local
+from remoteRF_server.server.user_group_cli import edit_user_group_local, make_user_group_local
 
 
 class _Session:
@@ -48,6 +48,41 @@ class EditUserGroupCliTests(unittest.TestCase):
         with redirect_stdout(output):
             edit_user_group_local(session)
         self.assertIn("devices_whitelist       : (unchanged)", output.getvalue())
+
+
+class CreateUserGroupCliTests(unittest.TestCase):
+    def test_duplicate_name_prints_the_database_reason(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from remoteRF_server.server import user_group_cli as cli
+        from remoteRF_server.server import user_group_handler as groups
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.object(groups, "get_db_dir", return_value=Path(tmp.name)):
+            handler = groups.UserGroupHandler()
+            handler.create_user_group(
+                group_name="dev",
+                devices_whitelist=[1],
+                max_reservation_time_sec=600,
+                max_reservations=1,
+                lifetime_sec=0,
+            )
+            session = _Session([
+                "dev", "y", "1", "", "", "", "", "y", "n", "y",
+            ])
+            output = io.StringIO()
+            with mock.patch.object(cli, "user_group_handler", handler), mock.patch.object(
+                cli, "_clusters_here", return_value=[]
+            ), mock.patch.object(cli, "_print_device_choices"), redirect_stdout(output):
+                make_user_group_local(session)
+
+        self.assertIn(
+            "Failed to create user group: A user group named 'dev' already exists.",
+            output.getvalue(),
+        )
 
 
 class MakeEnrollmentCodesCliTests(unittest.TestCase):

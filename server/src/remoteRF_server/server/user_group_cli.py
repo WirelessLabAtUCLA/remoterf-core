@@ -24,7 +24,7 @@ from pathlib import Path
 
 from ..common.utils.panel import print_table
 from .global_onboarding import invite, lan_endpoint
-from .user_group_handler import user_group_handler
+from .user_group_handler import UserGroupError, user_group_handler
 
 
 def _print_device_choices() -> None:
@@ -216,15 +216,20 @@ def make_user_group_local(session) -> None:
         return
 
     # ---- Create ----
-    group_id = user_group_handler.create_user_group(
-        group_name=group_name,
-        devices_whitelist=devices_whitelist,
-        max_reservation_time_sec=max_reservation_time_sec,
-        max_reservations=max_reservations,
-        lifetime_sec=lifetime_sec,
-        lan_only=lan_only,
-        max_horizon_sec=horizon_days * 86400,
-    )
+    try:
+        group_id = user_group_handler.create_user_group(
+            group_name=group_name,
+            devices_whitelist=devices_whitelist,
+            max_reservation_time_sec=max_reservation_time_sec,
+            max_reservations=max_reservations,
+            lifetime_sec=lifetime_sec,
+            lan_only=lan_only,
+            max_horizon_sec=horizon_days * 86400,
+            raise_on_error=True,
+        )
+    except UserGroupError as exc:
+        print(f"Failed to create user group: {exc}")
+        return
 
     if group_id is not None:
         print(f"User group created with group_id={group_id}.")

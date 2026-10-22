@@ -149,8 +149,14 @@ class _Display:
             self.out.flush()
 
     def result(self, ok: bool, label: str, detail: str) -> None:
+        unavailable = detail.startswith("No driver registered")
         mark = ("✓" if ok else "✗") if self.uni else ("ok" if ok else "x")
-        self._print(mark, Sty.BRIGHT_GREEN if ok else Sty.BRIGHT_RED, f" {label} · {detail}", Sty.GRAY)
+        if unavailable:
+            self._print("–" if self.uni else "-", Sty.GRAY,
+                        f" {label} · driver unavailable; skipped", Sty.GRAY)
+        else:
+            self._print(mark, Sty.BRIGHT_GREEN if ok else Sty.BRIGHT_RED,
+                        f" {label} · {detail}", Sty.GRAY)
 
     def summary(self, results, word: str) -> None:
         n = len(results)
