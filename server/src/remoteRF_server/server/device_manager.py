@@ -86,7 +86,10 @@ def _name_handle(name: str) -> str:
 
 def _is_connected(st: _DeviceState) -> bool:
     if st.origin == "local":
-        return st.dev is not None
+        # Drivers that survive an unplug (e.g. GPS reconnect loop) expose device.connected.
+        # Read __dict__ directly: PoePluto's __getattr__ would power the board on.
+        dev = getattr(st.dev, "device", None)
+        return st.dev is not None and getattr(dev, "__dict__", {}).get("connected", True) is not False
     # host
     return bool(st.online)
 
