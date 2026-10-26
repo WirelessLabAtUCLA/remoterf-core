@@ -825,3 +825,64 @@ class TunnelDirectControlTests(unittest.TestCase):
         self.assertTrue(lines[1].startswith("Unable to connect to lab:1 (UNAVAILABLE: Handshake read failed)"), lines)
         self.assertTrue(lines[2].startswith("Connected to lab:1 as 'lab-host'"), lines)
         self.assertTrue(lines[3].startswith("Connection to lab:1 lost (server closed the stream)"), lines)
+
+    def test_unreachable_addr_falls_back_to_the_published_relay_route(self):
+        import grpc
+        from remoteRF_host.common.grpc import grpc_host_pb2 as pb
+        from remoteRF_host.server import tunnel_agent
+
+        self.assertEqual(tunnel_agent._deployment_from_name("host1--ucla.global.remoterf.net"), "ucla")
+        self.assertEqual(tunnel_agent._deployment_from_name("ucla.global.remoterf.net"), "ucla")
+        self.assertEqual(tunnel_agent._deployment_from_name("164.67.195.210"), "")
+
+        class Unreachable(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "failed to connect to all addresses"
+
+        streams = [Unreachable(), [pb.HostFrame(heartbeat=pb.Heartbeat())]]
+
+        def connect(_frames):
+            stream = streams.pop(0)
+            if isinstance(stream, Exception):
+                def failing():
+                    raise stream
+                    yield
+                return failing()
+            return iter(stream)
+
+        agent = self._agent(None)
+        agent.cfg = mock.Mock(
+            version="test", server_host="10.0.0.5", server_port=61005, ca_pem_path="ca",
+            reconnect_min_delay_sec=0.01, reconnect_max_delay_sec=0.01, heartbeat_interval_sec=60,
+        )
+        agent._stop = threading.Event()
+        agent._relay_supervisor = None
+        lines, dialed = [], []
+
+        def sleep(_seconds):
+            if not streams and threading.current_thread() is threading.main_thread():
+                agent._stop.set()
+
+        routes = [("10.0.0.5", 61005), ("lab.global.remoterf.net", 12321)]
+        with mock.patch.object(agent, "_reload_from_env"), mock.patch.object(
+            agent, "_drain_outbound_queue"
+        ), mock.patch.object(agent, "_make_channel", side_effect=dialed.append), mock.patch.object(
+            agent, "_device_announce_frame", return_value=pb.HostFrame()
+        ), mock.patch.object(agent, "_outbound_generator"), mock.patch.object(
+            agent, "_deployment", return_value="lab"
+        ), mock.patch.object(tunnel_agent, "_fetch_routes", return_value=routes) as fetch, mock.patch.object(
+            tunnel_agent.host_pb2_grpc, "HostTunnelStub", return_value=mock.Mock(Connect=connect)
+        ), mock.patch.object(
+            tunnel_agent, "status", side_effect=lambda msg, **_k: lines.append(msg)
+        ), mock.patch.object(tunnel_agent.time, "sleep", side_effect=sleep), mock.patch.object(
+            tunnel_agent, "end_reservation", None
+        ):
+            agent.run_forever()
+
+        fetch.assert_called_once_with("lab")
+        self.assertEqual(dialed[:2], ["10.0.0.5:61005", "lab.global.remoterf.net:12321"])
+        self.assertTrue(any(line.startswith("Connected to lab.global.remoterf.net:12321") for line in lines), lines)
+        self.assertEqual(agent._route_index, 0)  # after a drop, the direct route is tried first again

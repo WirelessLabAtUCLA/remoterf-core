@@ -48,6 +48,7 @@ import subprocess
 import threading
 import traceback
 import contextlib
+import urllib.request
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -57,10 +58,41 @@ from ..common.utils import device_name_key, get_devices_config_path, get_host_co
 from ..common.utils.host_logging import error, exception, info, status, warn
 from ..common.grpc import grpc_host_pb2 as host_pb2
 from ..common.grpc import grpc_host_pb2_grpc as host_pb2_grpc
-from ..config.cert_fetcher import normalize_sha256, pin_ca
+from ..config.cert_fetcher import normalize_sha256, pin_ca, set_env_key
 
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 _RELAY_PUBLIC_KEY = re.compile(r"ssh-ed25519 [A-Za-z0-9+/]+={0,3}")
+GLOBAL_DOMAIN = "global.remoterf.net"
+_DEPLOYMENT_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+ROUTE_REFRESH_SECONDS = 300.0
+
+
+def _deployment_from_name(name: str) -> str:
+    """'ucla.global.remoterf.net' or 'host1--ucla.global.remoterf.net' -> 'ucla'; '' otherwise."""
+    suffix = "." + GLOBAL_DOMAIN
+    name = (name or "").strip().lower()
+    if not name.endswith(suffix):
+        return ""
+    label = name[: -len(suffix)].rsplit("--", 1)[-1]
+    return label if _DEPLOYMENT_NAME.fullmatch(label) else ""
+
+
+def _fetch_routes(deployment: str, timeout: float = 5.0) -> List[Tuple[str, int]]:
+    """The lab's advertised gRPC routes (LAN first, then relay), from its public discovery on Global.
+
+    A route only decides where to dial: the lab's TLS is still checked against the pinned CA."""
+    url = f"https://{deployment}.{GLOBAL_DOMAIN}/.well-known/remoterf-deployment"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        doc = json.loads(resp.read(256 * 1024))
+    routes: List[Tuple[str, int]] = []
+    for route in doc.get("routes", []) if isinstance(doc, dict) else []:
+        if not isinstance(route, dict):
+            continue
+        host, port = route.get("host"), route.get("port")
+        if isinstance(host, str) and re.fullmatch(r"[A-Za-z0-9.:-]{1,253}", host) \
+                and type(port) is int and 0 < port < 65536:
+            routes.append((host, port))
+    return routes
 
 
 # -------------------------
@@ -804,10 +836,55 @@ class HostTunnelAgent:
         finally:
             self._consume_cancel(req_id)
 
+    # -------- routes --------
+
+    def _deployment(self) -> str:
+        net_kv = load_env_file(self.cfg.net_env_path)
+        name = net_kv.get("REMOTERF_DEPLOYMENT", "").strip().lower()
+        if _DEPLOYMENT_NAME.fullmatch(name):
+            return name
+        return _deployment_from_name(self.cfg.server_host)
+
+    def _remember_deployment(self, name: str) -> None:
+        """Keep the lab's Global name, so the host can find another route to it from any network."""
+        if not name or load_env_file(self.cfg.net_env_path).get("REMOTERF_DEPLOYMENT", "").strip():
+            return
+        try:
+            set_env_key(Path(self.cfg.net_env_path), "REMOTERF_DEPLOYMENT", name)
+            info(f"Saved REMOTERF_DEPLOYMENT={name} for route fallback.", component="hostrf.tunnel_agent")
+        except Exception:
+            exception("Could not save REMOTERF_DEPLOYMENT.", component="hostrf.tunnel_agent")
+
+    def _refresh_routes(self) -> None:
+        """REMOTERF_ADDR first, then the lab's published routes, at most every ROUTE_REFRESH_SECONDS."""
+        now = time.monotonic()
+        if now - self._routes_fetched_at < ROUTE_REFRESH_SECONDS:
+            return
+        self._routes_fetched_at = now
+        deployment = ""
+        try:
+            deployment = self._deployment()
+            if not deployment:
+                return
+            published = _fetch_routes(deployment)
+        except Exception as exc:
+            warn(f"Could not fetch routes for {deployment}: {exc}", component="hostrf.tunnel_agent")
+            return
+        routes = [(self.cfg.server_host, int(self.cfg.server_port))]
+        routes += [route for route in published if route not in routes]
+        current = self._routes[self._route_index]
+        self._routes = routes
+        self._route_index = routes.index(current) if current in routes else 0
+
+    def _next_route(self) -> bool:
+        """Move to the next route; True when every route has been tried once."""
+        self._refresh_routes()
+        self._route_index = (self._route_index + 1) % len(self._routes)
+        return self._route_index == 0
+
     # -------- channel --------
 
-    def _make_channel(self) -> grpc.Channel:
-        addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
+    def _make_channel(self, addr: str) -> grpc.Channel:
 
         options = [
             ("grpc.max_send_message_length", 100 * 1024 * 1024),
@@ -886,6 +963,8 @@ class HostTunnelAgent:
                 relay.start(payload)
             except Exception as exc:
                 warn(f"Invalid relay_info: {exc}", component="hostrf.tunnel_agent")
+                return
+            self._remember_deployment(_deployment_from_name(str(payload.get("server_name", ""))))
             return
         if kind == "direct_offer":
             threading.Thread(
@@ -1118,6 +1197,9 @@ class HostTunnelAgent:
         delay = self.cfg.reconnect_min_delay_sec
         attempt = 0
         status_started = False
+        self._routes: List[Tuple[str, int]] = [(self.cfg.server_host, int(self.cfg.server_port))]
+        self._route_index = 0
+        self._routes_fetched_at = float("-inf")
 
         info(
             f"HostTunnelAgent starting: target={self.cfg.server_host}:{int(self.cfg.server_port)} version={self.cfg.version}",
@@ -1130,7 +1212,8 @@ class HostTunnelAgent:
             while not self._stop.is_set():
                 hb_stop: Optional[threading.Event] = None
                 channel: Optional[grpc.Channel] = None
-                addr = f"{self.cfg.server_host}:{int(self.cfg.server_port)}"
+                route_host, route_port = self._routes[self._route_index]
+                addr = f"{route_host}:{route_port}"
                 retry_reason = ""
                 stream_established = False
                 connected = False
@@ -1150,7 +1233,7 @@ class HostTunnelAgent:
                         )
                         status_started = True
 
-                    channel = self._make_channel()
+                    channel = self._make_channel(addr)
                     stub = host_pb2_grpc.HostTunnelStub(channel)
 
                     initial = [self._hello_frame(), self._device_announce_frame()]
@@ -1285,7 +1368,13 @@ class HostTunnelAgent:
                 if self._stop.is_set():
                     break
 
-                sleep_s = delay + random.uniform(0.0, min(0.5, delay * 0.2))
+                if connected:
+                    # Back to the preferred route first: the host may have moved back onto the LAN.
+                    self._route_index = 0
+                    cycled = True
+                else:
+                    cycled = self._next_route()
+                sleep_s = delay + random.uniform(0.0, min(0.5, delay * 0.2)) if cycled else 0.0
                 if connected:
                     status(
                         f"Connection to {addr} lost ({retry_reason or 'disconnected'}). Retrying in {sleep_s:.1f}s.",
@@ -1297,7 +1386,8 @@ class HostTunnelAgent:
                         component="hostrf",
                     )
                 time.sleep(sleep_s)
-                delay = min(delay * 1.7, self.cfg.reconnect_max_delay_sec)
+                if cycled:
+                    delay = min(delay * 1.7, self.cfg.reconnect_max_delay_sec)
         finally:
             info("HostTunnelAgent exiting.", component="hostrf.tunnel_agent")
             relay = getattr(self, "_relay_supervisor", None)

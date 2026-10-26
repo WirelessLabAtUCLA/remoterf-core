@@ -53,7 +53,11 @@ def normalize_sha256(value: str) -> str:
 
 
 def pin_ca(env_path: Path, digest: str) -> None:
-    _write_env_lines(env_path, _upsert_env_key(_read_env_lines(env_path), "REMOTERF_CA_SHA256", digest))
+    set_env_key(env_path, "REMOTERF_CA_SHA256", digest)
+
+
+def set_env_key(env_path: Path, key: str, value: str) -> None:
+    _write_env_lines(env_path, _upsert_env_key(_read_env_lines(env_path), key, value))
 
 
 def _fetch_http(host: str, port: int, timeout_sec: float) -> bytes:
