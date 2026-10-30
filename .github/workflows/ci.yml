@@ -1,6 +1,7 @@
 name: ci
 on:
   pull_request:
+  workflow_call: # stage1-dev.yml runs the same tests first
   push:
     branches: [main]
 
