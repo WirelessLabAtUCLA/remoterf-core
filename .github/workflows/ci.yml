@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch: # agent.yml dispatches it for issue-N (GITHUB_TOKEN pushes trigger nothing)
 
 permissions:
   contents: read
