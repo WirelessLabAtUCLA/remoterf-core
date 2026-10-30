@@ -70,3 +70,14 @@ jobs:
               pip install -e . pytest # pins remoterf-federation-core==0.16.0 from PyPI
               pytest tests --ignore=tests/integration -q ;;
           esac
+
+  # The one check the main ruleset requires: green when every package that changed passed
+  # (test is skipped when nothing under server/, host/, client/ or packages/ changed).
+  ci-ok:
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          [ "${{ needs.changes.result }}" = success ]
+          case "${{ needs.test.result }}" in success|skipped) ;; *) exit 1 ;; esac
