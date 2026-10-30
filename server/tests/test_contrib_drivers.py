@@ -236,3 +236,23 @@ def test_a_renumbered_csr_is_found_again_when_bluez_forgets_it(bt, sysfs):
     # A pinned adapter is not swapped for another one, and an error is no success.
     assert bt._run_coroutine_sync(pinned.set_powered_async, True) is False
     assert pinned.adapter_name == "hci1"
+
+
+# -- simulated SDR ----------------------------------------------------------
+
+
+def test_sim_sdr_matches_bundled_client_and_returns_tone():
+    import re
+
+    import numpy as np
+
+    sim = _load("sim_sdr_schema", {})
+    client = Path(__file__).resolve().parents[2] / "client/src/remoterf/drivers/sim_sdr/sim_sdr_remote.py"
+    bundled = re.search(r'_SCHEMA_HASH = "([^"]+)"', client.read_text()).group(1)
+    assert sim.SimSdrSchema().get_idl_hash() == bundled
+
+    dev = sim.SimSdrSchema.make_device()
+    dev.rx_buffer_size = 4096
+    iq = dev.rx()
+    assert iq.shape == (4096,) and iq.dtype == np.complex64
+    assert int(np.argmax(np.abs(np.fft.fft(iq)))) == 512
