@@ -1,6 +1,7 @@
 name: agent
 
-# An issue labeled `agent`, or an `@claude` comment on an issue, by someone with write access:
+# An issue labeled `agent`, or an `@claude` comment on an issue, by a repo admin, for a requester
+# who is also an admin (the author, or the `Requested-by:` line a bot or admin wrote):
 # the agent edits a checkout (read-only token, no push), then the publish job commits the diff
 # to issue-N, dispatches ci and stage1-dev for it, and opens the PR.
 on:
@@ -30,13 +31,15 @@ jobs:
             const issue = context.payload.issue;
             const users = new Set([context.actor]);
             let requester = issue.user.login;
+            const m = /^Requested-by:\s*@([\w-]+)/m.exec(issue.body || '');
             if (requester === 'rrf-issues[bot]') {
-              const m = /^Requested-by:\s*@([\w-]+)/m.exec(issue.body || '');
               if (!m) return core.setFailed('bot issue without Requested-by');
-              requester = m[1];
             } else if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(issue.author_association)) {
               return core.setFailed(`issue author is ${issue.author_association}`);
+            } else {
+              users.add(requester); // the Slack bot files as its token's owner
             }
+            if (m) requester = m[1];
             users.add(requester);
             for (const u of users) {
               let perm = 'none';
@@ -44,8 +47,7 @@ jobs:
                 ({ data: { permission: perm } } =
                   await github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: u }));
               } catch (e) { core.info(`${u}: ${e.status}`); }
-              // legacy field: maintain->write, triage->read
-              if (!['admin', 'write'].includes(perm)) return core.setFailed(`${u} has ${perm}`);
+              if (perm !== 'admin') return core.setFailed(`${u} has ${perm}; the agent is admin-only`);
             }
             core.setOutput('requester', requester);
 
