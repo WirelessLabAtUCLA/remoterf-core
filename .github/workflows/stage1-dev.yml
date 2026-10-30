@@ -1,0 +1,113 @@
+name: stage1-dev
+
+# Every push to an issue-* branch: tests, .devN wheels for what changed, TestPyPI (once
+# enabled), then the Server wheel onto the dev test lab and the dev smoke (once enabled).
+on:
+  push:
+    branches: ["issue-*"]
+
+concurrency:
+  group: stage1-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.v.outputs.server }}
+      built: ${{ steps.v.outputs.built }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: v
+        run: |
+          git diff --name-only origin/main...HEAD | python tools/ci/dev_versions.py "${{ github.run_number }}" > versions
+          cat versions
+          pip install -q build
+          while IFS== read -r d v; do python -m build -q --wheel --outdir dist "$d" < /dev/null; done < versions
+          echo "server=$(sed -n 's/^server=//p' versions)" >> "$GITHUB_OUTPUT"
+          [ -s versions ] && echo built=true >> "$GITHUB_OUTPUT"
+          { echo '### .devN builds'; sed 's/^/- /' versions; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.v.outputs.built == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    if: vars.TESTPYPI_ENABLED == 'true' && needs.build.outputs.built == 'true'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  deploy-testlab:
+    needs: build
+    if: vars.DEV_DEPLOY_ENABLED == 'true' && needs.build.outputs.server != ''
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: dev-vps
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: ssh key and pinned host key
+        env:
+          KEY: ${{ secrets.DEV_DEPLOY_KEY }}
+          KNOWN: ${{ vars.DEV_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+      # The gate (remoterf-federation deploy/dev/rrf-dev-deploy) takes the lease, installs these
+      # wheels into the test lab venv with dependencies from PyPI only, and restarts the lab.
+      - working-directory: dist
+        run: |
+          tar -cf - $(ls | grep -iE '^(remoterf_server|remoterf_federation_core|remoterf_device_core)-') |
+            ssh -o BatchMode=yes root@dev.global.remoterf.net deploy-testlab "$GITHUB_REF_NAME" "$GITHUB_SHA" "${{ needs.build.outputs.server }}"
+
+  smoke:
+    needs: [build, deploy-testlab]
+    if: ${{ !cancelled() && vars.DEV_SMOKE_ENABLED == 'true' && needs.build.result == 'success' && needs.deploy-testlab.result != 'failure' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: dev-vps
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ./client
+      - run: python tools/dev-smoke/dev_smoke.py
+        env:
+          REMOTERF_GLOBAL_ORIGIN: https://dev.global.remoterf.net
+          RRF_SMOKE_USER: ci-smoke
+          RRF_SMOKE_PASSWORD: ${{ secrets.DEV_SMOKE_PASSWORD }}
