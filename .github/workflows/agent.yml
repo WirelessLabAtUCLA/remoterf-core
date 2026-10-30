@@ -1,0 +1,180 @@
+name: agent
+
+# An issue labeled `agent`, or an `@claude` comment on an issue, by someone with write access:
+# the agent edits a checkout (read-only token, no push), then the publish job commits the diff
+# to issue-N, dispatches ci and stage1-dev for it, and opens the PR.
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  gate:
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'agent') ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      requester: ${{ steps.check.outputs.requester }}
+    steps:
+      - id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const users = new Set([context.actor]);
+            let requester = issue.user.login;
+            if (requester === 'rrf-issues[bot]') {
+              const m = /^Requested-by:\s*@([\w-]+)/m.exec(issue.body || '');
+              if (!m) return core.setFailed('bot issue without Requested-by');
+              requester = m[1];
+            } else if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(issue.author_association)) {
+              return core.setFailed(`issue author is ${issue.author_association}`);
+            }
+            users.add(requester);
+            for (const u of users) {
+              let perm = 'none';
+              try {
+                ({ data: { permission: perm } } =
+                  await github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: u }));
+              } catch (e) { core.info(`${u}: ${e.status}`); }
+              // legacy field: maintain->write, triage->read
+              if (!['admin', 'write'].includes(perm)) return core.setFailed(`${u} has ${perm}`);
+            }
+            core.setOutput('requester', requester);
+
+  work:
+    needs: gate
+    runs-on: ubuntu-latest # ci-box (nuc-agent) once its tag:ci ACL is in place
+    environment: agent
+    timeout-minutes: 60
+    concurrency:
+      group: agent-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    outputs:
+      base: ${{ steps.base.outputs.sha }}
+      changed: ${{ steps.diff.outputs.changed }}
+    env:
+      N: ${{ github.event.issue.number }}
+    steps:
+      - id: auth
+        env:
+          OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          API: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$OAUTH$API" ]; then echo ok=true >> "$GITHUB_OUTPUT"
+          else echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in environment agent; skipping."; fi
+      - if: steps.auth.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: base
+        if: steps.auth.outputs.ok == 'true'
+        run: | # continue an existing issue-N branch, else start from main
+          if git fetch -q origin "refs/heads/issue-$N" 2>/dev/null; then git checkout -q FETCH_HEAD; fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - if: steps.auth.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: steps.auth.outputs.ok == 'true'
+        env:
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          COMMENT: ${{ github.event.comment.body }}
+        run: |
+          { printf '# Issue #%s: %s\n\n%s\n' "$N" "$TITLE" "$BODY"
+            [ -z "$COMMENT" ] || printf '\n## Latest request\n\n%s\n' "$COMMENT"; } > "$RUNNER_TEMP/issue.md"
+      - if: steps.auth.outputs.ok == 'true'
+        uses: anthropics/claude-code-action@6d5ae526d25ce88daa2200be073e1a373167f064 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          claude_args: --max-turns 40 --allowedTools Read,Edit,Write,Glob,Grep,Bash
+          settings: |
+            {"permissions": {"deny": [
+              "Edit(.github/**)", "Write(.github/**)",
+              "Bash(git push:*)", "Bash(gh:*)",
+              "Bash(ssh:*)", "Bash(scp:*)", "Bash(sftp:*)", "Bash(rsync:*)",
+              "Bash(twine:*)", "Bash(docker push:*)", "Bash(docker login:*)",
+              "Bash(sudo:*)", "Bash(su:*)", "Bash(tailscale:*)",
+              "Bash(curl:*)", "Bash(wget:*)", "WebFetch"]}}
+          prompt: |
+            Implement the issue in ${{ runner.temp }}/issue.md in this checkout of remoterf-core.
+            Keep the change small and follow the existing code. Never touch .github/.
+            Do not commit or push; leave the changes in the working tree. Another step commits them.
+            Run the tests of every package you change and fix failures:
+            - server: cd server && pip install -e ../packages/remoterf-device-core -e ../packages/remoterf-federation-core -e . pytest && GRPC_PORT=50051 CERT_PORT=50052 XDG_CONFIG_HOME=$RUNNER_TEMP/cfg XDG_DATA_HOME=$RUNNER_TEMP/data pytest tests --ignore-glob='*hardware*' -q
+            - host: cd host && pip install -e ../packages/remoterf-device-core -e ../packages/remoterf-federation-core -e . pytest pyjwt && PYTHONPATH=src pytest tests -q
+            - client: cd client && pip install -e . pytest && pytest tests --ignore=tests/integration -q
+            If remoterf-federation also needs a change, do only the remoterf-core part and say what is missing.
+            Finally write a short plain summary (what changed, which tests ran and their result) to
+            ${{ runner.temp }}/summary.md. No attribution lines.
+      - id: diff
+        if: steps.auth.outputs.ok == 'true'
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+        run: |
+          git add -A
+          git diff --cached --binary "$BASE" > "$RUNNER_TEMP/agent.patch"
+          [ -s "$RUNNER_TEMP/agent.patch" ] && echo changed=true >> "$GITHUB_OUTPUT"
+          touch "$RUNNER_TEMP/summary.md"; git diff --cached --stat "$BASE"
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-patch
+          path: |
+            ${{ runner.temp }}/agent.patch
+            ${{ runner.temp }}/summary.md
+
+  publish:
+    needs: [gate, work]
+    if: needs.work.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # GITHUB_TOKEN has no workflows permission: pushes touching .github/workflows are refused
+      pull-requests: write
+      issues: write
+      actions: write # dispatch ci and stage1-dev (GITHUB_TOKEN pushes trigger nothing)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: ${{ github.event.issue.number }}
+      TITLE: ${{ github.event.issue.title }}
+      REQUESTER: ${{ needs.gate.outputs.requester }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.work.outputs.base }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-patch
+          path: ${{ runner.temp }}/agent
+      - env: # fixed dates keep the commit SHA stable, so a re-run's push is a no-op, not non-fast-forward
+          GIT_AUTHOR_DATE: ${{ github.event.comment.created_at || github.event.issue.updated_at }}
+          GIT_COMMITTER_DATE: ${{ github.event.comment.created_at || github.event.issue.updated_at }}
+        run: |
+          git apply --index --binary "$RUNNER_TEMP/agent/agent.patch"
+          if git diff --cached --name-only --no-renames | grep '^\.github/'; then echo "::error::change touches .github/"; exit 1; fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"
+          git push origin "HEAD:refs/heads/issue-$N"
+      - run: |
+          gh workflow run ci.yml --ref "issue-$N"
+          gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"
+      - run: |
+          pr=$(gh pr list --head "issue-$N" --state open --json url --jq '.[0].url')
+          if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
+          { printf 'Closes #%s\nRequested-by: @%s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
+          # needs Settings > Actions > "Allow GitHub Actions to create and approve pull requests"
+          gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
+          gh issue comment "$N" --body "Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: @$REQUESTER' in the body."
+          exit 1

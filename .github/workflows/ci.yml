@@ -4,6 +4,7 @@ on:
   workflow_call: # stage1-dev.yml runs the same tests first
   push:
     branches: [main]
+  workflow_dispatch: # agent.yml dispatches it for issue-N (GITHUB_TOKEN pushes trigger nothing)
 
 permissions:
   contents: read
