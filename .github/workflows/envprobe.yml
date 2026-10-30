@@ -1,0 +1,11 @@
+name: envprobe
+on:
+  pull_request:
+    types: [closed]
+jobs:
+  probe:
+    if: startsWith(github.head_ref, 'issue-')
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - run: echo "ref=$GITHUB_REF head=$GITHUB_HEAD_REF"
