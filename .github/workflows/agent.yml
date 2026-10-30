@@ -158,9 +158,12 @@ jobs:
         with:
           name: agent-patch
           path: ${{ runner.temp }}/agent
-      - run: |
+      - env: # fixed dates keep the commit SHA stable, so a re-run's push is a no-op, not non-fast-forward
+          GIT_AUTHOR_DATE: ${{ github.event.comment.created_at || github.event.issue.updated_at }}
+          GIT_COMMITTER_DATE: ${{ github.event.comment.created_at || github.event.issue.updated_at }}
+        run: |
           git apply --index --binary "$RUNNER_TEMP/agent/agent.patch"
-          if git diff --cached --name-only | grep '^\.github/'; then echo "::error::change touches .github/"; exit 1; fi
+          if git diff --cached --name-only --no-renames | grep '^\.github/'; then echo "::error::change touches .github/"; exit 1; fi
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"
           git push origin "HEAD:refs/heads/issue-$N"
@@ -171,4 +174,7 @@ jobs:
           pr=$(gh pr list --head "issue-$N" --state open --json url --jq '.[0].url')
           if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
           { printf 'Closes #%s\nRequested-by: @%s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
-          gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md"
+          # needs Settings > Actions > "Allow GitHub Actions to create and approve pull requests"
+          gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
+          gh issue comment "$N" --body "Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: @$REQUESTER' in the body."
+          exit 1
