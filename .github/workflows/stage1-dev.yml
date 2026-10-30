@@ -5,6 +5,7 @@ name: stage1-dev
 on:
   push:
     branches: ["issue-*"]
+  workflow_dispatch: # agent.yml pushes with GITHUB_TOKEN, which triggers nothing, then dispatches this on issue-N
 
 concurrency:
   group: stage1-${{ github.ref }}
