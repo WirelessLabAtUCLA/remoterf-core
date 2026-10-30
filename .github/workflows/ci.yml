@@ -1,0 +1,72 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            server:
+              - 'server/**'
+              - 'packages/**'
+              - '.github/workflows/ci.yml'
+            host:
+              - 'host/**'
+              - 'packages/**'
+              - '.github/workflows/ci.yml'
+            client:
+              - 'client/**'
+              - 'packages/**'
+              - '.github/workflows/ci.yml'
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.changes.outputs.packages) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # server's test_protected_proto_bytes reads an old commit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: install and test
+        env:
+          GRPC_PORT: "50051"
+          CERT_PORT: "50052"
+          XDG_CONFIG_HOME: ${{ runner.temp }}/cfg
+          XDG_DATA_HOME: ${{ runner.temp }}/data
+        run: |
+          core="-e ../packages/remoterf-device-core -e ../packages/remoterf-federation-core"
+          case "${{ matrix.package }}" in
+            server)
+              pip install $core -e . pytest
+              pytest tests --ignore-glob='*hardware*' -q ;;
+            host)
+              pip install $core -e . pytest pyjwt # tests/test_direct_host.py imports jwt
+              PYTHONPATH=src pytest tests -q ;;
+            client)
+              pip install -e . pytest # pins remoterf-federation-core==0.16.0 from PyPI
+              pytest tests --ignore=tests/integration -q ;;
+          esac

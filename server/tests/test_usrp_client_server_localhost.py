@@ -43,7 +43,7 @@ def _add_client_source() -> None:
     if configured:
         candidates.append(Path(configured).expanduser())
     candidates.append(
-        Path(__file__).resolve().parents[2] / "RemoteRF-Client" / "src"
+        Path(__file__).resolve().parents[2] / "client" / "src"
     )
     for candidate in candidates:
         if (candidate / "remoteRF").is_dir():

@@ -35,8 +35,8 @@ class CapabilityTests(unittest.TestCase):
     def test_protected_proto_bytes(self):
         root=Path(__file__).resolve().parents[1]
         path='src/remoteRF_server/common/grpc/grpc.proto'
-        base=subprocess.check_output(['git','show','1452ad042782c659a2891e84e8d72f9d1ba3d9a1:'+path],cwd=root)
-        core=root/'packages/remoterf-device-core/src/remoterf_device_core/grpc/grpc.proto'  # moved here, same bytes
+        base=subprocess.check_output(['git','show','6fdda6938861c5e4378ef5ec29f5964fa03d14d5:./'+path],cwd=root)
+        core=root.parent/'packages/remoterf-device-core/src/remoterf_device_core/grpc/grpc.proto'  # moved here, same bytes
         self.assertEqual(base,core.read_bytes())
         fields=pb.DeploymentCapabilitiesResponse.DESCRIPTOR.fields_by_name
         self.assertEqual(fields['capabilities_json'].number,1)

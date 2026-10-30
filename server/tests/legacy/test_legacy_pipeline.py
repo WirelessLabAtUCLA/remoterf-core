@@ -2,7 +2,7 @@
 
 Every leg runs legacy_session.py (a real runtime, a real client CLI, raw ACC
 calls, the console) and compares it step by step with baseline.json, the same
-session against pre-Global Server 1.0.19 (1452ad0) + Client 2.0.13 (ec65d46).
+session against pre-Global Server 1.0.19 (6fdda69) + Client 2.0.13 (a2ddfb2).
 The upgrade leg lets 1.0.19 build a lab, then starts today's Server on it.
 A step may differ only as recorded in accepted_deltas.json, which the owner
 reviews (no entry may stay "TODO"); anything else fails.
@@ -27,9 +27,9 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 SERVER = HERE.parents[1]
-CLIENT = Path(os.environ.get("REMOTERF_LEGACY_CLIENT", SERVER.parent / "RemoteRF-Client"))
+CLIENT = Path(os.environ.get("REMOTERF_LEGACY_CLIENT", SERVER.parent / "client"))
 CLIENT_PYTHON = os.environ.get("REMOTERF_LEGACY_CLIENT_PYTHON", str(CLIENT / "venv/bin/python"))
-SERVER_BASE, CLIENT_BASE = "1452ad0", "ec65d46"
+SERVER_BASE, CLIENT_BASE = "6fdda69", "a2ddfb2"
 BASELINE, ACCEPTED = HERE / "baseline.json", HERE / "accepted_deltas.json"
 ACCEPT = os.environ.get("REMOTERF_LEGACY_ACCEPT") == "1"
 

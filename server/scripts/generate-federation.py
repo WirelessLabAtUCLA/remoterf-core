@@ -6,7 +6,7 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 proto = root / "src/remoteRF_server/common/grpc"
-core = root / "packages/remoterf-device-core/src/remoterf_device_core/grpc"  # grpc.proto
+core = root.parent / "packages/remoterf-device-core/src/remoterf_device_core/grpc"  # grpc.proto
 subprocess.run(
     [
         sys.executable,

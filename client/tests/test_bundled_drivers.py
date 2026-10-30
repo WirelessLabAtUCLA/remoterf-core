@@ -14,7 +14,7 @@ import pytest
 from remoterf.drivers import dynamic_device
 
 SERVER_SRC = Path(
-    os.environ.get("REMOTERF_SERVER_SRC", Path(__file__).resolve().parents[2] / "RemoteRF-Server" / "src")
+    os.environ.get("REMOTERF_SERVER_SRC", Path(__file__).resolve().parents[2] / "server" / "src")
 )
 SCHEMAS = {
     "adalm_pluto": "remoteRF_server.drivers.adalm_pluto.pluto_schema:PlutoSchema",
@@ -45,7 +45,7 @@ def server_schemas():
         [sys.executable, "-c", DUMP, json.dumps(SCHEMAS)],
         # The Server's built-in drivers live in its remoterf-device-core package.
         env={**os.environ, "PYTHONPATH": os.pathsep.join(
-            (str(SERVER_SRC), str(SERVER_SRC.parent / "packages" / "remoterf-device-core" / "src")))},
+            (str(SERVER_SRC), str(SERVER_SRC.parents[1] / "packages" / "remoterf-device-core" / "src")))},
         capture_output=True, text=True, check=True,
     )
     return json.loads(result.stdout.splitlines()[-1])
