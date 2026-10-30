@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remoteRF-server"
+version = "1.7.5"
+description = "RemoteRF server-side control package"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+dependencies = [
+    "remoterf-federation-core==0.22.0",
+    "remoterf-device-core==0.1.0",
+  "grpcio>=1.81.1,<2.0.0",
+  "protobuf>=6.33.5,<7.0.0",
+  "numpy",
+  "prompt_toolkit",
+  "python-dotenv",
+  "grpcio-tools>=1.81.1,<2.0.0",
+  "requests",
+  "pyyaml",
+  "pyadi-iio",
+  "pyrtlsdr>=0.5,<0.6",
+  "pyrtlsdrlib>=0.0.5,<0.1",
+  "pyhackrf2>=1.0.3,<2.0",
+  "pyserial>=3.5,<4.0",
+  "pyjwt>=2.8,<3.0",
+  "cryptography>=42,<44",
+  "aioice>=0.10,<0.11",
+  "aioquic>=1.2,<2.0",
+  "paramiko>=3.4,<6",
+]
+readme = "README.md"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: OS Independent",
+]
+
+[project.scripts]
+# RRRFserver = "remoteRF_server.server.grpc_server:main"
+serverrf = "remoteRF_server.serverrf_cli:main"
+remoterf-federation-admin = "remoteRF_server.server.federation.admin:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"remoteRF_server.common.grpc" = ["*.proto"]

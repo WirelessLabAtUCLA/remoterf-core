@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remoterf-device-core"
+version = "0.1.0"
+description = "RemoteRF device protocol, IDL and built-in driver schemas shared by the lab Server and Host"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+dependencies = [
+  "grpcio>=1.78.1,<2.0.0",
+  "protobuf>=6.31.1,<7.0.0",
+  "numpy",
+  "prompt_toolkit",
+]
+
+[project.optional-dependencies]
+direct = [
+  "aioice>=0.10,<0.11",
+  "aioquic>=1.2,<2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+remoterf_device_core = ["schemas.json", "grpc/*.proto"]
