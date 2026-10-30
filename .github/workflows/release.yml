@@ -1,0 +1,122 @@
+# Release one package per tag: <pkg>-vX.Y.Z on a commit that is on main.
+#   pkg = client | server | host | federation-core | device-core
+# The tag must match that package's pyproject version. A tag push builds, attaches the
+# dist files to a GitHub Release, then publishes to PyPI (Trusted Publishing, environment
+# pypi) only when the repo variable PYPI_PUBLISH_ENABLED is 'true'.
+# workflow_dispatch builds without releasing unless it is run on a tag with dry_run off.
+# A pull request that changes this file builds every package as a dry run.
+name: release
+on:
+  push:
+    tags: ["client-v*", "server-v*", "host-v*", "federation-core-v*", "device-core-v*"]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to build (ignored when run on a tag)
+        type: choice
+        options: [client, server, host, federation-core, device-core]
+      dry_run:
+        description: Build only; no GitHub Release, no PyPI
+        type: boolean
+        default: true
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ github.event_name == 'pull_request' && fromJSON('["client","server","host","federation-core","device-core"]') || fromJSON('["selected"]') }}
+    outputs:
+      release: ${{ steps.v.outputs.release }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: v
+        name: Check the tag against the package version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          MATRIX_PKG: ${{ matrix.package }}
+          INPUT_PKG: ${{ inputs.package }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          release=false
+          case "$REF" in
+            refs/tags/*) tag=$REF_NAME; pkg=${tag%-v*}
+                         { [ "$EVENT" = push ] || [ "$DRY_RUN" = false ]; } && release=true ;;
+            *) pkg=$MATRIX_PKG; [ "$pkg" = selected ] && pkg=$INPUT_PKG; tag= ;;
+          esac
+          case "$pkg" in
+            client|server|host) d=$pkg ;;
+            federation-core|device-core) d=packages/remoterf-$pkg ;;
+            *) echo "unknown package '$pkg'"; exit 1 ;;
+          esac
+          v=$(python -c "import sys,tomllib;print(tomllib.load(open(sys.argv[1],'rb'))['project']['version'])" "$d/pyproject.toml")
+          [ -n "$tag" ] || tag=$pkg-v$v
+          [ "$tag" = "$pkg-v$v" ] || { echo "::error::tag $tag does not match $d version $v"; exit 1; }
+          if [ "$release" = true ]; then
+            # Only commits that reached main (and so passed ci-ok) are released.
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$tag is not on main"; exit 1; }
+          fi
+          echo "$tag: building $d $v (release=$release)"
+          { echo "dir=$d"; echo "tag=$tag"; echo "release=$release"; } >> "$GITHUB_OUTPUT"
+      - name: Build and check
+        run: |
+          python -m pip install -q build==1.2.2 twine==6.1.0
+          python -m build --outdir dist "${{ steps.v.outputs.dir }}"
+          python -m twine check dist/*
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ steps.v.outputs.tag }}
+          path: dist/
+          if-no-files-found: error
+
+  github-release:
+    needs: build
+    if: needs.build.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.build.outputs.tag }}
+          path: dist/
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            && gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY" \
+            || gh release create "$TAG" dist/* --verify-tag --generate-notes --title "$TAG" -R "$GITHUB_REPOSITORY"
+
+  pypi:
+    needs: [build, github-release]
+    if: needs.build.outputs.release == 'true' && vars.PYPI_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ needs.build.outputs.tag }}
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
