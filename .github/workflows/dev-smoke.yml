@@ -1,0 +1,31 @@
+name: dev-smoke
+
+# Client -> dev Global -> test lab, over the internet from a GitHub-hosted runner.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: dev-vps
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: WirelessLabAtUCLA/remoterf-core
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ./client
+      - run: python tools/dev-smoke/dev_smoke.py
+        env:
+          REMOTERF_GLOBAL_ORIGIN: https://dev.global.remoterf.net
+          RRF_SMOKE_USER: ci-smoke
+          RRF_SMOKE_PASSWORD: ${{ secrets.DEV_SMOKE_PASSWORD }}

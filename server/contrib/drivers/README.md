@@ -8,6 +8,7 @@ copies the file it needs into its drivers directory and restarts the server.
 |---|---|---|---|
 | `bluetooth_schema.py` | `bluetooth` | ZEXMTE CSR8510 USB dongle (any BlueZ adapter with `allow_fallback`) | `bleak`, `dbus-fast`, `bluetooth-numbers` (optional: vendor and service names) |
 | `gps_schema.py` | `gps` | u-blox 7 / VFAN UG-353 USB receiver (any NMEA-0183 serial receiver) | `pynmea2`, `pyserial` |
+| `sim_sdr_schema.py` | `sim_sdr` | none: simulated receiver for test labs (`tools/dev-smoke`) | none |
 
 Both are Linux-only in practice: Bluetooth needs BlueZ on the system D-Bus, and
 the GPS reads a serial port (`/dev/ttyACM*`).

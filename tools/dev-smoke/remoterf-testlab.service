@@ -1,0 +1,23 @@
+[Unit]
+Description=RemoteRF test lab (Server with simulated SDRs, joined to dev Global)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=testlab
+Group=testlab
+WorkingDirectory=/opt/remoterf-testlab
+Environment=HOME=/opt/remoterf-testlab
+EnvironmentFile=/opt/remoterf-testlab/testlab.env
+ExecStart=/opt/remoterf-testlab/venv/bin/serverrf --serve --headless
+Restart=always
+RestartSec=10
+MemoryHigh=200M
+MemoryMax=256M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/remoterf-testlab
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
