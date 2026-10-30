@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Test / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+._*
+
+# Logs
+*.log
+logs/
+
+# Local agent / tool state
+.claude/
+*.claude
+
+# Environment / secrets (templates end in .example)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+id_ed25519*
+id_rsa*
+secrets/
+
+# Runtime state / databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.devdata/
