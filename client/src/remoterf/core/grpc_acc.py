@@ -1,0 +1,202 @@
+# Copyright (C) 2026 RemoteRF
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import ast
+from collections.abc import Callable
+from contextlib import nullcontext
+from .grpc_client import rpc_client, quiet as _silenced
+from .messages import explain
+from ..common.utils import *
+
+import datetime
+
+
+def _note(text, style=Sty.DEFAULT):
+    """One line in the shell's voice."""
+    printf(str(text), style)
+
+
+def _busy(label):
+    """A spinner while the home asks its labs: a slow lab is a wait, not a hang."""
+    from ..remoterf_cli import _working
+    return _working(label)
+
+
+class RemoteRFAccount:
+    def __init__(self, username:str=None, password:str=None, email:str=None, *, backend=None, quiet=False):
+        self.username = username
+        self.password = password
+        self.email = email
+        self.enrollment_code = ""
+        self.is_admin = False
+        self.backend = backend
+        # Set by an HTTPS registration: the home says whether a verification
+        # email is actually on its way, or the account is already usable.
+        self.needs_verification = True
+        # A deployment-issued session token (login with remember=True). It
+        # replaces the password for every later call and is what gets stored.
+        self.session_token = None
+        # No notes, spinners or reply text on stdout (remoterf.ops, the CLI, MCP).
+        self.quiet = quiet
+
+    def _note(self, text, style=Sty.DEFAULT):
+        if not self.quiet:
+            _note(text, style)
+
+    def _busy(self, label):
+        return nullcontext() if self.quiet else _busy(label)
+
+    @property
+    def is_https_home(self):
+        return self.backend is not None and self.backend.capabilities['account_transport'] == 'https-json'
+
+    def _rpc_credentials(self):
+        if self.is_https_home:
+            from ..deployment.http import AccountBackendError
+            raise AccountBackendError('This operation is unavailable at this account home')
+        return self.username or '', self.password or ''
+
+    def _call(self, *, function_name, args):
+        with _silenced() if self.quiet else nullcontext():
+            if self.backend is not None:
+                self._rpc_credentials()
+                return self.backend.call(function_name, args)
+            return rpc_client(function_name=function_name, args=args)
+
+    def registers_at_global(self):
+        """Ask a lab discovered through Global whether it registers there, before
+        any password is sent: a 1.5+ lab answers GS=<slug> first; an older one
+        refuses the empty details and creates nothing."""
+        response = self._call(function_name="ACC:create_user", args={"un": map_arg(self.username or ""), "pw": map_arg(""),
+                                                                       "em": map_arg(""), "ec": map_arg(self.enrollment_code)})
+        return unmap_arg(response.results["GS"]) if 'GS' in response.results else None
+
+    def create_user(self):
+        if self.is_https_home:
+            result = self.backend.register(self.username, self.email, self.password) or {}
+            self.password = None
+            self.needs_verification = result.get('status') != 'active'
+            self._note(result.get('message') or 'Registration received.')
+            return True
+        response = self._call(function_name="ACC:create_user", args={"un":map_arg(self.username), "pw":map_arg(self.password), "em":map_arg(self.email), "ec":map_arg(self.enrollment_code)})
+        # A lab on RemoteRF Global keeps one name for everyone: it registers there.
+        self.register_at_global = unmap_arg(response.results["GS"]) if 'GS' in response.results else None
+        if self.register_at_global:
+            return False
+        if 'UC' in response.results:
+            self._note(f'Account {unmap_arg(response.results["UC"])} created.', Sty.GREEN)
+            return True
+        elif 'UE' in response.results:
+            self._note(unmap_arg(response.results["UE"]), Sty.WARNING)
+            return False
+    
+    def login_user(self, *, remember=False):
+        if self.is_https_home:
+            try:
+                result = self.backend.login(self.username, self.password)
+                self.username = result['username']
+                return True
+            finally:
+                self.password = None
+        username, credential_secret = self._rpc_credentials()
+        args = {"un": map_arg(username), "pw": map_arg(credential_secret)}
+        if remember:
+            args["remember"] = map_arg(True)
+        response = self._call(function_name="ACC:login", args=args)
+        if 'UC' in response.results:
+            if 'token' in response.results:
+                # From here on the token is the credential; the password is gone.
+                self.session_token = unmap_arg(response.results['token'])
+                self.password = self.session_token
+            return True
+        elif 'UE' in response.results:
+            self._note(unmap_arg(response.results["UE"]), Sty.WARNING)
+            return False
+    
+    def reserve_device(self, device_id, start_time:datetime, end_time:datetime):
+        if self.is_https_home:
+            with self._busy("Reserving…"):
+                reservation = self.backend.reserve(device_id, int(start_time.timestamp()), int(end_time.timestamp()))
+            # Global's device API token (rfg_...), else (an older Global) the
+            # HOME reference, which also drives: adi.Pluto("<deployment>:<id>")
+            return reservation.get('token') or reservation['device_id']
+        username, credential_secret = self._rpc_credentials()
+        with self._busy("Reserving…"):
+            response = self._call(function_name="ACC:reserve_device", args={"un":map_arg(username), "pw":map_arg(credential_secret), "dd":map_arg(device_id), "st":map_arg(int(start_time.timestamp())), "et":map_arg(int(end_time.timestamp()))})
+
+        if 'ace' in response.results:
+            raise RuntimeError(f'{unmap_arg(response.results["ace"])}')
+        elif 'Token' in response.results:
+            return unmap_arg(response.results["Token"])
+
+    def install_reserved_driver(self, handle, device_id):
+        """Separate from reserve_device: the token is shown before this network
+        step runs, so a failed or stuck driver fetch cannot lose it. Returns
+        the installed device type, or None."""
+        try:
+            from ..drivers.dynamic_device import install_driver
+            if self.is_https_home:
+                # By the ref, which needs no live slot (an rfg_ token does).
+                return install_driver(device_id=device_id).name
+            return install_driver(token=handle, device_id=device_id).name
+        except Exception as e:
+            print(f"Could not install the driver for this device: {explain(e)}")
+            
+    def get_reservations(self):
+        with self._busy("Fetching reservations…"):
+            if self.is_https_home:
+                return self.backend.reservations()
+            username, credential_secret = self._rpc_credentials()
+            return self._call(function_name='ACC:get_res', args={"un":map_arg(username), "pw":map_arg(credential_secret)})
+    
+    def get_devices(self):
+        with self._busy("Fetching devices…"):
+            if self.is_https_home:
+                return self.backend.devices()
+            username, credential_secret = self._rpc_credentials()
+            return self._call(function_name='ACC:get_dev', args={"un":map_arg(username), "pw":map_arg(credential_secret)})
+    
+    def cancel_reservation(self, res_id):
+        with self._busy("Canceling…"):
+            if self.is_https_home:
+                return self.backend.cancel(res_id)
+            username, credential_secret = self._rpc_credentials()
+            return self._call(function_name='ACC:cancel_res', args={"un":map_arg(username), "pw":map_arg(credential_secret), "res_id":map_arg(res_id)})
+    
+    def get_perms(self):
+        with self._busy("Fetching permissions…"):
+            if self.is_https_home:
+                return self.backend.permissions()
+            username, credential_secret = self._rpc_credentials()
+            return self._call(function_name='ACC:get_perms', args={"un":map_arg(username), "pw":map_arg(credential_secret)})
+    
+    def logout(self):
+        """Revoke the stored session on the deployment (best effort)."""
+        if self.is_https_home:
+            return self.backend.logout()
+        if self.session_token:
+            try:
+                self._call(function_name="ACC:logout", args={"un": map_arg(self.username or ''), "pw": map_arg(self.session_token)})
+            except Exception:  # noqa: BLE001 - revocation is best effort
+                pass
+            self.session_token = None
+
+    def set_enroll(self):
+        if self.is_https_home:
+            return self.backend.enroll(self.enrollment_code)
+        username, credential_secret = self._rpc_credentials()
+        return self._call(function_name='ACC:set_enroll', args={"un":map_arg(username), "pw":map_arg(credential_secret), "ec":map_arg(self.enrollment_code)})
+    
+    

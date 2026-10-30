@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remoterf"
+version = "2.12.2"
+description = "A python API to remotely access signal centric hardware. Client-side only! Courtesy of Wireless Lab @ UCLA & Prof. Ian Roberts."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Ethan Ge", email = "84103791+ethange1@users.noreply.github.com" }]
+requires-python = ">=3.10"
+dependencies = [
+  "remoterf-federation-core==0.16.0",
+  "grpcio>=1.78.1,<2.0.0",
+  "protobuf>=6.31.1,<7.0.0",
+  "numpy",
+  "prompt_toolkit",
+  "python-dotenv",
+  "httpx>=0.27,<1.0",
+  "certifi",
+  "pydantic>=2.6,<3.0",
+  "keyring>=24,<26",
+  "aioice>=0.10,<0.11",
+  "aioquic>=1.2,<2.0",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+# `remoterf mcp`: the local MCP server for AI assistants.
+mcp = ["mcp>=2.3,<3"]
+
+[project.scripts]
+remoterf = "remoterf.remoterf_cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+# src/remoterf.py: see its docstring (upgrades from 2.0.14-2.1.x).
+# src/_remoterf_alias.py: `import remoteRF` (setup.py adds its .pth).
+py-modules = ["remoterf", "_remoterf_alias"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.crt", "*.key", "*.pem", "*.txt", "*.pyi", "*.proto", "*.md", "*.json"]

@@ -1,0 +1,631 @@
+"""Gate I: the direct device path -- ICE + QUIC on this machine with both ends
+in-process, framing, routing and fallback in rpc_client."""
+
+from __future__ import annotations
+
+import asyncio
+import datetime
+import os
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+from aioice import Candidate, Connection
+from aioquic.asyncio.protocol import QuicConnectionProtocol
+from aioquic.buffer import Buffer
+from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.connection import QuicConnection
+from aioquic.quic.packet import pull_quic_header
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+
+from remoterf.common.grpc import grpc_pb2
+from remoterf.common.utils import map_arg, unmap_arg
+from remoterf.core import direct_path
+
+SERVER_NAME = "direct.test"
+
+
+def write_certs(cert_dir: Path, server_name=SERVER_NAME) -> bytes:
+    """A throwaway CA and a server certificate for SERVER_NAME; returns the CA PEM."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def cert(subject, issuer, key, signer, *, ca):
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=1))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+        )
+        if not ca:
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(server_name)]), critical=False
+            )
+        return builder.sign(signer, hashes.SHA256())
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "RemoteRF test CA")])
+    ca_cert = cert(ca_name, ca_name, ca_key, ca_key, ca=True)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf = cert(
+        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, server_name)]),
+        ca_name, key, ca_key, ca=False,
+    )
+    (cert_dir / "server.crt").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    (cert_dir / "server.key").write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return ca_cert.public_bytes(serialization.Encoding.PEM)
+
+
+class FakeServer:
+    """The Server end of one path, in-process: answers the offer, serves streams."""
+
+    def __init__(self, cert_dir: Path, handler):
+        self.cert_dir = cert_dir
+        self.handler = handler  # GenericRPCRequest -> results dict, on a worker thread
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+        self.paths = []  # (ice, transport) per answered offer
+        self.offers = 0
+
+    def offer(self, offer: dict) -> dict:
+        self.offers += 1
+        return asyncio.run_coroutine_threadsafe(self._answer(offer), self.loop).result(15)
+
+    async def _answer(self, offer: dict) -> dict:
+        ice = Connection(ice_controlling=False, use_ipv6=False)
+        await ice.gather_candidates()
+        ice.remote_username = offer["ufrag"]
+        ice.remote_password = offer["pwd"]
+        for sdp in offer["candidates"]:
+            await ice.add_remote_candidate(Candidate.from_sdp(sdp))
+        await ice.add_remote_candidate(None)
+        asyncio.ensure_future(self._serve(ice))
+        return {
+            "ufrag": ice.local_username,
+            "pwd": ice.local_password,
+            "candidates": [c.to_sdp() for c in ice.local_candidates],
+        }
+
+    async def _serve(self, ice: Connection) -> None:
+        await ice.connect()
+        peer = direct_path.peer_address(ice)
+        transport = direct_path._IceTransport(ice)
+        self.paths.append((ice, transport))
+        protocol = None
+        while True:
+            try:
+                data, _ = await ice.recvfrom()
+            except ConnectionError:
+                transport.close()
+                return
+            if protocol is None:
+                header = pull_quic_header(Buffer(data=data), host_cid_length=8)
+                configuration = QuicConfiguration(
+                    is_client=False, alpn_protocols=[direct_path.ALPN], idle_timeout=direct_path.IDLE_SECONDS)
+                configuration.load_cert_chain(self.cert_dir / "server.crt", self.cert_dir / "server.key")
+                protocol = QuicConnectionProtocol(
+                    QuicConnection(
+                        configuration=configuration,
+                        original_destination_connection_id=header.destination_cid,
+                    ),
+                    stream_handler=lambda r, w: asyncio.ensure_future(self._reply(r, w)),
+                )
+                protocol.connection_made(transport)
+            protocol.datagram_received(data, peer)
+
+    async def _reply(self, reader, writer) -> None:
+        request = grpc_pb2.GenericRPCRequest()
+        request.ParseFromString(await direct_path.read_frame(reader))
+        results = await asyncio.get_running_loop().run_in_executor(None, self.handler, request)
+        writer.write(direct_path.frame(grpc_pb2.GenericRPCResponse(results=results).SerializeToString()))
+        writer.write_eof()
+
+    def close(self) -> None:
+        async def finish():
+            for ice, transport in self.paths:
+                transport.close()
+                await ice.close()
+            for task in asyncio.all_tasks():
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        asyncio.run_coroutine_threadsafe(finish(), self.loop).result(5)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+
+class RulesTests(unittest.TestCase):
+    def test_wants_only_the_device_plane(self):
+        for name in ("adalm_pluto:rx:GET", "adalm_pluto:rx_lo:SET", "IDL:get_drivers", "IDL:x"):
+            self.assertTrue(direct_path.wants(name), name)
+        for name in ("ACC:login", "ACC:direct_offer", "echo", "RemoteAdmin:x", "a::GET", "x:y"):
+            self.assertFalse(direct_path.wants(name), name)
+
+    def test_framing_round_trip(self):
+        async def run():
+            reader = asyncio.StreamReader()
+            reader.feed_data(direct_path.frame(b"abc") + direct_path.frame(b""))
+            return await direct_path.read_frame(reader), await direct_path.read_frame(reader)
+
+        self.assertEqual(asyncio.run(run()), (b"abc", b""))
+
+    def test_disabled_by_environment(self):
+        with mock.patch.dict("os.environ", {"REMOTERF_DIRECT": "0"}):
+            self.assertFalse(direct_path.enabled())
+            self.assertIsNone(direct_path.current())
+            self.assertIn("REMOTERF_DIRECT=0", direct_path.describe())
+        with mock.patch.dict("os.environ", {"REMOTERF_DIRECT": "1"}):
+            self.assertTrue(direct_path.enabled())
+
+
+class RoutingTests(unittest.TestCase):
+    """rpc_client: device calls take a ready path, fall back to gRPC once when
+    it fails, and control calls never touch it."""
+
+    def setUp(self):
+        self.addCleanup(setattr, direct_path, "_path", None)
+        self.addCleanup(setattr, direct_path, "_resolved", False)
+        direct_path._resolved = True
+        self.stub = mock.Mock()
+        self.stub.Call.return_value = grpc_pb2.GenericRPCResponse(results={"via": map_arg("grpc")})
+        connection = mock.Mock(stub=self.stub)
+        patcher = mock.patch("remoterf.core.grpc_client.get_active_connection", return_value=connection)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _path(self, call):
+        path = mock.Mock()
+        path.ready = True
+        path.call.side_effect = call
+        direct_path._path = path
+        return path
+
+    def test_device_call_takes_the_path(self):
+        from remoterf.core.grpc_client import rpc_client
+
+        path = self._path(lambda name, args: grpc_pb2.GenericRPCResponse(results={"via": map_arg("direct")}))
+        response = rpc_client(function_name="adalm_pluto:rx:GET", args={"a": map_arg("t")})
+        self.assertEqual(unmap_arg(response.results["via"]), "direct")
+        path.call.assert_called_once()
+        self.stub.Call.assert_not_called()
+
+    def test_control_calls_stay_on_grpc(self):
+        from remoterf.core.grpc_client import rpc_client
+
+        path = self._path(lambda *a: self.fail("ACC on the direct path"))
+        response = rpc_client(function_name="ACC:get_dev", args={"un": map_arg("u")})
+        self.assertEqual(unmap_arg(response.results["via"]), "grpc")
+        path.call.assert_not_called()
+
+    def test_failed_direct_call_is_retried_once_over_grpc(self):
+        from remoterf.core.grpc_client import rpc_client
+
+        def failing(name, args):
+            raise direct_path.PathError("gone")
+
+        path = self._path(failing)
+        response = rpc_client(function_name="adalm_pluto:rx:GET", args={"a": map_arg("t")})
+        self.assertEqual(unmap_arg(response.results["via"]), "grpc")
+        path.call.assert_called_once()
+        self.stub.Call.assert_called_once()
+
+    def test_a_device_error_reply_is_not_a_fallback(self):
+        from remoterf.core.grpc_client import rpc_client
+
+        self._path(lambda name, args: grpc_pb2.GenericRPCResponse(results={"a": map_arg("No token provided")}))
+        with self.assertRaises(RuntimeError):
+            rpc_client(function_name="adalm_pluto:rx:GET", args={})
+        self.stub.Call.assert_not_called()
+
+    def test_rx_wire_flag_is_sent_only_with_rx_calls(self):
+        from remoterf.core.grpc_client import rpc_client
+
+        seen = []
+        self._path(lambda name, args: seen.append((name, dict(args))) or grpc_pb2.GenericRPCResponse())
+        with mock.patch.dict("os.environ", {"REMOTERF_RX_WIRE": "c64"}):
+            rpc_client(function_name="adalm_pluto:rx:CALL0", args={"a": map_arg("t")})
+            rpc_client(function_name="adalm_pluto:rx_lo:GET", args={"a": map_arg("t")})
+        with mock.patch.dict("os.environ", {"REMOTERF_RX_WIRE": ""}):  # opt out
+            rpc_client(function_name="adalm_pluto:rx:CALL0", args={"a": map_arg("t")})
+        with mock.patch.dict("os.environ"):
+            os.environ.pop("REMOTERF_RX_WIRE", None)  # unset: i16 by default
+            rpc_client(function_name="adalm_pluto:rx:CALL0", args={"a": map_arg("t")})
+        self.assertEqual([sorted(args) for _, args in seen], [["a", "wire"], ["a"], ["a"], ["a", "wire"]])
+        self.assertEqual(unmap_arg(seen[0][1]["wire"]), "c64")
+        self.assertEqual(unmap_arg(seen[3][1]["wire"]), "i16")
+
+    def test_rx_through_a_home_asks_for_i16_too(self):
+        # A Global handle's rx goes through the HOME relay, which caps a response
+        # at ~768 KiB: complex128 samples overflow it four times sooner.
+        from remoterf.core import grpc_client
+
+        seen = []
+        with mock.patch.object(grpc_client, "_federated_ref", return_value="dep:103"), \
+                mock.patch.object(grpc_client, "_federated_call",
+                                  side_effect=lambda ref, name, args: seen.append(dict(args)) or grpc_pb2.GenericRPCResponse()), \
+                mock.patch.dict("os.environ"):
+            os.environ.pop("REMOTERF_RX_WIRE", None)
+            grpc_client.rpc_client(function_name="adalm_pluto:rx:CALL0", args={"a": map_arg("dep:103")})
+        self.assertEqual(unmap_arg(seen[0]["wire"]), "i16")
+
+    def test_tx_goes_ci16_only_once_this_tokens_server_answered_an_rx_in_ci16(self):
+        from remoterf.common.utils.process_arg import map_iq16
+        from remoterf.core import grpc_client
+
+        iq = np.array([1 + 2j, -3 - 4j, 32767 - 32767j])  # complex128, integer-valued
+        sent = []
+
+        def call(name, args):
+            if name.endswith(":tx:CALL1"):
+                sent.append(args["arg1"])
+            if name.endswith(":rx:CALL0"):
+                return grpc_pb2.GenericRPCResponse(results={"rx": map_iq16(iq)})
+            return grpc_pb2.GenericRPCResponse()
+
+        self._path(call)
+        grpc_client._ci16_tokens.clear()
+        self.addCleanup(grpc_client._ci16_tokens.clear)
+
+        def tx(samples, token="t"):
+            grpc_client.rpc_client(function_name="adalm_pluto:tx:CALL1", args={"a": map_arg(token), "arg1": map_arg(samples)})
+
+        with mock.patch.dict("os.environ"):
+            os.environ.pop("REMOTERF_TX_WIRE", None)
+            tx(iq)  # this Server has not shown it decodes ci16
+            grpc_client.rpc_client(function_name="adalm_pluto:rx:CALL0", args={"a": map_arg("t")})
+            tx(iq)
+            tx(iq + 0.5)  # not lossless
+            tx(iq, token="other")  # another Server, maybe
+        with mock.patch.dict("os.environ", {"REMOTERF_TX_WIRE": ""}):  # opt out
+            tx(iq)
+        self.assertEqual([arg.ndarray_value.dtype for arg in sent], ["<c16", "ci16", "<c16", "<c16", "<c16"])
+        self.assertEqual(len(sent[1].ndarray_value.data), 4 * len(iq))
+        self.assertTrue(np.array_equal(unmap_arg(sent[1]), iq))
+
+    def test_a_path_that_is_not_ready_is_skipped(self):
+        from remoterf.core.grpc_client import rpc_client
+
+        path = self._path(lambda *a: self.fail("not ready"))
+        path.ready = False
+        response = rpc_client(function_name="adalm_pluto:rx:GET", args={"a": map_arg("t")})
+        self.assertEqual(unmap_arg(response.results["via"]), "grpc")
+
+
+class LoopbackPathTests(unittest.TestCase):
+    """Both ends in this process, no STUN: punch, handshake against the pinned
+    CA, a 1 M-sample reply, death, fallback and re-establishment."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cert_dir = Path(self._tmp.name)
+        self.ca_pem = write_certs(self.cert_dir)
+        self.samples = (np.random.default_rng(1).standard_normal(1_000_000)
+                        + 1j * np.random.default_rng(2).standard_normal(1_000_000))
+        self.seen = []
+
+    def handler(self, request):
+        self.seen.append(request.function_name)
+        if request.function_name.endswith(":rx:GET"):
+            return {"rx": map_arg(self.samples)}
+        if request.function_name.endswith(":slow:GET"):
+            time.sleep(5)
+        return {"echo": map_arg(unmap_arg(request.args["a"]))}
+
+    def _start(self, server_name=SERVER_NAME, ca_pem=None):
+        server = FakeServer(self.cert_dir, self.handler)
+        self.addCleanup(server.close)
+        path = direct_path.DirectPath(
+            offer=server.offer, server_name=server_name, ca_pem=ca_pem or self.ca_pem, stun=None
+        )
+        self.addCleanup(path.stop)
+        path.start()
+        return server, path
+
+    def test_punch_call_die_fallback_reestablish(self):
+        server, path = self._start()
+        self.assertTrue(path.wait(15), path.describe())
+        self.assertTrue(path.describe().startswith("direct "), path.describe())
+
+        response = path.call("adalm_pluto:rx_lo:GET", {"a": map_arg("tok")})
+        self.assertEqual(unmap_arg(response.results["echo"]), "tok")
+        started = time.monotonic()
+        response = path.call("adalm_pluto:rx:GET", {"a": map_arg("tok")})
+        elapsed = time.monotonic() - started
+        got = unmap_arg(response.results["rx"])
+        self.assertTrue(np.array_equal(got, self.samples))
+        self.assertLess(elapsed, 20, "1 M complex128 samples over the loopback path")
+        self.assertEqual(path.calls, 2)
+
+        # The path dies under a call in flight: the call fails at once, not at
+        # the QUIC idle timeout, and the path is down for the next caller.
+        with mock.patch.object(direct_path, "RETRY_SECONDS", 0.5):
+            outcome = {}
+
+            def slow_call():
+                try:
+                    path.call("adalm_pluto:slow:GET", {"a": map_arg("tok")})
+                except direct_path.PathError as exc:
+                    outcome["error"] = exc
+
+            worker = threading.Thread(target=slow_call)
+            worker.start()
+            time.sleep(0.5)
+            asyncio.run_coroutine_threadsafe(path._ice.close(), path._loop).result(5)
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertIn("error", outcome)
+            self.assertFalse(path.ready)
+            self.assertIn("relay", path.describe())
+
+            # ... and it comes back on its own, with a fresh offer.
+            deadline = time.monotonic() + 15
+            while not path.ready and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(path.ready, path.describe())
+            self.assertEqual(server.offers, 2)
+            response = path.call("adalm_pluto:rx_lo:GET", {"a": map_arg("again")})
+            self.assertEqual(unmap_arg(response.results["echo"]), "again")
+
+    def test_wrong_name_or_ca_never_becomes_ready(self):
+        import tempfile
+
+        _, path = self._start(server_name="other.test")
+        self.assertFalse(path.wait(15))
+        self.assertIn("relay", path.describe())
+        self.assertIn("QUIC handshake refused", path.reason)
+        self.assertIn("other.test", path.reason)
+        with tempfile.TemporaryDirectory() as other:
+            other_ca = write_certs(Path(other))  # the server keeps its own cert
+        _, path = self._start(ca_pem=other_ca)
+        self.assertFalse(path.wait(15))
+
+    def test_idle_path_sleeps_until_the_next_device_call(self):
+        with mock.patch.object(direct_path, "IDLE_SECONDS", 2), \
+             mock.patch.object(direct_path, "RETRY_SECONDS", 300):
+            server, path = self._start()
+            self.assertTrue(path.wait(15), path.describe())
+            direct_path._path, direct_path._resolved = path, True
+            self.addCleanup(setattr, direct_path, "_path", None)
+            self.addCleanup(setattr, direct_path, "_resolved", False)
+            deadline = time.monotonic() + 10
+            while path.state != "idle" and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(path.state, "idle", path.describe())
+            self.assertIn("idle", path.describe())
+            time.sleep(1)
+            self.assertEqual(server.offers, 1, "no re-punch while nothing needs the path")
+            # The next device call wakes the path and gets it back within the
+            # wait: a punch takes well under a second, and a large buffer
+            # would not fit the relay.
+            self.assertIs(direct_path.current(), path)
+            self.assertTrue(path.ready, path.describe())
+            self.assertEqual(server.offers, 2)
+
+    def test_a_system_sleep_is_noticed_and_the_path_re_punched_at_once(self):
+        real_time = time.time
+        offset = [0.0]
+        with mock.patch.object(direct_path, "SLEEP_CHECK_SECONDS", 0.2), \
+             mock.patch.object(direct_path, "RETRY_SECONDS", 300), \
+             mock.patch.object(direct_path.time, "time", lambda: real_time() + offset[0]):
+            server, path = self._start()
+            self.assertTrue(path.wait(15), path.describe())
+            offset[0] = 3600  # the wall clock jumps an hour: we were asleep
+            deadline = time.monotonic() + 10
+            while server.offers < 2 and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(server.offers, 2, "re-punched without the 30 s wait")
+            self.assertEqual(path.reason, "resumed from sleep")
+            deadline = time.monotonic() + 10
+            while not path.ready and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(path.ready, path.describe())
+
+    def test_gathering_uses_the_default_route_interface_only(self):
+        async def run():
+            ice = direct_path.Ice(ice_controlling=True, stun_server=None)
+            await ice.gather_candidates()
+            try:
+                return [(c.type, c.host) for c in ice.local_candidates]
+            finally:
+                await ice.close()
+
+        address = direct_path.default_route_address()
+        if address is None:
+            self.skipTest("no default route")
+        self.assertEqual(asyncio.run(run()), [("host", address)])
+
+    def test_no_stun_answer_still_offers_host_candidates(self):
+        # A lab on this machine or LAN, or its fixed port, needs no reflexive address.
+        offers = []
+        path = direct_path.DirectPath(
+            offer=lambda offer: offers.append(offer) or {"ufrag": "u", "pwd": "p", "candidates": []},
+            server_name=SERVER_NAME, ca_pem=self.ca_pem, stun=("192.0.2.1", 3478),  # TEST-NET: never answers
+        )
+        self.addCleanup(path.stop)
+        path.start()
+        self.assertFalse(path.wait(15))
+        self.assertEqual(len(offers), 1)
+        if direct_path.default_route_address() is not None:
+            self.assertTrue(offers[0]["candidates"])
+        self.assertTrue(all(" typ host" in sdp for sdp in offers[0]["candidates"]), offers[0]["candidates"])
+
+    def _until(self, condition, seconds=15):
+        deadline = time.monotonic() + seconds
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return condition()
+
+    def test_a_failed_race_is_remembered_and_this_network_is_not_signaled_again(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as other:
+            other_ca = write_certs(Path(other))  # the server keeps its own cert: every race fails
+        server = FakeServer(self.cert_dir, self.handler)
+        self.addCleanup(server.close)
+        first = direct_path.DirectPath(offer=server.offer, server_name=SERVER_NAME, ca_pem=other_ca, stun=None, memo="lab")
+        self.addCleanup(first.stop)
+        first.start()
+        self.assertTrue(self._until(lambda: first.state == "down"), first.describe())
+        self.assertEqual(direct_path._memo_outcome("lab")[0], "failed")
+        self.assertEqual(server.offers, 1)
+
+        # Another process on this network: no signaling, and no wait for it.
+        with mock.patch.object(direct_path, "MEMO_SECONDS", 3):
+            second = direct_path.DirectPath(offer=server.offer, server_name=SERVER_NAME, ca_pem=other_ca, stun=None, memo="lab")
+            self.addCleanup(second.stop)
+            started = time.monotonic()
+            second.start()
+            self.assertFalse(second.wait())
+            self.assertLess(time.monotonic() - started, 0.2)
+            time.sleep(3.5)  # past the memo: still nothing until a call wants the path
+            self.assertEqual(server.offers, 1)
+            second.wake()
+            self.assertTrue(self._until(lambda: server.offers == 2, 5))
+            time.sleep(0.5)
+            self.assertEqual(server.offers, 2)
+
+    def test_wait_blocks_only_where_the_path_last_worked(self):
+        server = FakeServer(self.cert_dir, self.handler)
+        self.addCleanup(server.close)
+
+        def slow(offer):
+            time.sleep(0.5)
+            return server.offer(offer)
+
+        first = direct_path.DirectPath(offer=slow, server_name=SERVER_NAME, ca_pem=self.ca_pem, stun=None, memo="lab2")
+        self.addCleanup(first.stop)
+        started = time.monotonic()
+        first.start()
+        self.assertFalse(first.wait())  # never worked here: the relay at once
+        self.assertLess(time.monotonic() - started, 0.3)
+        self.assertTrue(self._until(lambda: first.ready), first.describe())
+        self.assertEqual(direct_path._memo_outcome("lab2")[0], "ready")
+
+        second = direct_path.DirectPath(offer=slow, server_name=SERVER_NAME, ca_pem=self.ca_pem, stun=None, memo="lab2")
+        self.addCleanup(second.stop)
+        second.start()
+        self.assertTrue(second.wait(15), second.describe())  # it worked here: worth the wait
+
+    def test_a_refused_offer_retries_only_when_a_call_wants_it(self):
+        offers = []
+
+        def refuse(offer):
+            offers.append(offer)
+            raise direct_path.PathError("no_active_reservation [home]")
+
+        with mock.patch.object(direct_path, "RETRY_SECONDS", 0.2):
+            path = direct_path.DirectPath(offer=refuse, server_name=SERVER_NAME, ca_pem=self.ca_pem, stun=None, memo="lab3")
+            self.addCleanup(path.stop)
+            path.start()
+            time.sleep(1)
+            self.assertEqual(len(offers), 1)  # no background polling
+            path.wake()
+            self.assertTrue(self._until(lambda: len(offers) == 2, 5))
+            time.sleep(0.5)
+            self.assertEqual(len(offers), 2)
+        self.assertEqual(path.state, "down")
+        self.assertIsNone(direct_path._memo_outcome("lab3"))  # a refusal is not the network's fault
+
+    def test_a_refused_offer_stays_on_the_relay(self):
+        def refuse(offer):
+            raise direct_path.PathError("No matching server function to call: direct_offer")
+
+        path = direct_path.DirectPath(offer=refuse, server_name=SERVER_NAME, ca_pem=self.ca_pem, stun=None)
+        self.addCleanup(path.stop)
+        path.start()
+        self.assertFalse(path.wait(15))
+        self.assertEqual(path.state, "unavailable")
+        self.assertEqual(path.describe(), "relay (this Server has no direct path)")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class QuietHandlerTests(unittest.TestCase):
+    """A STUN retry that dies on a closed transport stays off the console,
+    whichever way asyncio reports it; anything else still reaches the default."""
+
+    def _run(self, name, exc):
+        seen = []
+        loop = asyncio.new_event_loop()
+        try:
+            direct_path.quiet_aioice_errors(loop)
+            default = loop.default_exception_handler
+            loop.default_exception_handler = lambda context: seen.append(context)
+            # quiet_aioice_errors captured the real default; swap it the same way
+            direct_path.quiet_aioice_errors(loop)
+
+            class Transaction:
+                def __retry(self):
+                    raise exc
+
+                def other(self):
+                    raise exc
+
+            loop.call_later(0, getattr(Transaction(), name))
+            loop.call_later(0.01, loop.stop)
+            loop.run_forever()
+        finally:
+            loop.close()
+        return seen
+
+    def test_a_retry_on_a_closed_transport_is_silent(self):
+        self.assertEqual(self._run("_Transaction__retry", AttributeError("'NoneType' object has no attribute 'call_exception_handler'")), [])
+        self.assertEqual(self._run("_Transaction__retry", OSError("bad file descriptor")), [])
+
+    def test_anything_else_still_reaches_the_default_handler(self):
+        self.assertEqual(len(self._run("_Transaction__retry", ValueError("not ours"))), 1)
+        self.assertEqual(len(self._run("other", AttributeError("elsewhere"))), 1)
+
+    def test_a_dead_connect_waiter_is_silent_on_every_python(self):
+        # 3.14 reports aioquic's shielded waiter differently from earlier versions.
+        seen = []
+        loop = asyncio.new_event_loop()
+        try:
+            loop.default_exception_handler = seen.append
+            direct_path.quiet_aioice_errors(loop)
+            for message in ("Future exception was never retrieved", "ConnectionError exception in shielded future"):
+                loop.call_exception_handler({"message": message, "exception": ConnectionError()})
+            loop.call_exception_handler({"message": "ValueError exception in shielded future", "exception": ValueError()})
+        finally:
+            loop.close()
+        self.assertEqual([type(c["exception"]) for c in seen], [ValueError])
+
+
+class BrokenQuicStackTests(unittest.TestCase):
+    def test_a_broken_pyopenssl_turns_the_direct_path_off_not_the_client(self):
+        # conda can swap in a cryptography the pip-installed pyOpenSSL (aioquic's) cannot use.
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "OpenSSL").mkdir()
+            (Path(tmp) / "OpenSSL" / "__init__.py").write_text("raise AttributeError(\"module 'lib' has no attribute 'GEN_EMAIL'\")\n")
+            probe = ("from remoterf.core import direct_path, grpc_client; "
+                     "print(direct_path.enabled(), direct_path.current(), direct_path.describe())")
+            result = subprocess.run([sys.executable, "-c", probe], env={**os.environ, "HOME": tmp, "REMOTERF_DEBUG": "0",
+                                                                          "PYTHONPATH": os.pathsep.join(filter(None, [tmp, os.environ.get("PYTHONPATH")]))},
+                                    capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        # The exception itself only with REMOTERF_DEBUG=1.
+        self.assertEqual(result.stdout, "False None relay (direct path unavailable; fix: pip install --force-reinstall remoterf)\n",
+                         result.stderr[-2000:])
+
