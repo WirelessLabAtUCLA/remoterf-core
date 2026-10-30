@@ -1,6 +1,8 @@
 name: dev-release
 
 # Frees the dev lease (spec 3.6) when an issue-* PR closes, merged or not.
+# No environment: GitHub checks env branch policies against refs/pull/N/merge here, which
+# issue-* never matches. DEV_RELEASE_KEY is a repo secret whose dev key may only run `release`.
 on:
   pull_request:
     types: [closed]
@@ -9,10 +11,9 @@ jobs:
   release:
     if: startsWith(github.head_ref, 'issue-') && vars.DEV_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
-    environment: dev
     steps:
       - env:
-          KEY: ${{ secrets.DEV_DEPLOY_KEY }}
+          KEY: ${{ secrets.DEV_RELEASE_KEY }}
           KNOWN: ${{ vars.DEV_KNOWN_HOSTS }}
           BRANCH: ${{ github.head_ref }}
         run: |
