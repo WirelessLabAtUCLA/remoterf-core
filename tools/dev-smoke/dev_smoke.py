@@ -9,7 +9,10 @@ Checks, in order, exiting 1 at the first failure:
 
 Env: RRF_SMOKE_USER, RRF_SMOKE_PASSWORD (required);
      REMOTERF_GLOBAL_ORIGIN (default https://dev.global.remoterf.net).
---register creates the account first (dev Global signup; no email there).
+--register creates the account first (dev Global signup; no email there), so the
+new account stays unverified and reservations fail with native_account_required
+until it is verified on the dev VPS with:
+  docker exec remoterf-v2-live-deployment-1 remoterf-global-v2-admin --state-dir /state accounts verify <user>
 """
 import os
 import sys
