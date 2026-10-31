@@ -9,6 +9,7 @@ each package to build, cores first.
 """
 
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -17,12 +18,28 @@ CORES = ["packages/remoterf-federation-core", "packages/remoterf-device-core"]
 APPS = ["server", "host", "client"]
 
 
-def dev_version(base, run):
+def dev_version(base, run, released=None):
+    """A version this branch already bumped (agent PRs bump the packages they touch) is the
+    next release: build <it>.devN. Otherwise the next patch, since a .devN of the released
+    version would sort below it."""
+    if released and base != released:
+        return f"{base}.dev{run}"
     major, minor, patch = base.split(".")
     return f"{major}.{minor}.{int(patch) + 1}.dev{run}"
 
 
-def main(run, changed, root=Path(".")):
+def main_version(d, root):
+    """The package's version on origin/main, or None when it cannot be read."""
+    try:
+        text = subprocess.run(["git", "-C", str(root), "show", f"origin/main:{d}/pyproject.toml"],
+                              capture_output=True, text=True, check=True).stdout
+        return tomllib.loads(text)["project"]["version"]
+    except (OSError, subprocess.CalledProcessError, KeyError, tomllib.TOMLDecodeError):
+        return None
+
+
+def main(run, changed, root=Path("."), released=None):
+    released = released or (lambda d: main_version(d, root))
     def meta(d):
         project = tomllib.loads((root / d / "pyproject.toml").read_text())["project"]
         return project["name"], project["version"]
@@ -41,7 +58,7 @@ def main(run, changed, root=Path(".")):
         if not touched(d):
             continue
         name, base = meta(d)
-        new = out[d] = dev_version(base, run)
+        new = out[d] = dev_version(base, run, released(d))
         set_version(d, base, new)
         for app in APPS:
             p = root / app / "pyproject.toml"
@@ -52,7 +69,7 @@ def main(run, changed, root=Path(".")):
     for d in APPS:
         if touched(d) or d in rebuild:
             _, base = meta(d)
-            out[d] = dev_version(base, run)
+            out[d] = dev_version(base, run, released(d))
             set_version(d, base, out[d])
     return out
 
