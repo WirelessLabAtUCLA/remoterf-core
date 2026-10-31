@@ -171,9 +171,6 @@ jobs:
             commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"
           git push origin "HEAD:refs/heads/issue-$N"
       - run: |
-          gh workflow run ci.yml --ref "issue-$N"
-          gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"
-      - run: |
           pr=$(gh pr list --head "issue-$N" --state open --json url --jq '.[0].url')
           if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
           { printf 'Closes #%s\nRequested-by: @%s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
@@ -181,3 +178,8 @@ jobs:
           gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
           gh issue comment "$N" --body "Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: @$REQUESTER' in the body."
           exit 1
+      # After the PR exists: these runs are then the newest on its head commit and report ci-ok
+      # to it (GitHub holds its own pull_request run of a bot-opened PR for approval).
+      - run: |
+          gh workflow run ci.yml --ref "issue-$N"
+          gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"

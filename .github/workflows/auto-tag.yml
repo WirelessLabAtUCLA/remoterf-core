@@ -1,0 +1,45 @@
+name: Tag a release (on version bump)
+
+# Shipping a package = merging a PR that bumps its version. When a push to main changes a
+# package's version, tag that commit <pkg>-v<version> and start "Release to PyPI" on the tag
+# (tags made with GITHUB_TOKEN trigger no workflows, so the release is dispatched). The
+# "release tags" ruleset lets GitHub Actions create these tags; release.yml still refuses a tag
+# that is not on main or does not match the version. Only versions a push changed are tagged,
+# never older ones (those were published before this workflow and have no tags).
+on:
+  push:
+    branches: [main]
+    paths: ["client/pyproject.toml", "server/pyproject.toml", "host/pyproject.toml", "packages/*/pyproject.toml"]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          version() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])'; }
+          for spec in client:client server:server host:host \
+                      federation-core:packages/remoterf-federation-core device-core:packages/remoterf-device-core; do
+            pkg=${spec%%:*}; dir=${spec#*:}
+            v=$(version < "$dir/pyproject.toml")
+            tag="$pkg-v$v"
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then continue; fi
+            old=$(git show "$BEFORE:$dir/pyproject.toml" 2>/dev/null | version 2>/dev/null || true)
+            [ "$old" != "$v" ] || continue # only versions this push changed
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent
+            gh workflow run release.yml --ref "$tag" -f package="$pkg" -f dry_run=false
+            echo "::notice::tagged $tag at ${GITHUB_SHA::7}; Release to PyPI started"
+          done
