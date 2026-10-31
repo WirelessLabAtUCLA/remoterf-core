@@ -119,4 +119,18 @@ jobs:
         with:
           name: dist-${{ needs.build.outputs.tag }}
           path: dist/
+      # One merge can release a core and the apps that pin it in parallel runs: never publish
+      # an app before the exact core versions it requires are installable.
+      - name: Wait for pinned cores on PyPI
+        run: |
+          for whl in dist/*.whl; do
+            unzip -p "$whl" '*.dist-info/METADATA' |
+              sed -n 's/^Requires-Dist: \(remoterf-[a-z-]*-core\)==\([^ ;]*\).*/\1 \2/Ip'
+          done | while read -r name version; do
+            for i in $(seq 60); do
+              curl -fs "https://pypi.org/pypi/$name/$version/json" >/dev/null && continue 2
+              sleep 30
+            done
+            echo "::error::$name==$version is not on PyPI after 30 min; not publishing"; exit 1
+          done
       - uses: pypa/gh-action-pypi-publish@release/v1

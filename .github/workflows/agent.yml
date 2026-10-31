@@ -170,14 +170,25 @@ jobs:
           # Merging ships: bump the patch version of each package this branch changes (tests
           # aside), once, so the merge carries the release version (auto-tag.yml releases it).
           git fetch -q --depth=1 origin main
-          ver() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])'; }
-          for d in client server host packages/remoterf-federation-core packages/remoterf-device-core; do
+          meta() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"][sys.argv[1]])' "$1"; }
+          # Cores first: server/host pin them exactly and test against the in-tree cores, so a
+          # core's new version moves those pins, and a moved pin bumps that app too. client
+          # installs its pinned core from PyPI, so its pin stays on a released core.
+          for d in packages/remoterf-federation-core packages/remoterf-device-core client server host; do
             git diff --cached --quiet FETCH_HEAD -- "$d" ":(exclude)$d/tests" && continue
-            old=$(git show "FETCH_HEAD:$d/pyproject.toml" | ver); cur=$(ver < "$d/pyproject.toml")
-            [ "$cur" = "$old" ] || continue
-            new=$(python3 -c 'import sys; a = sys.argv[1].split("."); a[2] = str(int(a[2]) + 1); print(".".join(a))' "$old")
-            sed -i "0,/^version = \"$old\"$/s//version = \"$new\"/" "$d/pyproject.toml"
-            git add "$d/pyproject.toml"; echo "::notice::$d $old -> $new"
+            old=$(git show "FETCH_HEAD:$d/pyproject.toml" | meta version); cur=$(meta version < "$d/pyproject.toml")
+            if [ "$cur" = "$old" ]; then
+              cur=$(python3 -c 'import sys; a = sys.argv[1].split("."); a[2] = str(int(a[2]) + 1); print(".".join(a))' "$old")
+              sed -i "0,/^version = \"${old//./\\.}\"$/s//version = \"$cur\"/" "$d/pyproject.toml"
+              git add "$d/pyproject.toml"; echo "::notice::$d $old -> $cur"
+            fi
+            case $d in packages/*)
+              name=$(meta name < "$d/pyproject.toml")
+              for app in server host; do  # only pins of the current release follow
+                sed -i "s/\"$name==${old//./\\.}\"/\"$name==$cur\"/" "$app/pyproject.toml"
+                git add "$app/pyproject.toml"
+              done;;
+            esac
           done
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"

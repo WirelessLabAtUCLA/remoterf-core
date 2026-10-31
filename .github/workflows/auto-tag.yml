@@ -31,8 +31,9 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           version() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])'; }
-          for spec in client:client server:server host:host \
-                      federation-core:packages/remoterf-federation-core device-core:packages/remoterf-device-core; do
+          # Cores first; release.yml also holds an app's upload until its pinned cores are on PyPI.
+          for spec in federation-core:packages/remoterf-federation-core device-core:packages/remoterf-device-core \
+                      client:client server:server host:host; do
             pkg=${spec%%:*}; dir=${spec#*:}
             v=$(version < "$dir/pyproject.toml")
             tag="$pkg-v$v"
