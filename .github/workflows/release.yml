@@ -5,7 +5,7 @@
 # pypi) only when the repo variable PYPI_PUBLISH_ENABLED is 'true'.
 # workflow_dispatch builds without releasing unless it is run on a tag with dry_run off.
 # A pull request that changes this file builds every package as a dry run.
-name: release
+name: Release to PyPI (on version tag)
 on:
   push:
     tags: ["client-v*", "server-v*", "host-v*", "federation-core-v*", "device-core-v*"]

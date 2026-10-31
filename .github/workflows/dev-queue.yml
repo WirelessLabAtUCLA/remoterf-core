@@ -1,0 +1,57 @@
+name: Dev queue (next branch to dev)
+
+# Dev tests one branch at a time. The dev gate (remoterf-federation deploy/dev/rrf-dev-deploy)
+# queues the others in order across both repos. Every 10 minutes, when dev is free and the
+# first branch in line is this repo's, re-run stage1-dev on it. Branches that no longer exist,
+# or whose PR was closed, leave the queue.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: dev-queue
+  cancel-in-progress: false
+
+jobs:
+  next:
+    if: vars.DEV_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 5
+    steps:
+      - name: ssh key and pinned host key
+        env:
+          KEY: ${{ secrets.DEV_DEPLOY_KEY }}
+          KNOWN: ${{ vars.DEV_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/rrf-dev-queue && chmod 600 ~/.ssh/rrf-dev-queue
+          printf '%s\n' "$KNOWN" > ~/.ssh/rrf-dev-known-hosts
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          gate() { ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/rrf-dev-queue -o UserKnownHostsFile=~/.ssh/rrf-dev-known-hosts root@dev.global.remoterf.net "$@"; }
+          status=$(gate status)
+          echo "$status"
+          [ "$(jq -r .free <<<"$status")" = true ] || { echo "dev is busy"; exit 0; }
+          next=$(jq -r '.queue[0] // empty | "\(.branch) \(.repo)"' <<<"$status")
+          [ -n "$next" ] || { echo "nothing queued"; exit 0; }
+          read -r branch repo <<<"$next"
+          [ "$repo" = "$REPO" ] || { echo "$repo $branch is next; its own dev-queue run deploys it"; exit 0; }
+          prs=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$branch" --state all --json state --jq '[.[].state] | join(" ")')
+          if ! gh api "repos/$GITHUB_REPOSITORY/branches/$branch" --silent 2>/dev/null || { [ -n "$prs" ] && ! grep -qw OPEN <<<"$prs"; }; then
+            gate dequeue "$branch" "$repo" >/dev/null; echo "dropped $branch: branch gone or PR closed"; exit 0
+          fi
+          running=$(gh run list -R "$GITHUB_REPOSITORY" --workflow stage1-dev.yml --branch "$branch" --json status --jq '[.[] | select(.status != "completed")] | length')
+          [ "$running" = 0 ] || { echo "stage1-dev is already running on $branch"; exit 0; }
+          gh workflow run stage1-dev.yml -R "$GITHUB_REPOSITORY" --ref "$branch"
+          echo "dispatched stage1-dev on $branch"
+      - if: always()
+        run: rm -f ~/.ssh/rrf-dev-queue ~/.ssh/rrf-dev-known-hosts
