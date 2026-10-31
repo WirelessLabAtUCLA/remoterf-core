@@ -10,4 +10,6 @@ The parts of RemoteRF that a lab Server (`remoteRF-server`) and a Host (`remoter
 
 Server and Host pin the same version, so a host running a built-in driver reports exactly the hash its lab knows.
 
+You rarely install it directly: `remoteRF-server` and `remoterf-host` pull it in as a dependency.
+
 License: GPL-3.0-or-later.
