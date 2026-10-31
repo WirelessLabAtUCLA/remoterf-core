@@ -167,12 +167,21 @@ jobs:
         run: |
           git apply --index --binary "$RUNNER_TEMP/agent/agent.patch"
           if git diff --cached --name-only --no-renames | grep '^\.github/'; then echo "::error::change touches .github/"; exit 1; fi
+          # Merging ships: bump the patch version of each package this branch changes (tests
+          # aside), once, so the merge carries the release version (auto-tag.yml releases it).
+          git fetch -q --depth=1 origin main
+          ver() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])'; }
+          for d in client server host packages/remoterf-federation-core packages/remoterf-device-core; do
+            git diff --cached --quiet FETCH_HEAD -- "$d" ":(exclude)$d/tests" && continue
+            old=$(git show "FETCH_HEAD:$d/pyproject.toml" | ver); cur=$(ver < "$d/pyproject.toml")
+            [ "$cur" = "$old" ] || continue
+            new=$(python3 -c 'import sys; a = sys.argv[1].split("."); a[2] = str(int(a[2]) + 1); print(".".join(a))' "$old")
+            sed -i "0,/^version = \"$old\"$/s//version = \"$new\"/" "$d/pyproject.toml"
+            git add "$d/pyproject.toml"; echo "::notice::$d $old -> $new"
+          done
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"
           git push origin "HEAD:refs/heads/issue-$N"
-      - run: |
-          gh workflow run ci.yml --ref "issue-$N"
-          gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"
       - run: |
           pr=$(gh pr list --head "issue-$N" --state open --json url --jq '.[0].url')
           if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
@@ -181,3 +190,8 @@ jobs:
           gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
           gh issue comment "$N" --body "Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: @$REQUESTER' in the body."
           exit 1
+      # After the PR exists: these runs are then the newest on its head commit and report ci-ok
+      # to it (GitHub holds its own pull_request run of a bot-opened PR for approval).
+      - run: |
+          gh workflow run ci.yml --ref "issue-$N"
+          gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"
