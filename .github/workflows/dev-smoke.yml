@@ -28,4 +28,8 @@ jobs:
         env:
           REMOTERF_GLOBAL_ORIGIN: https://dev.global.remoterf.net
           RRF_SMOKE_USER: ci-smoke
+          RRF_SMOKE_USER2: ci-smoke-2
           RRF_SMOKE_PASSWORD: ${{ secrets.DEV_SMOKE_PASSWORD }}
+          DEV_SMOKE_RESULT: ${{ runner.temp }}/dev-smoke-result.json
+          # No dev lease here (the gate leases issue-N only): skip logout, which would end a PR run's sessions.
+          DEV_SMOKE_UNLEASED: "1"
