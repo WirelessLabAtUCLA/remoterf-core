@@ -1,2 +1,3 @@
-# Only repo admins may approve changes (rulesets require a code owner review on main).
-* @ethange1 @iproberts @hcsamuelli
+# Only this admin is asked to review each PR (rulesets require a code-owner approval on main);
+# other admins can still merge with the admin bypass. Listing more people notifies them on every PR.
+* @ethange1
