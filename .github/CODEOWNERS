@@ -1,3 +1,4 @@
-# Only this admin is asked to review each PR (rulesets require a code-owner approval on main);
-# other admins can still merge with the admin bypass. Listing more people notifies them on every PR.
-* @ethange1
+# Approvals count only from this team (ethange1, iproberts): the rulesets require a code-owner
+# review on main. The team has notifications off and its code review auto-assignment assigns
+# nobody, so no one is review-requested or emailed; any member can still approve.
+* @WirelessLabAtUCLA/remoterf-admins
