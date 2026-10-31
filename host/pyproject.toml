@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remoterf-host"
-version = "1.3.3"
+version = "1.3.4"
 description = "RemoteRF host-side control package"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Ethan Ge" }]
 dependencies = [
-  "remoterf-device-core==0.1.0",
+  "remoterf-device-core==0.1.1",
   "remoterf-federation-core==0.22.0",
   "aioice>=0.10,<0.11",
   "aioquic>=1.2,<2.0",
