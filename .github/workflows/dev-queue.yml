@@ -1,4 +1,4 @@
-name: dev-queue
+name: Dev queue (next branch to dev)
 
 # Dev tests one branch at a time. The dev gate (remoterf-federation deploy/dev/rrf-dev-deploy)
 # queues the others in order across both repos. Every 10 minutes, when dev is free and the

@@ -1,4 +1,4 @@
-name: stage1-dev
+name: Dev test (build, deploy to dev, smoke)
 
 # Every push to an issue-* branch: tests, .devN wheels for what changed, TestPyPI (once
 # enabled), then the Server wheel onto the dev test lab and the dev smoke (once enabled).

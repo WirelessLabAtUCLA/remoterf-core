@@ -1,4 +1,4 @@
-name: agent
+name: Agent (fixes an issue)
 
 # An issue labeled `agent`, or an `@claude` comment on an issue, by a repo admin, for a requester
 # who is also an admin (the author, or the `Requested-by:` line a bot or admin wrote):

@@ -1,4 +1,4 @@
-name: dev-smoke
+name: Dev smoke test
 
 # Client -> dev Global -> test lab, over the internet from a GitHub-hosted runner.
 on:
