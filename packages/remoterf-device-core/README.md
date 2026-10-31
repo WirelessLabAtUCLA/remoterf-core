@@ -9,5 +9,6 @@ The parts of RemoteRF that a lab Server (`remoteRF-server`) and a Host (`remoter
 - the ICE/QUIC helpers for direct device paths (install with the `direct` extra).
 
 Server and Host pin the same version, so a host running a built-in driver reports exactly the hash its lab knows.
+End users do not install this package directly; it comes in as a dependency of `remoteRF-server` or `remoterf-host`.
 
 License: GPL-3.0-or-later.
