@@ -65,6 +65,7 @@ from ..common.grpc import grpc_host_pb2_grpc as host_tunnel_pb2_grpc
 
 from pathlib import Path
 from prompt_toolkit import PromptSession
+from prompt_toolkit.input import DummyInput
 from prompt_toolkit.output import DummyOutput
 
 from ..tools.gist_status import start_status_publisher
@@ -120,15 +121,20 @@ def _get_port(name: str, *, default: int | None = None) -> int:
         raise SystemExit(f"{name} out of range (1..65535): {n}")
     return n
 
-try:
-    session = PromptSession()
-except Exception as exc:
-    if type(exc).__name__ != "NoConsoleScreenBufferError":
-        raise
-    # Importing the server in a headless process (tests, services, containers)
-    # may not provide a real console screen buffer. The interactive serve path
-    # still gets the normal output whenever one is available.
-    session = PromptSession(output=DummyOutput())
+if sys.stdin is not None and sys.stdin.isatty():
+    try:
+        session = PromptSession()
+    except Exception as exc:
+        if type(exc).__name__ != "NoConsoleScreenBufferError":
+            raise
+        # Importing the server in a headless process (tests, services, containers)
+        # may not provide a real console screen buffer. The interactive serve path
+        # still gets the normal output whenever one is available.
+        session = PromptSession(output=DummyOutput())
+else:
+    # No terminal on stdin (systemd, --headless, pipes): avoid prompt_toolkit's
+    # "Input is not a terminal" warning. Prompts hit EOF immediately.
+    session = PromptSession(input=DummyInput(), output=DummyOutput())
 BANNER_CREDIT = "Created by the Wireless Lab at UCLA"
 
 from dotenv import load_dotenv, find_dotenv
