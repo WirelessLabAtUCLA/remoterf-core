@@ -1,6 +1,6 @@
 # remoterf-device-core
 
-The parts of RemoteRF that a lab Server (`remoteRF-server`) and a Host (`remoterf-host`) share, kept as one copy:
+The parts of RemoteRF that a lab Server (`remoteRF-server`) and a Host (`remoterf-host`) share, kept in one place:
 
 - the gRPC protocol (`grpc.proto`, `grpc_host.proto`) and the Dynamic v2 codec;
 - the device IDL (`DeviceSchema`, `idl_expose`, `idl_register`) and the schema v2 builder;
