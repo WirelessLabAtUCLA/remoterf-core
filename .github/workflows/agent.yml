@@ -80,7 +80,7 @@ jobs:
             } else if (actor === 'rrf-issues[bot]') { // the Slack bot acts for the admin it names
               if (comment) {
                 const text = comment.body.replace(/^```diff[ \t]*\n[\s\S]*?^```[ \t]*$/gm, ''); // not inside a quick-edit diff
-                const r = [...text.matchAll(/^Requested-by:\s*@([\w-]+)/gm)].pop();
+                const r = [...text.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop();
                 if (!r) return core.setFailed('bot comment without Requested-by');
                 by = r[1];
               } else if (mode === 'agent') {
@@ -97,7 +97,7 @@ jobs:
             };
             const users = new Set();
             let requester = issue.user.login;
-            const m = /^Requested-by:\s*@([\w-]+)/m.exec(issue.body || '');
+            const m = /^Requested-by:\s*@?([\w-]+)/m.exec(issue.body || '');
             if (requester === 'rrf-issues[bot]') {
               if (!m) return refuse('bot issue without Requested-by');
             } else if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(issue.author_association)) {
@@ -142,7 +142,7 @@ jobs:
               for (const c of [...all].reverse()) {
                 const body = c.body || '', login = c.user?.login;
                 if (bot(c) || !(/@claude/i.test(body) || /^[ \t]*\/(quick-edit|retest|ship)(\s|$)/.test(body))) continue;
-                const u = login === 'rrf-issues[bot]' ? [...body.matchAll(/^Requested-by:\s*@([\w-]+)/gm)].pop()?.[1] : login;
+                const u = login === 'rrf-issues[bot]' ? [...body.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop()?.[1] : login;
                 if (u && await perm(u) === 'admin') { since = Date.parse(c.created_at); break; }
               }
               const k = all.filter(c => fix(c) && Date.parse(c.created_at) > since).length;
@@ -314,7 +314,7 @@ jobs:
           BASE: ${{ needs.work.outputs.base }}
         run: |
           git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"
+          git commit -q -m "Issue #$N: $TITLE" -m "Requested-by: $REQUESTER"
           # an act run (/quick-edit, /ship) may have pushed issue-N meanwhile
           if git fetch -q origin "refs/heads/issue-$N" 2>/dev/null && [ "$(git rev-parse FETCH_HEAD)" != "$BASE" ]; then
             git rebase -q --onto FETCH_HEAD "$BASE"
@@ -324,10 +324,10 @@ jobs:
           pr=$(gh pr list --head "issue-$N" --state open --json url,isCrossRepository \
             --jq 'map(select(.isCrossRepository | not))[0].url // empty')
           if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
-          { printf 'Closes #%s\nRequested-by: @%s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
+          { printf 'Closes #%s\nRequested-by: %s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
           # needs Settings > Actions > "Allow GitHub Actions to create and approve pull requests"
           gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
-          echo "MSG=Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: @$REQUESTER' in the body." >> "$GITHUB_ENV"
+          echo "MSG=Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: $REQUESTER' in the body." >> "$GITHUB_ENV"
           exit 1
       # After the PR exists: these runs are then the newest on its head commit and report ci-ok
       # to it (GitHub holds its own pull_request run of a bot-opened PR for approval).
@@ -465,7 +465,7 @@ jobs:
               const text = blocks.reduce((t, b) => t.replace(b[0], ''), body); // Requested-by and Summary never come from a diff
               let login = c.user.login;
               if (login === 'rrf-issues[bot]') {
-                const r = [...text.matchAll(/^Requested-by:\s*@([\w-]+)/gm)].pop();
+                const r = [...text.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop();
                 if (!r) { await fail('no Requested-by line'); continue; }
                 if (!await admin(r[1])) { await fail(`${r[1]} is not an admin`); continue; }
                 login = r[1];
@@ -484,7 +484,7 @@ jobs:
               const summary = (s ? s[1].replace(/\s+/g, ' ').trim().slice(0, 100) : '') || 'text edit';
               await exec.exec('git', ['-c', 'user.name=github-actions[bot]',
                 '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-                'commit', '-q', '--allow-empty', '-m', `Quick edit: ${summary}`, '-m', `Requested-by: @${login}\nQuick-edit: ${id}`],
+                'commit', '-q', '--allow-empty', '-m', `Quick edit: ${summary}`, '-m', `Requested-by: ${login}\nQuick-edit: ${id}`],
                 { env: { ...process.env, GIT_AUTHOR_DATE: c.created_at, GIT_COMMITTER_DATE: c.created_at } });
               applied++;
             }
@@ -502,7 +502,7 @@ jobs:
         run: |
           if ! git diff --cached --quiet; then
             git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -q -m "Bump versions for release" -m "Requested-by: @$BY"
+              commit -q -m "Bump versions for release" -m "Requested-by: $BY"
           fi
           if [ "$(git rev-parse HEAD)" != "$BASE" ]; then
             if git fetch -q origin "refs/heads/issue-$N" 2>/dev/null && [ "$(git rev-parse FETCH_HEAD)" != "$BASE" ]; then
@@ -520,7 +520,7 @@ jobs:
           pr=$(gh pr list --head "issue-$N" --state open --json number,isCrossRepository \
             --jq 'map(select(.isCrossRepository | not))[0].number // empty')
           if [ -z "$pr" ]; then
-            printf 'Closes #%s\nRequested-by: @%s\n' "$N" "$REQUESTER" > "$RUNNER_TEMP/body.md"
+            printf 'Closes #%s\nRequested-by: %s\n' "$N" "$REQUESTER" > "$RUNNER_TEMP/body.md"
             gh pr create --draft --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" ||
               { echo "MSG=Pushed to issue-$N but could not open the draft PR." >> "$GITHUB_ENV"; exit 1; }
           elif [ "$APPLIED" = 0 ]; then exit 0

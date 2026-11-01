@@ -1,4 +1,4 @@
 # Approvals count only from this team (ethange1, iproberts): the rulesets require a code-owner
-# review on main. The team has notifications off and its code review auto-assignment assigns
-# nobody, so no one is review-requested or emailed; any member can still approve.
+# review on main. GitHub still emails the team's members on each review request (team
+# notification settings do not stop it); turn it off in your own GitHub notification settings.
 * @WirelessLabAtUCLA/remoterf-admins
