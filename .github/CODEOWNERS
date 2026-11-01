@@ -1,4 +1,0 @@
-# Approvals count only from this team (ethange1, iproberts): the rulesets require a code-owner
-# review on main. The team has notifications off and its code review auto-assignment assigns
-# nobody, so no one is review-requested or emailed; any member can still approve.
-* @WirelessLabAtUCLA/remoterf-admins

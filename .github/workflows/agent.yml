@@ -1,14 +1,28 @@
 name: Agent (fixes an issue)
 
-# An issue labeled `agent`, or an `@claude` comment on an issue, by a repo admin, for a requester
-# who is also an admin (the author, or the `Requested-by:` line a bot or admin wrote):
-# the agent edits a checkout (read-only token, no push), then the publish job commits the diff
-# to issue-N, dispatches ci and stage1-dev for it, and opens the PR.
+# Requests on an issue, from a repo admin (or from the Slack bot rrf-issues[bot], for the admin on
+# its Requested-by line), for a requester who is also an admin (the author, or the `Requested-by:`
+# line a bot or admin wrote):
+# - label `agent`, or an `@claude` comment: the agent edits a checkout (read-only token, no push),
+#   then the publish job commits the diff to issue-N, dispatches ci and stage1-dev, opens the PR.
+# - dispatch mode=autofix (stage1-dev's autofix job, right after its "🔧 Auto-fix k/2" comment):
+#   the same, with that comment as the request.
+# - a comment whose first line is /quick-edit, /retest or /ship: the act job, no agent (below).
 on:
   issues:
     types: [labeled]
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number
+        required: true
+        type: string
+      mode:
+        required: true
+        type: choice
+        options: [autofix]
 
 permissions: {}
 
@@ -17,47 +31,143 @@ jobs:
     if: >-
       (github.event_name == 'issues' && github.event.label.name == 'agent') ||
       (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
-       contains(github.event.comment.body, '@claude'))
+       (contains(github.event.comment.body, '@claude') || startsWith(github.event.comment.body, '/quick-edit') ||
+        startsWith(github.event.comment.body, '/retest') || startsWith(github.event.comment.body, '/ship'))) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      issues: read
+      issues: write # one comment when an admin's request is refused
+      actions: read # autofix: the stage1-dev run behind the request
+      contents: read
     outputs:
+      issue: ${{ steps.check.outputs.issue }}
+      mode: ${{ steps.check.outputs.mode }}
       requester: ${{ steps.check.outputs.requester }}
+      by: ${{ steps.check.outputs.by }}
+      title: ${{ steps.check.outputs.title }}
+      body: ${{ steps.check.outputs.body }}
+      request: ${{ steps.check.outputs.request }}
+      date: ${{ steps.check.outputs.date }}
     steps:
       - id: check
         uses: actions/github-script@v7
         with:
           script: |
-            const issue = context.payload.issue;
-            const users = new Set([context.actor]);
+            const actor = context.actor;
+            let { issue, comment } = context.payload;
+            let mode = 'agent';
+            if (context.eventName === 'workflow_dispatch') {
+              const n = context.payload.inputs.issue;
+              if (!/^\d+$/.test(n)) return core.setFailed(`bad issue number ${n}`);
+              ({ data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: Number(n) }));
+              if (issue.pull_request) return core.setFailed(`#${n} is a pull request`);
+              mode = 'autofix';
+            } else if (comment) {
+              const cmd = comment.body.split('\n')[0].trim().split(/\s+/)[0];
+              mode = new Map([['/quick-edit', 'patch'], ['/retest', 'retest'], ['/ship', 'ship']]).get(cmd) ||
+                (/@claude/i.test(comment.body) ? 'agent' : '');
+              if (!mode) return core.notice('no request in this comment');
+            }
+            const perm = async u => {
+              try {
+                return (await github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: u })).data.permission;
+              } catch (e) { core.info(`${u}: ${e.status}`); return 'none'; }
+            };
+            let by = actor;
+            if (actor === 'github-actions[bot]') { // stage1-dev's autofix job
+              if (mode !== 'autofix') return core.setFailed('github-actions[bot] may only start an auto-fix');
+              by = '';
+            } else if (actor === 'rrf-issues[bot]') { // the Slack bot acts for the admin it names
+              if (comment) {
+                const text = comment.body.replace(/^```diff[ \t]*\n[\s\S]*?^```[ \t]*$/gm, ''); // not inside a quick-edit diff
+                const r = [...text.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop();
+                if (!r) return core.setFailed('bot comment without Requested-by');
+                by = r[1];
+              } else if (mode === 'agent') {
+                by = ''; // the bot labeled its own issue: the requester check below covers it
+              } else return core.setFailed('rrf-issues[bot] may not dispatch');
+            }
+            if (by) {
+              const p = await perm(by);
+              if (p !== 'admin') return core.setFailed(`${by} has ${p}; the agent is admin-only`);
+            }
+            const refuse = async msg => {
+              core.setFailed(msg);
+              await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body: `Not started: ${msg}` });
+            };
+            const users = new Set();
             let requester = issue.user.login;
-            const m = /^Requested-by:\s*@([\w-]+)/m.exec(issue.body || '');
+            const m = /^Requested-by:\s*@?([\w-]+)/m.exec(issue.body || '');
             if (requester === 'rrf-issues[bot]') {
-              if (!m) return core.setFailed('bot issue without Requested-by');
+              if (!m) return refuse('bot issue without Requested-by');
             } else if (!['OWNER', 'MEMBER', 'COLLABORATOR'].includes(issue.author_association)) {
-              return core.setFailed(`issue author is ${issue.author_association}`);
+              return refuse(`issue author is ${issue.author_association}`);
             } else {
               users.add(requester); // the Slack bot files as its token's owner
             }
             if (m) requester = m[1];
             users.add(requester);
             for (const u of users) {
-              let perm = 'none';
-              try {
-                ({ data: { permission: perm } } =
-                  await github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: u }));
-              } catch (e) { core.info(`${u}: ${e.status}`); }
-              if (perm !== 'admin') return core.setFailed(`${u} has ${perm}; the agent is admin-only`);
+              const p = await perm(u);
+              if (p !== 'admin') return refuse(`${u} has ${p}; the agent is admin-only`);
             }
+            let request = comment ? comment.body : '';
+            let date = comment ? comment.created_at : issue.updated_at;
+            if (mode === 'autofix') {
+              const all = await github.paginate(github.rest.issues.listComments,
+                { ...context.repo, issue_number: issue.number, per_page: 100 });
+              const bot = c => c.user?.login === 'github-actions[bot]';
+              const fix = c => bot(c) && (c.body || '').startsWith('🔧 Auto-fix ');
+              const last = all.filter(bot).pop();
+              if (!last || !fix(last)) return refuse('the newest github-actions comment is not an auto-fix request');
+              if (Date.now() - Date.parse(last.created_at) > 30 * 60e3) return refuse('the auto-fix request is over 30 minutes old');
+              // Every workflow's GITHUB_TOKEN comments as github-actions[bot]: accept only the one comment
+              // that main's stage1-dev autofix job posted on issue-N while it ran.
+              const wf = '.github/workflows/stage1-dev.yml';
+              const run_id = Number(/\/actions\/runs\/(\d+)/.exec(last.body)?.[1]);
+              if (!run_id) return refuse('the auto-fix request names no stage1-dev run');
+              const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id });
+              const blob = async ref => (await github.rest.repos.getContent({ ...context.repo, path: wf, ref })).data.sha;
+              const job = run.path === wf && run.head_branch === `issue-${issue.number}` &&
+                await blob(run.head_sha) === await blob('main') &&
+                (await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id, per_page: 100 }))
+                  .find(j => j.name === 'autofix' && j.started_at);
+              const during = c => bot(c) && Date.parse(c.created_at) >= Date.parse(job.started_at) &&
+                Date.parse(c.created_at) <= (job.completed_at ? Date.parse(job.completed_at) + 2e3 : Date.now());
+              if (!job || !during(last) || all.filter(during).length !== 1) {
+                return refuse(`the auto-fix request does not come from stage1-dev on issue-${issue.number}`);
+              }
+              // k = auto-fix comments since the newest admin request: exactly stage1-dev's autofix count
+              let since = -Infinity;
+              for (const c of [...all].reverse()) {
+                const body = c.body || '', login = c.user?.login;
+                if (bot(c) || !(/@claude/i.test(body) || /^[ \t]*\/(quick-edit|retest|ship)(\s|$)/.test(body))) continue;
+                const u = login === 'rrf-issues[bot]' ? [...body.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop()?.[1] : login;
+                if (u && await perm(u) === 'admin') { since = Date.parse(c.created_at); break; }
+              }
+              const k = all.filter(c => fix(c) && Date.parse(c.created_at) > since).length;
+              if (k > 2) return refuse(`auto-fix ${k} is over the limit of 2`);
+              request = `${last.body}\n\nFix the failure above on this branch; keep the original change.`;
+              date = last.created_at;
+            }
+            core.setOutput('issue', issue.number);
+            core.setOutput('mode', mode);
             core.setOutput('requester', requester);
+            core.setOutput('by', by || requester);
+            core.setOutput('title', issue.title);
+            core.setOutput('body', issue.body || '');
+            core.setOutput('request', request);
+            core.setOutput('date', date);
 
   work:
     needs: gate
+    # Re-runs act as github.actor: only that actor may start one.
+    if: (needs.gate.outputs.mode == 'agent' || needs.gate.outputs.mode == 'autofix') && github.triggering_actor == github.actor
     runs-on: ubuntu-latest # ci-box (nuc-agent) once its tag:ci ACL is in place
     environment: agent
     timeout-minutes: 60
     concurrency: # one run per issue: issues proceed in parallel, a second request on the same issue waits
-      group: agent-${{ github.repository }}-${{ github.event.issue.number }}
+      group: agent-${{ github.repository }}-${{ needs.gate.outputs.issue }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -65,7 +175,7 @@ jobs:
       base: ${{ steps.base.outputs.sha }}
       changed: ${{ steps.diff.outputs.changed }}
     env:
-      N: ${{ github.event.issue.number }}
+      N: ${{ needs.gate.outputs.issue }}
     steps:
       - id: auth
         env:
@@ -90,9 +200,9 @@ jobs:
           python-version: "3.12"
       - if: steps.auth.outputs.ok == 'true'
         env:
-          TITLE: ${{ github.event.issue.title }}
-          BODY: ${{ github.event.issue.body }}
-          COMMENT: ${{ github.event.comment.body }}
+          TITLE: ${{ needs.gate.outputs.title }}
+          BODY: ${{ needs.gate.outputs.body }}
+          COMMENT: ${{ needs.gate.outputs.request }}
         run: |
           { printf '# Issue #%s: %s\n\n%s\n' "$N" "$TITLE" "$BODY"
             [ -z "$COMMENT" ] || printf '\n## Latest request\n\n%s\n' "$COMMENT"; } > "$RUNNER_TEMP/issue.md"
@@ -141,7 +251,7 @@ jobs:
 
   publish:
     needs: [gate, work]
-    if: needs.work.outputs.changed == 'true'
+    if: needs.work.outputs.changed == 'true' && github.triggering_actor == github.actor
     runs-on: ubuntu-latest
     permissions:
       contents: write # GITHUB_TOKEN has no workflows permission: pushes touching .github/workflows are refused
@@ -150,59 +260,272 @@ jobs:
       actions: write # dispatch ci and stage1-dev (GITHUB_TOKEN pushes trigger nothing)
     env:
       GH_TOKEN: ${{ github.token }}
-      N: ${{ github.event.issue.number }}
-      TITLE: ${{ github.event.issue.title }}
+      GH_REPO: ${{ github.repository }}
+      N: ${{ needs.gate.outputs.issue }}
+      TITLE: ${{ needs.gate.outputs.title }}
       REQUESTER: ${{ needs.gate.outputs.requester }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.work.outputs.base }}
+          fetch-depth: 0 # the bump compares with the merge base
       - uses: actions/download-artifact@v4
         with:
           name: agent-patch
           path: ${{ runner.temp }}/agent
-      - env: # fixed dates keep the commit SHA stable, so a re-run's push is a no-op, not non-fast-forward
-          GIT_AUTHOR_DATE: ${{ github.event.comment.created_at || github.event.issue.updated_at }}
-          GIT_COMMITTER_DATE: ${{ github.event.comment.created_at || github.event.issue.updated_at }}
-        run: |
+      - run: |
           git apply --index --binary "$RUNNER_TEMP/agent/agent.patch"
           if git diff --cached --name-only --no-renames | grep '^\.github/'; then echo "::error::change touches .github/"; exit 1; fi
+      # Also the act job's bump (YAML alias). Runs after a diff is applied, with a write token:
+      # nothing from the checkout may run (python3 -I keeps the checkout off sys.path).
+      - run: &bump |
           # Merging ships: bump the patch version of each package this branch changes (tests
           # aside), once, so the merge carries the release version (auto-tag.yml releases it).
-          git fetch -q --depth=1 origin main
-          meta() { python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"][sys.argv[1]])' "$1"; }
+          git fetch -q origin main
+          mb=$(git merge-base HEAD FETCH_HEAD)
+          meta() { python3 -I -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"][sys.argv[1]])' "$1"; }
           # Cores first: server/host pin them exactly and test against the in-tree cores, so a
           # core's new version moves those pins, and a moved pin bumps that app too. client
           # installs its pinned core from PyPI, so its pin stays on a released core.
           for d in packages/remoterf-federation-core packages/remoterf-device-core client server host; do
-            git diff --cached --quiet FETCH_HEAD -- "$d" ":(exclude)$d/tests" && continue
+            git diff --cached --quiet "$mb" -- "$d" ":(exclude)$d/tests" && continue # this branch's own changes
             old=$(git show "FETCH_HEAD:$d/pyproject.toml" | meta version); cur=$(meta version < "$d/pyproject.toml")
+            was=$(git show "$mb:$d/pyproject.toml" | meta version); name=$(meta name < "$d/pyproject.toml")
+            # The branch's values go into sed scripts: plain values only.
+            [[ $cur =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && $name =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::$d: bad name or version"; exit 1; }
+            if [ "$cur" = "$was" ] && [ "$old" != "$was" ]; then # a bump here would conflict with main's
+              echo "MSG=main released $d $old after issue-$N started: merge main into issue-$N first." >> "$GITHUB_ENV"; exit 1
+            fi
             if [ "$cur" = "$old" ]; then
-              cur=$(python3 -c 'import sys; a = sys.argv[1].split("."); a[2] = str(int(a[2]) + 1); print(".".join(a))' "$old")
+              cur=$(python3 -I -c 'import sys; a = sys.argv[1].split("."); a[2] = str(int(a[2]) + 1); print(".".join(a))' "$old")
               sed -i "0,/^version = \"${old//./\\.}\"$/s//version = \"$cur\"/" "$d/pyproject.toml"
               git add "$d/pyproject.toml"; echo "::notice::$d $old -> $cur"
             fi
             case $d in packages/*)
-              name=$(meta name < "$d/pyproject.toml")
               for app in server host; do  # only pins of the current release follow
                 sed -i "s/\"$name==${old//./\\.}\"/\"$name==$cur\"/" "$app/pyproject.toml"
                 git add "$app/pyproject.toml"
               done;;
             esac
           done
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -q -m "Issue #$N: $TITLE" -m "Requested-by: @$REQUESTER"
+      - env: # fixed dates keep the commit SHA stable, so a re-run's push is a no-op, not non-fast-forward
+          GIT_AUTHOR_DATE: ${{ needs.gate.outputs.date }}
+          GIT_COMMITTER_DATE: ${{ needs.gate.outputs.date }}
+          BASE: ${{ needs.work.outputs.base }}
+        run: |
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -q -m "Issue #$N: $TITLE" -m "Requested-by: $REQUESTER"
+          # an act run (/quick-edit, /ship) may have pushed issue-N meanwhile
+          if git fetch -q origin "refs/heads/issue-$N" 2>/dev/null && [ "$(git rev-parse FETCH_HEAD)" != "$BASE" ]; then
+            git rebase -q --onto FETCH_HEAD "$BASE"
+          fi
           git push origin "HEAD:refs/heads/issue-$N"
       - run: |
-          pr=$(gh pr list --head "issue-$N" --state open --json url --jq '.[0].url')
+          pr=$(gh pr list --head "issue-$N" --state open --json url,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not))[0].url // empty')
           if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
-          { printf 'Closes #%s\nRequested-by: @%s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
+          { printf 'Closes #%s\nRequested-by: %s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
           # needs Settings > Actions > "Allow GitHub Actions to create and approve pull requests"
           gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
-          gh issue comment "$N" --body "Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: @$REQUESTER' in the body."
+          echo "MSG=Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: $REQUESTER' in the body." >> "$GITHUB_ENV"
           exit 1
       # After the PR exists: these runs are then the newest on its head commit and report ci-ok
       # to it (GitHub holds its own pull_request run of a bot-opened PR for approval).
       - run: |
           gh workflow run ci.yml --ref "issue-$N"
           gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"
+      - if: failure()
+        run: |
+          gh issue comment "$N" --body "${MSG:-Could not publish the agent change:$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID}"
+
+  # An auto-fix round that pushes nothing ends the chain: say so (stage1-dev never runs again to post 🛑).
+  autofix-stopped:
+    needs: [gate, work, publish]
+    if: always() && needs.gate.outputs.mode == 'autofix' && needs.publish.result != 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      N: ${{ needs.gate.outputs.issue }}
+    steps:
+      - run: |
+          gh issue comment "$N" --body "🛑 Auto-fix stopped: the agent pushed no fix: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  # No agent. /quick-edit: apply every pending /quick-edit diff on the issue verbatim, one commit
+  # each, bump, push issue-N, open a draft PR, run ci. /ship: the same (pending quick edits and
+  # the bump a local-dev branch lacks), then mark the PR ready and run ci and stage1-dev.
+  # /retest: run ci and stage1-dev on issue-N again. Only fixed code runs here, never the checkout.
+  act:
+    needs: gate
+    if: contains(fromJSON('["patch", "retest", "ship"]'), needs.gate.outputs.mode) && github.triggering_actor == github.actor
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One act per issue-N, apart from work's group: GitHub keeps one waiting run per group and cancels
+    # the older, so neither cancels the other's (both rebase before pushing). /retest writes nothing.
+    concurrency:
+      group: ${{ needs.gate.outputs.mode == 'retest' && github.run_id || format('act-{0}-{1}', github.repository, needs.gate.outputs.issue) }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      N: ${{ needs.gate.outputs.issue }}
+      MODE: ${{ needs.gate.outputs.mode }}
+      TITLE: ${{ needs.gate.outputs.title }}
+      REQUESTER: ${{ needs.gate.outputs.requester }}
+      BY: ${{ needs.gate.outputs.by }}
+    steps:
+      - if: env.MODE == 'retest'
+        run: |
+          if ! gh api "repos/$GH_REPO/branches/issue-$N" --silent; then
+            echo "MSG=Nothing to retest: there is no branch issue-$N." >> "$GITHUB_ENV"; exit 1
+          fi
+          gh workflow run ci.yml --ref "issue-$N"
+          gh workflow run stage1-dev.yml --ref "issue-$N"
+      - id: pr
+        if: env.MODE == 'ship'
+        run: |
+          pr=$(gh pr list --head "issue-$N" --state open --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not))[0].number // empty')
+          if [ -z "$pr" ]; then echo "MSG=Nothing to ship: no open PR from issue-$N." >> "$GITHUB_ENV"; exit 1; fi
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+      - if: env.MODE != 'retest'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Quick-edit trailers already on issue-N
+      - id: base
+        if: env.MODE != 'retest'
+        run: |
+          if git fetch -q origin "refs/heads/issue-$N" 2>/dev/null; then git checkout -q FETCH_HEAD; echo exists=true >> "$GITHUB_OUTPUT"; fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - id: apply
+        if: env.MODE != 'retest'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const n = Number(process.env.N);
+            const git = (...args) => exec.getExecOutput('git', args, { ignoreReturnCode: true, silent: true });
+            const first = s => s.trim().split('\n')[0];
+            const all = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: n, per_page: 100 });
+            // done = applied (a Quick-edit trailer on the branch) or failed (our ❌ comment)
+            const done = new Set((await git('log', '--format=%(trailers:key=Quick-edit,valueonly)', 'HEAD')).stdout.split(/\s+/));
+            for (const c of all) {
+              if (c.user.login !== 'github-actions[bot]') continue;
+              for (const m of (c.body || '').matchAll(/Quick edit (\d+) did not apply/g)) done.add(m[1]);
+            }
+            const perms = new Map();
+            const admin = async u => {
+              if (!perms.has(u)) {
+                perms.set(u, github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: u })
+                  .then(r => r.data.permission, () => 'none'));
+              }
+              return (await perms.get(u)) === 'admin';
+            };
+            // Only edits of existing regular text files, small, outside .github/ and packaging files.
+            const check = async file => {
+              const sum = await git('apply', '--summary', file);
+              if (sum.exitCode) return `not a valid diff: ${first(sum.stderr)}`;
+              if (sum.stdout.trim()) return `only edits of existing files are allowed (${first(sum.stdout).trim()})`;
+              const num = await git('apply', '--numstat', '-z', file);
+              const files = num.stdout.split('\0').filter(Boolean).map(r => r.split('\t'));
+              if (num.exitCode || !files.length) return `not a valid diff: ${first(num.stderr)}`;
+              let lines = 0;
+              for (const [add, del, ...rest] of files) {
+                const path = rest.join('\t');
+                if (add === '-') return `${path} is binary`;
+                lines += Number(add) + Number(del);
+                if (path.startsWith('.github/')) return `${path} is under .github/`;
+                if (/^(pyproject\.toml|setup\.py|setup\.cfg|requirements.*\.txt|.*\.lock)$/.test(path.split('/').pop())) {
+                  return `${path} is a packaging file`;
+                }
+                const ls = (await git('ls-files', '-s', '-z', '--', `:(literal)${path}`)).stdout.split('\0').filter(Boolean);
+                if (ls.length !== 1 || !/^100(644|755) [0-9a-f]+ 0\t/.test(ls[0]) || ls[0].split('\t').slice(1).join('\t') !== path) {
+                  return `${path} is not an existing regular file`;
+                }
+              }
+              if (lines > 60) return `${lines} changed lines (at most 60)`;
+              const chk = await git('apply', '--check', '--index', file);
+              return chk.exitCode ? first(chk.stderr) || 'does not apply' : '';
+            };
+            let applied = 0;
+            for (const c of all) { // oldest first
+              const id = String(c.id);
+              const body = (c.body || '').replace(/\r\n/g, '\n');
+              if (body.split('\n')[0].trim().split(/\s+/)[0] !== '/quick-edit' || done.has(id)) continue;
+              const fail = why => github.rest.issues.createComment({ ...context.repo, issue_number: n,
+                body: `❌ Quick edit ${id} did not apply: ${why.replace(/@/g, '@​').slice(0, 500)}` });
+              const blocks = [...body.matchAll(/^```diff[ \t]*\n([\s\S]*?)^```[ \t]*$/gm)];
+              const text = blocks.reduce((t, b) => t.replace(b[0], ''), body); // Requested-by and Summary never come from a diff
+              let login = c.user.login;
+              if (login === 'rrf-issues[bot]') {
+                const r = [...text.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop();
+                if (!r) { await fail('no Requested-by line'); continue; }
+                if (!await admin(r[1])) { await fail(`${r[1]} is not an admin`); continue; }
+                login = r[1];
+              } else if (!await admin(login)) {
+                core.warning(`quick edit ${id} by ${login}, not an admin: skipped`);
+                continue;
+              }
+              if (c.updated_at !== c.created_at) { await fail('edited after posting; post it again'); continue; }
+              if (blocks.length !== 1) { await fail('expected exactly one ```diff block'); continue; }
+              const file = `${process.env.RUNNER_TEMP}/quick-edit-${id}.diff`;
+              fs.writeFileSync(file, blocks[0][1]);
+              const why = await check(file);
+              if (why) { await fail(why); continue; }
+              await exec.exec('git', ['apply', '--index', file]);
+              const s = /^Summary:[ \t]*(.*)$/m.exec(text);
+              const summary = (s ? s[1].replace(/\s+/g, ' ').trim().slice(0, 100) : '') || 'text edit';
+              await exec.exec('git', ['-c', 'user.name=github-actions[bot]',
+                '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
+                'commit', '-q', '--allow-empty', '-m', `Quick edit: ${summary}`, '-m', `Requested-by: ${login}\nQuick-edit: ${id}`],
+                { env: { ...process.env, GIT_AUTHOR_DATE: c.created_at, GIT_COMMITTER_DATE: c.created_at } });
+              applied++;
+            }
+            core.setOutput('applied', applied);
+      - if: env.MODE == 'ship' || (env.MODE == 'patch' && steps.apply.outputs.applied != '0')
+        run: *bump
+      # patch with nothing new still opens the draft PR a failed earlier run did not
+      - if: env.MODE == 'ship' || (env.MODE == 'patch' && (steps.apply.outputs.applied != '0' || steps.base.outputs.exists == 'true'))
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+          PR: ${{ steps.pr.outputs.number }}
+          APPLIED: ${{ steps.apply.outputs.applied }}
+          GIT_AUTHOR_DATE: ${{ needs.gate.outputs.date }}
+          GIT_COMMITTER_DATE: ${{ needs.gate.outputs.date }}
+        run: |
+          if ! git diff --cached --quiet; then
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "Bump versions for release" -m "Requested-by: $BY"
+          fi
+          if [ "$(git rev-parse HEAD)" != "$BASE" ]; then
+            if git fetch -q origin "refs/heads/issue-$N" 2>/dev/null && [ "$(git rev-parse FETCH_HEAD)" != "$BASE" ]; then
+              git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                rebase -q --onto FETCH_HEAD "$BASE" # an agent run pushed meanwhile
+            fi
+            git push origin "HEAD:refs/heads/issue-$N"
+          fi
+          if [ "$MODE" = ship ]; then
+            gh pr ready "$PR"
+            gh workflow run ci.yml --ref "issue-$N"
+            gh workflow run stage1-dev.yml --ref "issue-$N"
+            exit 0
+          fi
+          pr=$(gh pr list --head "issue-$N" --state open --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository | not))[0].number // empty')
+          if [ -z "$pr" ]; then
+            printf 'Closes #%s\nRequested-by: %s\n' "$N" "$REQUESTER" > "$RUNNER_TEMP/body.md"
+            gh pr create --draft --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" ||
+              { echo "MSG=Pushed to issue-$N but could not open the draft PR." >> "$GITHUB_ENV"; exit 1; }
+          elif [ "$APPLIED" = 0 ]; then exit 0
+          fi
+          gh workflow run ci.yml --ref "issue-$N" # stage1-dev waits for /ship
+      - if: failure()
+        run: |
+          gh issue comment "$N" --body "${MSG:-Could not finish this request: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID}"

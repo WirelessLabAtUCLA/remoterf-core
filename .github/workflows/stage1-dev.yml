@@ -2,6 +2,7 @@ name: Dev test (build, deploy to dev, smoke)
 
 # Every push to an issue-* branch: tests, .devN wheels for what changed, TestPyPI (once
 # enabled), then the Server wheel onto the dev test lab and the dev smoke (once enabled).
+# dev-ok (a required check) sums the run up; on a failure, autofix asks the agent to fix it.
 on:
   push:
     branches: ["issue-*"]
@@ -24,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       server: ${{ steps.v.outputs.server }}
+      client: ${{ steps.v.outputs.client }}
       built: ${{ steps.v.outputs.built }}
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +41,7 @@ jobs:
           pip install -q build
           while IFS== read -r d v; do python -m build -q --wheel --outdir dist "$d" < /dev/null; done < versions
           echo "server=$(sed -n 's/^server=//p' versions)" >> "$GITHUB_OUTPUT"
+          echo "client=$(sed -n 's/^client=//p' versions)" >> "$GITHUB_OUTPUT"
           [ -s versions ] && echo built=true >> "$GITHUB_OUTPUT"
           { echo '### .devN builds'; sed 's/^/- /' versions; } >> "$GITHUB_STEP_SUMMARY"
       - if: steps.v.outputs.built == 'true'
@@ -73,6 +76,9 @@ jobs:
     # The gate's lock and dev queue order the deploys instead.
     outputs:
       queued: ${{ steps.deploy.outputs.queued }}
+      held: ${{ steps.deploy.outputs.held }} # the gate took the lease (every exit but 2, 3 and queued)
+      # Not this change's fault: dev unreachable, gate lock timeout, gate refused the request, or a step before the deploy failed.
+      infra: ${{ steps.deploy.outputs.infra || steps.deploy.outcome == 'skipped' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -93,6 +99,13 @@ jobs:
         working-directory: dist
         run: |
           set +e
+          # Wait for dev instead of queueing: a lease covers one dev test, so it frees within minutes.
+          # Still busy after 25 min: the deploy below queues this branch for dev-queue.yml.
+          for _ in $(seq 50); do
+            ssh -o BatchMode=yes root@dev.global.remoterf.net lease "$GITHUB_REF_NAME" remoterf-core "$GITHUB_SHA" 2> gate.err && break
+            grep -q '^dev busy' gate.err || break
+            sleep 30
+          done
           tar -cf - $(ls | grep -iE '^(remoterf_server|remoterf_federation_core|remoterf_device_core)-') |
             ssh -o BatchMode=yes root@dev.global.remoterf.net deploy-testlab "$GITHUB_REF_NAME" "$GITHUB_SHA" "${{ needs.build.outputs.server }}" 2> gate.err
           rc=$?
@@ -102,6 +115,9 @@ jobs:
             echo "::notice::$(grep '^dev busy' gate.err)"
             exit 0
           fi
+          # ssh 255, gate 2 (denied), 3 (lock timeout), 4 (bad request): dev's side, not this change
+          case $rc in 2|3|4|255) echo "infra=true" >> "$GITHUB_OUTPUT" ;; esac
+          case $rc in 2|3) ;; *) echo "held=true" >> "$GITHUB_OUTPUT" ;; esac
           exit "$rc"
       - name: "Queued: dev is busy"
         if: steps.deploy.outputs.queued == 'true'
@@ -112,18 +128,250 @@ jobs:
     if: ${{ !cancelled() && vars.DEV_SMOKE_ENABLED == 'true' && needs.build.result == 'success' && needs.deploy-testlab.result != 'failure' && needs.deploy-testlab.outputs.queued != 'true' }}
     runs-on: ubuntu-latest
     environment: dev
-    concurrency:
-      group: dev-vps
-      cancel-in-progress: false
-    timeout-minutes: 10
+    # No job concurrency group (it cancels all but one pending job): the dev lease serializes smokes.
+    timeout-minutes: 35 # up to 25 min waiting for dev, then the suite
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+      failed: ${{ steps.result.outputs.failed }}
+      queued: ${{ steps.lease.outputs.queued }}
+      leased: ${{ steps.lease.outputs.leased }}
     steps:
+      # No Server change, so no deploy took the lease: take it here, or queue like a deploy.
+      - id: lease
+        if: needs.deploy-testlab.result == 'skipped' && vars.DEV_DEPLOY_ENABLED == 'true'
+        env:
+          KEY: ${{ secrets.DEV_DEPLOY_KEY }}
+          KNOWN: ${{ vars.DEV_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          set +e
+          # Wait for dev instead of queueing (25 min at most): a lease covers one dev test.
+          for _ in $(seq 50); do
+            ssh -o BatchMode=yes root@dev.global.remoterf.net lease "$GITHUB_REF_NAME" remoterf-core "$GITHUB_SHA" 2> "$RUNNER_TEMP/gate.err"
+            rc=$?
+            [ "$rc" = 3 ] && grep -q '^dev busy' "$RUNNER_TEMP/gate.err" || break
+            sleep 30
+          done
+          cat "$RUNNER_TEMP/gate.err" >&2
+          if [ "$rc" = 3 ] && grep -q '^dev busy' "$RUNNER_TEMP/gate.err"; then
+            echo "queued=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$(grep '^dev busy' "$RUNNER_TEMP/gate.err")"
+            exit 0
+          fi
+          rm -f ~/.ssh/id_ed25519 # the branch's own code runs next in this job
+          [ "$rc" != 0 ] || echo "leased=true" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: "Queued: dev is busy"
+        if: steps.lease.outputs.queued == 'true'
+        run: echo "dev-queue.yml re-runs this branch when dev is free."
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install ./client
-      - run: python tools/dev-smoke/dev_smoke.py
+      - id: smoke
+        if: steps.lease.outputs.queued != 'true'
+        run: python tools/dev-smoke/dev_smoke.py
         env:
           REMOTERF_GLOBAL_ORIGIN: https://dev.global.remoterf.net
           RRF_SMOKE_USER: ci-smoke
+          RRF_SMOKE_USER2: ci-smoke-2
           RRF_SMOKE_PASSWORD: ${{ secrets.DEV_SMOKE_PASSWORD }}
+          DEV_SMOKE_RESULT: ${{ runner.temp }}/dev-smoke-result.json
+      # An older dev_smoke.py writes no JSON: fall back to the step outcome.
+      - id: result
+        if: always()
+        env:
+          OUTCOME: ${{ steps.smoke.outcome }}
+          LEASE: ${{ steps.lease.outcome }}
+          F: ${{ runner.temp }}/dev-smoke-result.json
+        run: |
+          r=$(jq -r '.result // empty' "$F" 2>/dev/null) || r=
+          case $r in
+            pass|product|infra) ;;
+            *) case $OUTCOME in success) r=pass ;; failure) r=product ;; *) r= ;; esac ;;
+          esac
+          f=$(jq -r '.failed[0] // empty | "\(.scenario): \(.detail)" | gsub("\\s+"; " ") | .[:500]' "$F" 2>/dev/null) || f=
+          [ "$LEASE" != failure ] || { r=infra; f="could not take the dev lease"; }
+          echo "result=$r" >> "$GITHUB_OUTPUT"
+          printf 'failed=%s\n' "$f" >> "$GITHUB_OUTPUT"
+
+  # The required check. A job skipped by a condition counts as passed, so this one always runs.
+  dev-ok:
+    name: dev-ok
+    if: always()
+    needs: [test, build, testpypi, deploy-testlab, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    outputs:
+      reason: ${{ steps.why.outputs.reason }}
+      detail: ${{ steps.why.outputs.detail }}
+    steps:
+      - id: why
+        env:
+          TEST: ${{ needs.test.result }}
+          BUILD: ${{ needs.build.result }}
+          TESTPYPI: ${{ needs.testpypi.result }}
+          DEPLOY: ${{ needs.deploy-testlab.result }}
+          CLIENT: ${{ needs.build.outputs.client }}
+          QUEUED: ${{ needs.deploy-testlab.outputs.queued || needs.smoke.outputs.queued }}
+          INFRA: ${{ needs.deploy-testlab.outputs.infra }}
+          SMOKE: ${{ needs.smoke.result }}
+          RESULT: ${{ needs.smoke.outputs.result }}
+          FAILED: ${{ needs.smoke.outputs.failed }}
+          ENABLED: ${{ vars.DEV_SMOKE_ENABLED }}
+        run: |
+          out() { printf 'reason=%s\ndetail=%s\n' "$1" "${2//$'\n'/ }" >> "$GITHUB_OUTPUT"; exit 0; }
+          case $TEST in success) ;; cancelled) out cancelled "tests cancelled" ;; *) out tests "unit tests failed" ;; esac
+          case $BUILD in success) ;; cancelled) out cancelled "build cancelled" ;; *) out build ".devN wheel build failed" ;; esac
+          case $TESTPYPI in success|skipped) ;; cancelled) out cancelled "TestPyPI upload cancelled" ;; *) out build "TestPyPI upload failed" ;; esac
+          # Skipped: no server change (smoke then tests the current test lab) or deploys are off.
+          case $DEPLOY in
+            success|skipped) ;;
+            cancelled) out cancelled "deploy cancelled" ;;
+            *) [ "$INFRA" != true ] || out infra "dev unreachable during the deploy to the test lab"
+              out deploy "deploy to the dev test lab failed" ;;
+          esac
+          [ "$ENABLED" = true ] || out disabled "Dev smoke is off (vars.DEV_SMOKE_ENABLED is not true)"
+          [ "$QUEUED" != true ] || out queued "Dev busy: queued; dev-queue re-runs this when dev is free"
+          case $SMOKE in
+            success) out ok "dev test passed" ;;
+            failure)
+              [ "$RESULT" != infra ] || out infra "${FAILED:-dev unreachable}"
+              # Neither this branch's Server nor its client was under test: the failure is not this change's.
+              [ "$DEPLOY" != skipped ] || [ -n "$CLIENT" ] || out infra "smoke failed on the test lab's current Server (this branch deployed none and changed no client): ${FAILED:-dev smoke failed}"
+              out smoke "${FAILED:-dev smoke failed}" ;;
+            *) out cancelled "dev smoke $SMOKE" ;;
+          esac
+      - env:
+          REASON: ${{ steps.why.outputs.reason }}
+          DETAIL: ${{ steps.why.outputs.detail }}
+        run: |
+          case $REASON in
+            ok) echo "$DETAIL" ;;
+            disabled) echo "::notice title=dev-ok::$DETAIL" ;;
+            queued) echo "::error title=dev-ok::$DETAIL"; exit 1 ;;
+            *) echo "::error title=dev-ok::${REASON:-unknown}: $DETAIL"; exit 1 ;;
+          esac
+      # A dispatched run (agent push, dev-queue, /retest) is not linked to the PR, so its dev-ok
+      # check never satisfies the required one there; a commit status on the sha does.
+      - if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          DETAIL: ${{ steps.why.outputs.detail }}
+        run: >-
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f context=dev-ok -f state="$STATE"
+          -f description="${DETAIL:0:140}" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --silent
+
+  # Free dev for the next branch in line once this run's dev test is over. Not after a cancel:
+  # the newer run of this branch renews the lease, and a late release would free it mid-test
+  # (release ignores the sha). A run cancelled by hand holds dev until the lease expires.
+  release-dev:
+    needs: [deploy-testlab, smoke]
+    if: ${{ !cancelled() && (needs.smoke.outputs.leased == 'true' || needs.deploy-testlab.outputs.held == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # the gate waits up to 15 min for its lock
+    permissions:
+      actions: write # dispatch dev-queue
+    steps:
+      - name: ssh key and pinned host key
+        env:
+          KEY: ${{ secrets.DEV_RELEASE_KEY }} # may only run `release`; no environment needed (as dev-release.yml)
+          KNOWN: ${{ vars.DEV_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+      - run: ssh -o BatchMode=yes root@dev.global.remoterf.net release "$GITHUB_REF_NAME" "${GITHUB_REPOSITORY#*/}"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run dev-queue.yml -R "$GITHUB_REPOSITORY"
+
+  # Tier 1: ask the agent to fix a failed dev test, at most twice after each admin request
+  # (agent.yml recounts before it runs). A dev outage only gets a note. Fixes only an agent
+  # branch (every commit by github-actions) whose PR is ready: a person's local-dev branch never.
+  autofix:
+    needs: dev-ok
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/heads/issue-') && contains(fromJSON('["tests","build","deploy","smoke","infra"]'), needs.dev-ok.outputs.reason) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: read
+      actions: write # job logs, dispatch agent.yml
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          REASON: ${{ needs.dev-ok.outputs.reason }}
+          DETAIL: ${{ needs.dev-ok.outputs.detail }}
+        with:
+          script: |
+            const m = /^issue-([1-9]\d*)$/.exec(process.env.GITHUB_REF_NAME);
+            if (!m) return core.info(`${process.env.GITHUB_REF_NAME} is not an issue-<N> branch`);
+            const issue_number = Number(m[1]);
+            const { REASON: reason, DETAIL: detail } = process.env;
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            // Copied text mentions nobody, least of all @claude (the agent trigger).
+            const quiet = s => s.replace(/@(?=\w)/g, '@​');
+            const head = quiet(`${reason}: ${detail}`).slice(0, 2000);
+            const say = body => github.rest.issues.createComment({ ...context.repo, issue_number, body });
+            if (reason === 'infra') {
+              await say(`⚠️ Dev problem, not this change: ${quiet(detail).slice(0, 2000)}\n\n${run}`);
+              return;
+            }
+            const { data: prs } = await github.rest.pulls.list({ ...context.repo, state: 'open',
+              head: `${context.repo.owner}:${process.env.GITHUB_REF_NAME}` });
+            if (!prs.some(p => !p.draft)) return core.info('no ready PR for this branch: no auto-fix');
+            // A person's own commits (local dev) are theirs to fix: auto-fix only the agent's branches.
+            const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `main...${context.sha}` });
+            if (cmp.commits.some(c => c.commit.author?.name !== 'github-actions[bot]'))
+              return core.info('branch has commits by a person: no auto-fix');
+            // agent.yml accepts a request only from main's stage1-dev.yml, which a branch cut earlier lacks.
+            const wf = '.github/workflows/stage1-dev.yml';
+            const blob = async ref => (await github.rest.repos.getContent({ ...context.repo, path: wf, ref })).data.sha;
+            if (await blob(context.sha) !== await blob('main')) {
+              await say(`🛑 Auto-fix stopped: ${process.env.GITHUB_REF_NAME} runs an older stage1-dev.yml than main; merge main into it: ${head}\n\n${run}`);
+              return;
+            }
+            const BOT = 'github-actions[bot]';
+            const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number, per_page: 100 });
+            // The newest request the agent gate would take: an admin's, or the Slack bot's for the admin it names.
+            const admins = {};
+            const admin = u => admins[u] ??= github.rest.repos.getCollaboratorPermissionLevel({ ...context.repo, username: u })
+              .then(r => r.data.permission === 'admin', () => false);
+            let since = -Infinity;
+            for (const c of [...comments].reverse()) {
+              const body = c.body || '', login = c.user?.login;
+              if (login === BOT || !(/@claude/i.test(body) || /^[ \t]*\/(quick-edit|retest|ship)(\s|$)/.test(body))) continue;
+              const by = login === 'rrf-issues[bot]' ? [...body.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop()?.[1] : login;
+              if (by && await admin(by)) { since = Date.parse(c.created_at); break; }
+            }
+            const k = 1 + comments.filter(c => c.user?.login === BOT && (c.body || '').startsWith('🔧 Auto-fix ') &&
+              Date.parse(c.created_at) > since).length;
+            if (k > 2) {
+              await say(`🛑 Auto-fix stopped after 2 tries: ${head}\n\n${run}`);
+              return;
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: context.runId, per_page: 100 });
+            let logs = '';
+            for (const j of jobs) {
+              if (j.conclusion !== 'failure' || /(^|\/ )(ci|dev)-ok$/.test(j.name)) continue; // summary jobs: nothing to read
+              let text;
+              try {
+                const { data } = await github.rest.actions.downloadJobLogsForWorkflowRun({ ...context.repo, job_id: j.id });
+                text = (typeof data === 'string' ? data : Buffer.from(data).toString()).split('\n')
+                  .map(l => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, '').replace(/\x1b\[[0-9;]*m/g, ''))
+                  .slice(-150).join('\n');
+              } catch (e) { text = `(log unavailable: ${e.status || e.message})`; }
+              logs += `==> ${j.name} <==\n${text}\n`;
+            }
+            logs = quiet(logs).replace(/`{8,}/g, '```````').slice(-50000); // keeps the fence (and the comment) bounded
+            const fence = '`'.repeat(Math.max(3, ...(logs.match(/`+/g) || []).map(s => s.length + 1)));
+            await say(`🔧 Auto-fix ${k}/2: ${head}\n\n${run}\n\n<details><summary>Failed job logs (last 150 lines each)</summary>\n\n` +
+              `${fence}text\n${logs}${fence}\n\n</details>`);
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'agent.yml', ref: 'main', inputs: { issue: String(issue_number), mode: 'autofix' } });
