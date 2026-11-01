@@ -14,6 +14,11 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+"""RRRFcerts: generate a local CA and a server TLS certificate/key with SANs.
+
+Output goes to ~/.config/remoterf/certs by default. Clients should trust ca.crt (not server.crt) and must dial an address that matches one of the SANs.
+"""
+
 from __future__ import annotations
 
 import argparse
