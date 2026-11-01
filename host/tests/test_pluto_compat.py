@@ -70,7 +70,7 @@ class PlutoCompatTests(unittest.TestCase):
         np.testing.assert_allclose(unmap_arg(response["rx"]), self.device.rx_samples)
 
         response = self.handle("Pluto:ip:CALL0", {"g": map_arg(7)})
-        self.assertEqual(unmap_arg(response["ip"]), "ip:192.168.2.2")
+        self.assertEqual(unmap_arg(response["ip"]), "ip:192.168.2.1")
 
     def test_call1_still_forwards_arg1_to_tx(self) -> None:
         samples = np.array([5 + 6j, 7 + 8j], dtype=np.complex64)
