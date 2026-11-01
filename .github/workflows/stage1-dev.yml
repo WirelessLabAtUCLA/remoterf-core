@@ -1,11 +1,11 @@
 name: Dev test (build, deploy to dev, smoke)
 
-# Every push to an issue-* branch: tests, .devN wheels for what changed, TestPyPI (once
+# Every push to an issue-<N> branch: tests, .devN wheels for what changed, TestPyPI (once
 # enabled), then the Server wheel onto the dev test lab and the dev smoke (once enabled).
 # dev-ok (a required check) sums the run up; on a failure, autofix asks the agent to fix it.
 on:
   push:
-    branches: ["issue-*"]
+    branches: ["issue-[0-9]+"] # the dev gate takes only issue-<N>
   workflow_dispatch: # agent.yml pushes with GITHUB_TOKEN, which triggers nothing, then dispatches this on issue-N
 
 concurrency:
@@ -154,13 +154,13 @@ jobs:
             [ "$rc" = 3 ] && grep -q '^dev busy' "$RUNNER_TEMP/gate.err" || break
             sleep 30
           done
+          rm -f ~/.ssh/id_ed25519 # the branch's own code runs next in this job, queued or not
           cat "$RUNNER_TEMP/gate.err" >&2
           if [ "$rc" = 3 ] && grep -q '^dev busy' "$RUNNER_TEMP/gate.err"; then
             echo "queued=true" >> "$GITHUB_OUTPUT"
             echo "::notice::$(grep '^dev busy' "$RUNNER_TEMP/gate.err")"
             exit 0
           fi
-          rm -f ~/.ssh/id_ed25519 # the branch's own code runs next in this job
           [ "$rc" != 0 ] || echo "leased=true" >> "$GITHUB_OUTPUT"
           exit "$rc"
       - name: "Queued: dev is busy"
@@ -198,9 +198,11 @@ jobs:
           echo "result=$r" >> "$GITHUB_OUTPUT"
           printf 'failed=%s\n' "$f" >> "$GITHUB_OUTPUT"
 
-  # The required check. A job skipped by a condition counts as passed, so this one always runs.
+  # Posts the required dev-ok commit status. A job skipped by a condition counts as passed, so this
+  # one always runs. Its check run is not named dev-ok: a push run's would also count for the PR,
+  # and a failed one would block it after a later dispatched run's dev-ok status passed.
   dev-ok:
-    name: dev-ok
+    name: dev-summary
     if: always()
     needs: [test, build, testpypi, deploy-testlab, smoke]
     runs-on: ubuntu-latest
@@ -266,13 +268,26 @@ jobs:
         run: >-
           gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f context=dev-ok -f state="$STATE"
           -f description="${DETAIL:0:140}" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --silent
+      # The same for the required ci-ok (the test job is ci.yml). A push run needs none: the push
+      # also starts the PR's own pull_request ci.yml run, whose ci-ok counts.
+      - if: always() && github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ needs.test.result == 'success' && 'success' || 'failure' }}
+        run: >-
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f context=ci-ok -f state="$STATE"
+          -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --silent
 
-  # Free dev for the next branch in line once this run's dev test is over. Not after a cancel:
-  # the newer run of this branch renews the lease, and a late release would free it mid-test
-  # (release ignores the sha). A run cancelled by hand holds dev until the lease expires.
+  # Free dev for the next branch in line once this run's dev test is over, and leave the dev queue
+  # when this run stopped before the gate (a failed test or build): release is idempotent and frees
+  # only this branch's lease. Not when queued (dev-queue re-runs it), nor after a cancel: the newer
+  # run of this branch renews the lease, and a late release would free it mid-test (release ignores
+  # the sha). A run cancelled by hand holds dev until the lease expires. A failed release does not
+  # fail the run: the dev test result is dev-ok's.
   release-dev:
     needs: [deploy-testlab, smoke]
-    if: ${{ !cancelled() && (needs.smoke.outputs.leased == 'true' || needs.deploy-testlab.outputs.held == 'true') }}
+    if: ${{ !cancelled() && vars.DEV_DEPLOY_ENABLED == 'true' && needs.deploy-testlab.outputs.queued != 'true' && needs.smoke.outputs.queued != 'true' }}
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 20 # the gate waits up to 15 min for its lock
     permissions:
@@ -293,7 +308,7 @@ jobs:
 
   # Tier 1: ask the agent to fix a failed dev test, at most twice after each admin request
   # (agent.yml recounts before it runs). A dev outage only gets a note. Fixes only an agent
-  # branch (every commit by github-actions) whose PR is ready: a person's local-dev branch never.
+  # branch (every commit but merges by github-actions) whose PR is ready: a person's local-dev branch never.
   autofix:
     needs: dev-ok
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/heads/issue-') && contains(fromJSON('["tests","build","deploy","smoke","infra"]'), needs.dev-ok.outputs.reason) }}
@@ -327,8 +342,9 @@ jobs:
               head: `${context.repo.owner}:${process.env.GITHUB_REF_NAME}` });
             if (!prs.some(p => !p.draft)) return core.info('no ready PR for this branch: no auto-fix');
             // A person's own commits (local dev) are theirs to fix: auto-fix only the agent's branches.
+            // A merge of main (Update branch, or the advice below) is a person's but not their change.
             const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `main...${context.sha}` });
-            if (cmp.commits.some(c => c.commit.author?.name !== 'github-actions[bot]'))
+            if (cmp.commits.some(c => c.parents.length === 1 && c.commit.author?.name !== 'github-actions[bot]'))
               return core.info('branch has commits by a person: no auto-fix');
             // agent.yml accepts a request only from main's stage1-dev.yml, which a branch cut earlier lacks.
             const wf = '.github/workflows/stage1-dev.yml';
@@ -359,7 +375,7 @@ jobs:
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: context.runId, per_page: 100 });
             let logs = '';
             for (const j of jobs) {
-              if (j.conclusion !== 'failure' || /(^|\/ )(ci|dev)-ok$/.test(j.name)) continue; // summary jobs: nothing to read
+              if (j.conclusion !== 'failure' || /(^|\/ )(ci-ok|dev-summary)$/.test(j.name)) continue; // summary jobs: nothing to read
               let text;
               try {
                 const { data } = await github.rest.actions.downloadJobLogsForWorkflowRun({ ...context.repo, job_id: j.id });
