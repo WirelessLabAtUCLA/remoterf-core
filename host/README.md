@@ -2,7 +2,7 @@
 
 ## HostRF Installation
 
-The guide is done/verified for Ubuntu Server/Desktop 24.04 LTS.
+This guide is verified for Ubuntu Server/Desktop 24.04 LTS.
 
 ### 0) If Raspberry Pi
 
