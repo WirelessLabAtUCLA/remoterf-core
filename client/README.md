@@ -268,17 +268,17 @@ Welcome to Remote RF Account System.
 Please login or register to continue. (l/r):
 ```
 
-- Once in, input `help` to see all avaliable commands.
+- Once in, input `help` to see all available commands.
 
 ### 3. **Reserve Device**:
 ```bash
-getdev  # To view all avaliable devices
+getdev  # To view all available devices
 
 # Note the device ID. You will need this later to reserve said device
 ```
 
 ```bash
-getres  # To view times not avaliable
+getres  # To view times not available
 
 # Optionally, you can also view all reservations, and determine a time slot you want a specific device reserved
 ```
