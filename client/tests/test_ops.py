@@ -163,6 +163,27 @@ def test_global_slots_in_a_named_zone(home):
     assert "2026-03-02T13:00:00Z" not in starts and "2026-03-02T13:30:00Z" not in starts and "2026-03-02T14:00:00Z" in starts
 
 
+def test_auto_reserve_books_only_the_current_slot(lab):
+    now = DAY.replace(hour=10, minute=5).astimezone()
+    out = ops.auto_reserve(lab, "Pluto_A@ucla", now=now)
+    assert (out["start_ts"], out["end_ts"], out["slot_minutes"], out["reservation_id"]) == (
+        int(DAY.replace(hour=10).astimezone().timestamp()),
+        int(DAY.replace(hour=11).astimezone().timestamp()), 60, "9")
+
+    with pytest.raises(ops.RemoteRFOpsError, match="no free slot covers the current time") as raised:
+        ops.auto_reserve(lab, "Pluto_A@ucla", now=DAY.replace(hour=12, minute=5).astimezone())
+    assert raised.value.code == "slot_unavailable"
+
+
+def test_auto_reserve_refuses_an_offline_device(lab, home, monkeypatch):
+    # A lab books an offline device, but can never hand out its token.
+    for s, row in ((lab, {"state": "offline"}), (home, {"online": False})):
+        monkeypatch.setattr(ops, "_resolve", lambda _s, _h, row=row: ("Pluto_A@ucla", 3, row))
+        with pytest.raises(ops.RemoteRFOpsError) as raised:
+            ops.auto_reserve(s, "Pluto_A@ucla")
+        assert raised.value.code == "offline"
+
+
 def test_build_slots_and_slot_minutes():
     assert [ops.slot_minutes(s) for s in (0, None, 5 * 60, 25 * 60, 3600, 10 ** 6)] == [30, 30, 5, 20, 60, 720]
     midnight = datetime(2026, 3, 1)

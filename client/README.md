@@ -346,6 +346,11 @@ Pluto_02@deployment  pluto  online   in use until 13:45  -
 Pluto_03@deployment  pluto  offline  yours until 15:00   -
 ```
 
+Using a handle as `token=` with no live reservation of yours on that device
+reserves the current slot for you if it is free (the same booking `resdev` makes,
+with your usual limits), and says so on stderr. Set `REMOTERF_AUTO_RESERVE=0`
+to require a reservation first.
+
 Each account may ask once every 10 seconds; a repeat call within that reprints the last table with the remaining wait.
 
 ## Closing
