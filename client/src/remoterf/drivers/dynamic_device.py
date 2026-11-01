@@ -1633,6 +1633,20 @@ def _print_driver_cached(pkg_dir: Path) -> None:
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _by_device_id(token, device_id):
+    """A handle (Name@lab) fetches its driver by device id, which needs no
+    reservation: by token, the client would auto-reserve the device just to
+    install its driver."""
+    if not isinstance(token, str) or "@" not in token or token.startswith("rfg_"):
+        return token, device_id
+    from .. import ops
+
+    try:
+        return None, ops._resolve(ops.saved_session(), token)[1]
+    except Exception:  # noqa: BLE001 - not resolvable here: the token decides, as before
+        return token, device_id
+
+
 def install_driver(*, token: str = None, device_id: int = None, device_name: str = None) -> Path:
     """
     Fetch the IDL schema and write a driver package to disk.
@@ -1643,6 +1657,7 @@ def install_driver(*, token: str = None, device_id: int = None, device_name: str
 
     Returns the path to the generated package directory.
     """
+    token, device_id = _by_device_id(token, device_id)
     schema = fetch_idl(
         token=token,
         device_id=device_id,
@@ -1682,6 +1697,7 @@ def ensure_driver(*, token: str = None, device_id: int = None, device_name: str 
     One IDL:get_drivers RPC is always made (to resolve device_type and hash).
     Files are only written when missing or stale.
     """
+    token, device_id = _by_device_id(token, device_id)
     schema = fetch_idl(
         token=token,
         device_id=device_id,

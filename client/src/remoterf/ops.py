@@ -663,6 +663,27 @@ def find_slots(s, handle, *, start_day=None, days=1, tz=None, now=None) -> dict:
 
 
 @_op
+def auto_reserve(s, handle, *, now=None) -> dict:
+    """Reserve the free resdev block containing now."""
+    now = now or datetime.now(timezone.utc)
+    now_ts = int(now.timestamp())
+    _, _, row = _resolve(s, handle)
+    # A lab books an offline device, but it can't hand out a token for it.
+    offline = (row.get("online") is False if s.home_kind == "global"
+               else bool(row["state"]) and not row["state"].startswith("online"))
+    if offline:
+        raise RemoteRFOpsError("offline", "the device is offline")
+    slots = find_slots(s, handle, now=now)
+    current = next((slot for slot in slots["slots"]
+                    if slot["start_ts"] <= now_ts < slot["end_ts"]), None)
+    if current is None:  # taken, or a DST change dropped this block from the grid
+        raise RemoteRFOpsError("slot_unavailable", "no free slot covers the current time")
+    out = reserve(s, handle, current["start"], current["end"])
+    out["slot_minutes"] = slots["slot_minutes"]
+    return out
+
+
+@_op
 def list_reservations(s, *, mine_only=True) -> dict:
     out, notes = [], []
     if s.home_kind == "global":

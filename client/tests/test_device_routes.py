@@ -14,6 +14,7 @@ from remoterf_federation_core import local_capabilities
 
 from remoterf.common.grpc import grpc_pb2
 from remoterf.common.utils import map_arg, unmap_arg
+from remoterf import ops
 from remoterf.core import direct_path, grpc_client
 from remoterf.core.dynamic_v2_transport import DynamicV2Transport, _DevicePlaneStub
 from remoterf.deployment import homes, state
@@ -54,11 +55,13 @@ def _never(*_a, **_k):
 
 @pytest.fixture(autouse=True)
 def routes(monkeypatch, tmp_path):
-    caches = (grpc_client._routes, grpc_client._deployment_ids, grpc_client._home_connections, grpc_client._told)
+    caches = (grpc_client._routes, grpc_client._deployment_ids, grpc_client._home_connections, grpc_client._told,
+              grpc_client._auto_tried)
     for cache in caches:
         cache.clear()
     monkeypatch.setattr(grpc_client, "_token_backend_cache", None)
     monkeypatch.setattr(grpc_client, "_federated_backend", None)
+    monkeypatch.setenv("REMOTERF_AUTO_RESERVE", "0")
     # The active lab is the saved home "ucla".
     ca = tmp_path / "ca.crt"
     ca.write_bytes(b"pem")
@@ -106,6 +109,13 @@ def test_bare_strings_route_as_before(routes):
     assert grpc_client.device_route(RFG) == grpc_client.DeviceRoute(RFG, "global")
     grpc_client.rpc_client(function_name=GET, args={"a": map_arg("Zm9vYmFy")})
     assert routes.calls == [(GET, {"a": "Zm9vYmFy"})]
+
+
+def test_raw_tokens_never_auto_reserve(monkeypatch, routes):
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    monkeypatch.setattr(grpc_client, "_auto_reserve", _never)
+    assert grpc_client.device_route("Zm9vYmFy").wire == "Zm9vYmFy"
+    assert grpc_client.device_route(RFG).wire == RFG
 
 
 def test_a_bare_rfg_token_needs_no_login(monkeypatch, routes):
@@ -203,6 +213,113 @@ def test_the_lab_decides_handle_or_token(monkeypatch, routes, capsys, reply, wir
         assert err.count("no active reservation of yours on PlutoA right now; using 'PlutoA' as a token") == 1
     else:
         assert err == ""
+
+
+def test_an_active_handle_auto_reserves_and_retries_for_the_token(monkeypatch, routes, capsys):
+    _login(monkeypatch)
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    booked = []
+    session = object()
+    monkeypatch.setattr(ops, "saved_session", lambda: session)
+
+    def reserve(s, handle):
+        booked.append((s, handle))
+        return {"reservation_id": "123", "end_ts": 1767291000, "slot_minutes": 30}
+
+    monkeypatch.setattr(ops, "auto_reserve", reserve)
+    retried, sleeps = [], []
+
+    def exchange(args):
+        if booked:
+            retried.append(True)
+        return ({"Token": "bridge-3-abc", "res_id": 123} if len(retried) >= 2 else
+                {"Token": "PlutoA", "why": "no active reservation of yours on PlutoA right now"})
+
+    routes.replies["ACC:device_token"] = exchange
+    monkeypatch.setattr(grpc_client.time, "sleep", sleeps.append)
+    route = grpc_client.device_route("PlutoA@ucla")
+    assert route == grpc_client.DeviceRoute("bridge-3-abc", "active", res_id=123)
+    assert booked == [(session, "PlutoA@ucla")]
+    assert sleeps == [0.5]
+    assert "reserved for you until" in (err := capsys.readouterr().err)
+    assert "Cancel: remoterf cancel 123 --confirm" in err
+
+
+@pytest.mark.parametrize("reason", ["the current slot is not free", "reservation quota reached"])
+def test_an_active_handle_auto_reserve_failure_keeps_the_old_fallback(monkeypatch, routes, capsys, reason):
+    _login(monkeypatch)
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    monkeypatch.setattr(ops, "saved_session", lambda: object())
+    tries = []
+
+    def refuse(*a, **k):
+        tries.append(a)
+        raise ops.RemoteRFOpsError("slot_unavailable", reason)
+
+    monkeypatch.setattr(ops, "auto_reserve", refuse)
+    routes.replies["ACC:device_token"] = {
+        "Token": "PlutoA", "why": "no active reservation of yours on PlutoA right now"}
+    assert grpc_client.device_route("PlutoA@ucla").wire == "PlutoA"
+    err = capsys.readouterr().err
+    assert f"PlutoA@ucla: not reserved automatically: {reason}" in err
+    assert "no active reservation of yours on PlutoA right now; using 'PlutoA' as a token" in err
+    # Each refused call re-resolves the handle: the failed try is not repeated.
+    assert grpc_client.device_route("PlutoA@ucla", refresh=True).wire == "PlutoA"
+    assert len(tries) == 1 and capsys.readouterr().err == ""
+
+
+def test_a_refresh_when_a_reservation_ends_does_not_book_the_next_slot(monkeypatch, routes):
+    _login(monkeypatch)
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    monkeypatch.setattr(grpc_client, "_auto_reserve", _never)
+    routes.replies["ACC:device_token"] = {"Token": "bridge-3-abc", "res_id": 7}
+    assert grpc_client.device_route("PlutoA@ucla").res_id == 7
+    routes.replies["ACC:device_token"] = {
+        "Token": "PlutoA", "why": "no active reservation of yours on PlutoA right now"}
+    assert grpc_client.device_route("PlutoA@ucla", refresh=True).wire == "PlutoA"
+
+
+def test_a_lab_error_while_waiting_for_the_token_keeps_the_first_answer(monkeypatch, routes):
+    _login(monkeypatch)
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    monkeypatch.setattr(grpc_client, "_auto_reserve", lambda handle: True)
+    replies = iter([{"Token": "PlutoA", "why": "no active reservation of yours on PlutoA right now"},
+                    {"ace": "Invalid login credentials."}])
+    routes.replies["ACC:device_token"] = lambda args: next(replies)
+    assert grpc_client.device_route("PlutoA@ucla").wire == "PlutoA"
+
+
+def test_installing_a_driver_by_handle_fetches_by_device_id(monkeypatch):
+    from remoterf.drivers import dynamic_device
+
+    monkeypatch.setattr(ops, "saved_session", lambda: "session")
+    monkeypatch.setattr(ops, "_resolve", lambda s, h: ("PlutoA@ucla", 3, {}))
+    fetched = []
+
+    def fetch(**kwargs):
+        fetched.append((kwargs["token"], kwargs["device_id"]))
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(dynamic_device, "fetch_idl", fetch)
+    for install in (dynamic_device.install_driver, dynamic_device.ensure_driver):
+        with pytest.raises(RuntimeError, match="stop"):
+            install(token="PlutoA@ucla")
+    with pytest.raises(RuntimeError, match="stop"):
+        dynamic_device.ensure_driver(token="Zm9vYmFy")  # a raw token keeps the token path
+    assert fetched == [(None, 3), (None, 3), ("Zm9vYmFy", None)]
+
+
+def test_an_existing_lab_reservation_and_opt_out_do_not_book(monkeypatch, routes):
+    _login(monkeypatch)
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    monkeypatch.setattr(grpc_client, "_auto_reserve", _never)
+    routes.replies["ACC:device_token"] = {"Token": "bridge-3-abc", "res_id": 7}
+    assert grpc_client.device_route("PlutoA@ucla").wire == "bridge-3-abc"
+    grpc_client._routes.clear()
+    monkeypatch.setenv("REMOTERF_AUTO_RESERVE", "0")
+    routes.replies["ACC:device_token"] = {
+        "Token": "PlutoA", "why": "no active reservation of yours on PlutoA right now"}
+    assert grpc_client.device_route("PlutoA@ucla").wire == "PlutoA"
 
 
 def test_a_saved_home_that_is_not_active_gets_its_own_channel(monkeypatch, routes):
@@ -354,6 +471,24 @@ def test_a_global_user_handle_maps_to_the_listed_device(monkeypatch, routes):
         grpc_client.device_route("PlutoB@ucla")
     assert str(exc.value) == _unreachable("ucla")
     assert routes.calls == []
+
+
+@pytest.mark.parametrize("mine, expected", [(False, ["PlutoA@ucla"]), (True, [])])
+def test_a_global_handle_auto_reserves_only_without_a_live_reservation(monkeypatch, routes, mine, expected):
+    monkeypatch.delenv("REMOTERF_AUTO_RESERVE")
+    monkeypatch.setattr(state, "load_target", lambda: {"transport": "https-json", "origin": "https://g",
+                                                        "deployment_id": GLOBAL})
+    now = int(datetime.datetime.now().timestamp())
+    backend = SimpleNamespace(
+        devices=lambda: {"devices": [{"deployment_id": DEST, "handle": "PlutoA", "device_id": REF}]},
+        reservations=lambda: {"reservations": [{"device_id": REF, "start_time": now - 10,
+                                                  "end_time": now + 10, "mine": mine}]})
+    monkeypatch.setattr(grpc_client, "federated_backend", lambda: backend)
+    monkeypatch.setattr(homes, "discover", lambda host: {"deployment_id": DEST})
+    booked = []
+    monkeypatch.setattr(grpc_client, "_auto_reserve", lambda handle: booked.append(handle) or True)
+    assert grpc_client.device_route("PlutoA@ucla") == grpc_client.DeviceRoute(REF, "global")
+    assert booked == expected
 
 
 # ── Dynamic v2 and the IDL ───────────────────────────────────────────

@@ -21,6 +21,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -334,6 +335,7 @@ _routes_lock = threading.Lock()
 _deployment_ids: Dict[str, str] = {}
 _home_connections: Dict[str, Any] = {}
 _told: set = set()  # x@lab strings whose refusal ("why") was already printed
+_auto_tried: set = set()  # x@lab handles auto-reservation already tried for in this process
 
 
 def _unreachable(dep):
@@ -463,16 +465,38 @@ def _lab(t, x, dep, connection):
         credentials = (login["username"], login["secret"]) if login else None
     if credentials is None:
         return DeviceRoute(x, kind, connection)
-    results = rpc_client(
-        function_name="ACC:device_token",
-        args={"un": map_arg(credentials[0]), "pw": map_arg(credentials[1]), "h": map_arg(x)},
-        connection=connection,
-    ).results
+    def exchange():
+        return rpc_client(
+            function_name="ACC:device_token",
+            args={"un": map_arg(credentials[0]), "pw": map_arg(credentials[1]), "h": map_arg(x)},
+            connection=connection,
+        ).results
+
+    results = exchange()
     if "Token" not in results:
         return DeviceRoute(x, kind, connection)
+    # Only a handle's first lookup in a process books: a refresh when a reservation ends
+    # (renewed_route) must not book the next slot, which the driver refuses anyway.
+    first = t not in _auto_tried
+    _auto_tried.add(t)
     if "why" not in results:
         _told.discard(t)
-    elif t not in _told:
+    elif connection is None and first and os.getenv("REMOTERF_AUTO_RESERVE", "1") != "0":
+        if _auto_reserve(t):
+            for attempt in range(11):
+                try:
+                    fresh = exchange()
+                except Exception:  # noqa: BLE001 - keep the lab's first answer, as before
+                    break
+                if "Token" not in fresh:
+                    break
+                results = fresh
+                if "why" not in results:
+                    _told.discard(t)
+                    break
+                if attempt < 10:
+                    time.sleep(0.5)
+    if "why" in results and t not in _told:
         _told.add(t)
         print(f"{t}: {unmap_arg(results['why'])}; using {x!r} as a token", file=sys.stderr)
     res_id = unmap_arg(results["res_id"]) if "res_id" in results else None
@@ -499,7 +523,37 @@ def _global_handle(x, dep):
     ]
     if len(matches) > 1:
         raise RuntimeError(f"{x}@{dep}: more than one device has that handle")
-    return DeviceRoute(matches[0]["device_id"], "global") if matches else None
+    if not matches:
+        return None
+    device_id = matches[0]["device_id"]
+    if f"{x}@{dep}" not in _auto_tried and os.getenv("REMOTERF_AUTO_RESERVE", "1") != "0":
+        _auto_tried.add(f"{x}@{dep}")
+        now = int(time.time())
+        try:
+            mine = any(r.get("mine") and r.get("device_id") == device_id
+                       and r["start_time"] <= now < r["end_time"]
+                       for r in backend.reservations()["reservations"])
+        except Exception:  # noqa: BLE001 - routing must still work as it did before
+            mine = True
+        if not mine:
+            _auto_reserve(f"{x}@{dep}")
+    return DeviceRoute(device_id, "global")
+
+
+def _auto_reserve(handle):
+    from .. import ops
+
+    try:
+        booked = ops.auto_reserve(ops.saved_session(), handle)
+    except Exception as exc:  # noqa: BLE001 - routing must still work as it did before
+        print(f"{handle}: not reserved automatically: {getattr(exc, 'message', exc)}", file=sys.stderr)
+        return False
+    until = datetime.fromtimestamp(booked["end_ts"]).strftime("%H:%M")
+    reference = booked.get("reservation_id")
+    cancel = f" Cancel: remoterf cancel {reference} --confirm" if reference is not None else ""
+    print(f"{handle}: reserved for you until {until} (the current {booked['slot_minutes']}-minute slot).{cancel}",
+          file=sys.stderr)
+    return True
 
 
 class RemoteRFRpcError(RuntimeError, grpc.RpcError):
