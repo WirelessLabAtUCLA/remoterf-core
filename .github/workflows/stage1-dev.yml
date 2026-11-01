@@ -335,7 +335,7 @@ jobs:
             for (const c of [...comments].reverse()) {
               const body = c.body || '', login = c.user?.login;
               if (login === BOT || !(/@claude/i.test(body) || /^[ \t]*\/(quick-edit|retest|ship)(\s|$)/.test(body))) continue;
-              const by = login === 'rrf-issues[bot]' ? [...body.matchAll(/^Requested-by:\s*@([\w-]+)/gm)].pop()?.[1] : login;
+              const by = login === 'rrf-issues[bot]' ? [...body.matchAll(/^Requested-by:\s*@?([\w-]+)/gm)].pop()?.[1] : login;
               if (by && await admin(by)) { since = Date.parse(c.created_at); break; }
             }
             const k = 1 + comments.filter(c => c.user?.login === BOT && (c.body || '').startsWith('🔧 Auto-fix ') &&
