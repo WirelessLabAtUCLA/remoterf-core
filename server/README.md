@@ -182,7 +182,7 @@ Local IP: 164.67.195.210
 Local Port: 61000
 ```
 
-then run the below on a seperate terminal (make sure to keep serverrf -s RUNNING!)
+then run the below on a separate terminal (make sure to keep serverrf -s RUNNING!)
 
 Confirm that its reachable:
 
