@@ -185,19 +185,14 @@ def print_help() -> None:
     printf("  Exit codes: 0 ok, 2 usage, 3 login, 4 not found, 5 conflict, 6 permission, 7 unreachable, 8 update remoterf, 130 interrupted", Sty.GRAY)
     print()
     printf("Examples:", (Sty.BOLD, Sty.MAGENTA))
-    printf("  remoterf --register", Sty.GREEN)
     printf("  remoterf --register --local-only", Sty.GREEN, "              then: ucla.global.remoterf.net/QEHN7", Sty.GRAY)
     printf("  remoterf --reset-pass", Sty.GREEN)
-    printf("  remoterf --login", Sty.GREEN)
     printf("  remoterf --login ucla", Sty.GREEN)
     printf("  remoterf --login global", Sty.GREEN)
     printf("  remoterf --login jdoe@ucla", Sty.GREEN)
     printf("  remoterf homes", Sty.GREEN)
-    printf("  remoterf --version", Sty.GREEN)
     printf("  remoterf --config --addr 203.0.113.10:12321", Sty.GREEN)
-    printf("  remoterf --config --addr global.remoterf.net --register", Sty.GREEN)
     printf("  remoterf --config --wipe", Sty.GREEN)
-    printf("  remoterf --config --wipe --yes", Sty.GREEN)
 
 def _account_shell(*, register: bool, enrollment_code: str | None = None,
                    server_label: str | None = None, show_banner: bool = True,
