@@ -1,4 +1,0 @@
-# Approvals count only from this team (ethange1, iproberts): the rulesets require a code-owner
-# review on main. GitHub still emails the team's members on each review request (team
-# notification settings do not stop it); turn it off in your own GitHub notification settings.
-* @WirelessLabAtUCLA/remoterf-admins
