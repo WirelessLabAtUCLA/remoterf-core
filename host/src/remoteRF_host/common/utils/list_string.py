@@ -14,7 +14,9 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 def list_to_str(list:list) -> str:
+    """Join items into a comma-separated string, e.g. [1, 2] -> "1,2"."""
     return ','.join(str(x) for x in list)
 
 def str_to_list(s:str) -> list[int]:
+    """Parse a comma-separated string into a list of ints, e.g. "1,2" -> [1, 2]."""
     return [int(x) for x in s.split(',')]
