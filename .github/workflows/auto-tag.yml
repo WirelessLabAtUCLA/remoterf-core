@@ -37,10 +37,12 @@ jobs:
             pkg=${spec%%:*}; dir=${spec#*:}
             v=$(version < "$dir/pyproject.toml")
             tag="$pkg-v$v"
-            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then continue; fi
             old=$(git show "$BEFORE:$dir/pyproject.toml" 2>/dev/null | version 2>/dev/null || true)
             [ "$old" != "$v" ] || continue # only versions this push changed
-            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent
+            # A re-run after a partial failure dispatches again, unless the release exists.
+            gh release view "$tag" >/dev/null 2>&1 && continue
+            git rev-parse -q --verify "refs/tags/$tag" >/dev/null ||
+              gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent
             gh workflow run release.yml --ref "$tag" -f package="$pkg" -f dry_run=false
             echo "::notice::tagged $tag at ${GITHUB_SHA::7}; Release to PyPI started"
           done

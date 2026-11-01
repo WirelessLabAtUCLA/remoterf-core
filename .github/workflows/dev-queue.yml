@@ -1,9 +1,9 @@
 name: Dev queue (next branch to dev)
 
 # Dev tests one branch at a time. The dev gate (remoterf-federation deploy/dev/rrf-dev-deploy)
-# queues the others in order across both repos. Every 10 minutes, when dev is free and the
-# first branch in line is this repo's, re-run stage1-dev on it. Branches that no longer exist,
-# or whose PR was closed, leave the queue.
+# queues the others in order across both repos. Every 10 minutes, when dev is free, re-run
+# stage1-dev on this repo's first queued branch (the gate still gives the overall first in line
+# its turn for a while). Branches that no longer exist, or whose PR was closed, leave the queue.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -38,13 +38,12 @@ jobs:
           REPO: ${{ github.event.repository.name }}
         run: |
           gate() { ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/rrf-dev-queue -o UserKnownHostsFile=~/.ssh/rrf-dev-known-hosts root@dev.global.remoterf.net "$@"; }
-          status=$(gate status)
+          status=$(gate status) || { echo "::warning::dev unreachable"; exit 0; } # a failed scheduled run emails an admin
           echo "$status"
           [ "$(jq -r .free <<<"$status")" = true ] || { echo "dev is busy"; exit 0; }
-          next=$(jq -r '.queue[0] // empty | "\(.branch) \(.repo)"' <<<"$status")
-          [ -n "$next" ] || { echo "nothing queued"; exit 0; }
+          next=$(jq -r --arg r "$REPO" '[.queue[] | select(.repo == $r)][0] // empty | "\(.branch) \(.repo)"' <<<"$status")
+          [ -n "$next" ] || { echo "nothing queued for $REPO"; exit 0; }
           read -r branch repo <<<"$next"
-          [ "$repo" = "$REPO" ] || { echo "$repo $branch is next; its own dev-queue run deploys it"; exit 0; }
           prs=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$branch" --state all --json state --jq '[.[].state] | join(" ")')
           if ! gh api "repos/$GITHUB_REPOSITORY/branches/$branch" --silent 2>/dev/null || { [ -n "$prs" ] && ! grep -qw OPEN <<<"$prs"; }; then
             gate dequeue "$branch" "$repo" >/dev/null; echo "dropped $branch: branch gone or PR closed"; exit 0

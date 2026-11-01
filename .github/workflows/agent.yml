@@ -111,6 +111,23 @@ jobs:
               const p = await perm(u);
               if (p !== 'admin') return refuse(`${u} has ${p}; the agent is admin-only`);
             }
+            // The agent reads the issue title and body: only admins (or the Slack bot) may have edited them.
+            if (mode === 'agent' || mode === 'autofix') {
+              const { repository: { issue: h } } = await github.graphql(`query($owner: String!, $repo: String!, $n: Int!) {
+                repository(owner: $owner, name: $repo) { issue(number: $n) {
+                  userContentEdits(first: 100) { totalCount nodes { editor { __typename login } } }
+                  timelineItems(itemTypes: [RENAMED_TITLE_EVENT], first: 100) {
+                    totalCount nodes { ... on RenamedTitleEvent { actor { __typename login } } } }
+                } } }`, { ...context.repo, n: issue.number });
+              const { userContentEdits: edits, timelineItems: renames } = h;
+              if (edits.totalCount > 100 || renames.totalCount > 100) return refuse('the issue was edited too often to check; open a new issue');
+              for (const w of [...edits.nodes.map(e => e.editor), ...renames.nodes.map(e => e.actor)]) {
+                if (w?.__typename === 'Bot' && w.login.replace(/\[bot\]$/, '') === 'rrf-issues') continue;
+                if (w?.__typename !== 'User' || await perm(w.login) !== 'admin') {
+                  return refuse(`the issue was edited by ${w?.login || 'an unknown account'}, not an admin; open a new issue`);
+                }
+              }
+            }
             let request = comment ? comment.body : '';
             let date = comment ? comment.created_at : issue.updated_at;
             if (mode === 'autofix') {
@@ -120,6 +137,7 @@ jobs:
               const fix = c => bot(c) && (c.body || '').startsWith('🔧 Auto-fix ');
               const last = all.filter(bot).pop();
               if (!last || !fix(last)) return refuse('the newest github-actions comment is not an auto-fix request');
+              if (last.updated_at !== last.created_at) return refuse('the auto-fix request was edited after posting');
               if (Date.now() - Date.parse(last.created_at) > 30 * 60e3) return refuse('the auto-fix request is over 30 minutes old');
               // Every workflow's GITHUB_TOKEN comments as github-actions[bot]: accept only the one comment
               // that main's stage1-dev autofix job posted on issue-N while it ran.
@@ -127,6 +145,11 @@ jobs:
               const run_id = Number(/\/actions\/runs\/(\d+)/.exec(last.body)?.[1]);
               if (!run_id) return refuse('the auto-fix request names no stage1-dev run');
               const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id });
+              // A write user's push starts stage1-dev too: only runs the agent or an admin started may ask.
+              const who = run.triggering_actor?.login;
+              if (who !== 'github-actions[bot]' && await perm(who) !== 'admin') {
+                return refuse(`stage1-dev run ${run_id} was started by ${who}, not an admin`);
+              }
               const blob = async ref => (await github.rest.repos.getContent({ ...context.repo, path: wf, ref })).data.sha;
               const job = run.path === wf && run.head_branch === `issue-${issue.number}` &&
                 await blob(run.head_sha) === await blob('main') &&
@@ -212,6 +235,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
+          allowed_bots: github-actions,rrf-issues # auto-fix and Slack requests; the gate checked who they are for
           claude_args: --model claude-opus-5-5 --max-turns 40 --allowedTools Read,Edit,Write,Glob,Grep,Bash
           settings: |
             {"permissions": {"deny": [
@@ -324,13 +348,14 @@ jobs:
           pr=$(gh pr list --head "issue-$N" --state open --json url,isCrossRepository \
             --jq 'map(select(.isCrossRepository | not))[0].url // empty')
           if [ -n "$pr" ]; then gh issue comment "$N" --body "Pushed to issue-$N: $pr"; exit 0; fi
-          { printf 'Closes #%s\nRequested-by: %s\n\n' "$N" "$REQUESTER"; cat "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
+          # @ + zero-width space: the agent's summary mentions nobody
+          { printf 'Closes #%s\nRequested-by: %s\n\n' "$N" "$REQUESTER"; sed 's/@/@​/g' "$RUNNER_TEMP/agent/summary.md"; } > "$RUNNER_TEMP/body.md"
           # needs Settings > Actions > "Allow GitHub Actions to create and approve pull requests"
           gh pr create --base main --head "issue-$N" --title "Issue #$N: $TITLE" --body-file "$RUNNER_TEMP/body.md" && exit 0
           echo "MSG=Pushed to issue-$N but could not open the PR; open it from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...issue-$N?expand=1 with 'Closes #$N' and 'Requested-by: $REQUESTER' in the body." >> "$GITHUB_ENV"
           exit 1
-      # After the PR exists: these runs are then the newest on its head commit and report ci-ok
-      # to it (GitHub holds its own pull_request run of a bot-opened PR for approval).
+      # After the PR exists. Checks of dispatched runs do not count for the PR, and GitHub holds the
+      # PR's own pull_request run when the bot opened it: stage1-dev posts ci-ok and dev-ok as commit statuses.
       - run: |
           gh workflow run ci.yml --ref "issue-$N"
           gh workflow run stage1-dev.yml --ref "issue-$N" || echo "::warning::stage1-dev not dispatched"
@@ -338,10 +363,11 @@ jobs:
         run: |
           gh issue comment "$N" --body "${MSG:-Could not publish the agent change:$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID}"
 
-  # An auto-fix round that pushes nothing ends the chain: say so (stage1-dev never runs again to post 🛑).
+  # An agent or auto-fix run that publishes nothing ends the chain: say so with 🛑 (stage1-dev never
+  # runs again to post one; the Slack bot reads it as stopped).
   autofix-stopped:
     needs: [gate, work, publish]
-    if: always() && needs.gate.outputs.mode == 'autofix' && needs.publish.result != 'success'
+    if: always() && contains(fromJSON('["agent", "autofix"]'), needs.gate.outputs.mode) && needs.publish.result != 'success'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -349,13 +375,15 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       N: ${{ needs.gate.outputs.issue }}
+      MSG: "${{ needs.gate.outputs.mode == 'autofix' && 'Auto-fix stopped: the agent pushed no fix' || 'Agent stopped: it made no change, or the run failed' }}"
     steps:
       - run: |
-          gh issue comment "$N" --body "🛑 Auto-fix stopped: the agent pushed no fix: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          gh issue comment "$N" --body "🛑 $MSG: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # No agent. /quick-edit: apply every pending /quick-edit diff on the issue verbatim, one commit
-  # each, bump, push issue-N, open a draft PR, run ci. /ship: the same (pending quick edits and
-  # the bump a local-dev branch lacks), then mark the PR ready and run ci and stage1-dev.
+  # each, bump, push issue-N, open a draft PR, run ci (and stage1-dev on a ready PR). /ship: the
+  # same (pending quick edits and the bump a local-dev branch lacks), then mark the PR ready and
+  # run ci and stage1-dev.
   # /retest: run ci and stage1-dev on issue-N again. Only fixed code runs here, never the checkout.
   act:
     needs: gate
@@ -383,11 +411,14 @@ jobs:
     steps:
       - if: env.MODE == 'retest'
         run: |
-          if ! gh api "repos/$GH_REPO/branches/issue-$N" --silent; then
+          if ! sha=$(gh api "repos/$GH_REPO/branches/issue-$N" --jq .commit.sha); then
             echo "MSG=Nothing to retest: there is no branch issue-$N." >> "$GITHUB_ENV"; exit 1
           fi
           gh workflow run ci.yml --ref "issue-$N"
           gh workflow run stage1-dev.yml --ref "issue-$N"
+          # A failed ci-ok check from the PR's own pull_request run blocks it whatever newer runs report: re-run it.
+          id=$(gh run list -w ci.yml -e pull_request -c "$sha" -L 1 --json databaseId,conclusion --jq '.[] | select(.conclusion == "failure") | .databaseId')
+          [ -z "$id" ] || gh run rerun "$id" --failed || echo "::warning::could not re-run the PR's ci run $id"
       - id: pr
         if: env.MODE == 'ship'
         run: |
@@ -420,6 +451,9 @@ jobs:
               if (c.user.login !== 'github-actions[bot]') continue;
               for (const m of (c.body || '').matchAll(/Quick edit (\d+) did not apply/g)) done.add(m[1]);
             }
+            // A squash merge leaves no Quick-edit trailers on main: quick edits posted before a merged PR count as done.
+            const merged = (await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'closed',
+              head: `${context.repo.owner}:issue-${n}`, per_page: 100 })).map(p => p.merged_at).filter(Boolean).sort().pop();
             const perms = new Map();
             const admin = async u => {
               if (!perms.has(u)) {
@@ -458,7 +492,7 @@ jobs:
             for (const c of all) { // oldest first
               const id = String(c.id);
               const body = (c.body || '').replace(/\r\n/g, '\n');
-              if (body.split('\n')[0].trim().split(/\s+/)[0] !== '/quick-edit' || done.has(id)) continue;
+              if (body.split('\n')[0].trim().split(/\s+/)[0] !== '/quick-edit' || done.has(id) || (merged && c.created_at < merged)) continue;
               const fail = why => github.rest.issues.createComment({ ...context.repo, issue_number: n,
                 body: `❌ Quick edit ${id} did not apply: ${why.replace(/@/g, '@​').slice(0, 500)}` });
               const blocks = [...body.matchAll(/^```diff[ \t]*\n([\s\S]*?)^```[ \t]*$/gm)];
@@ -525,7 +559,11 @@ jobs:
               { echo "MSG=Pushed to issue-$N but could not open the draft PR." >> "$GITHUB_ENV"; exit 1; }
           elif [ "$APPLIED" = 0 ]; then exit 0
           fi
-          gh workflow run ci.yml --ref "issue-$N" # stage1-dev waits for /ship
+          gh workflow run ci.yml --ref "issue-$N"
+          # a draft waits for /ship; a ready PR's new head needs its dev test (and ci-ok) now
+          if [ -n "$pr" ] && [ "$(gh pr view "$pr" --json isDraft --jq .isDraft)" = false ]; then
+            gh workflow run stage1-dev.yml --ref "issue-$N"
+          fi
       - if: failure()
         run: |
           gh issue comment "$N" --body "${MSG:-Could not finish this request: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID}"
