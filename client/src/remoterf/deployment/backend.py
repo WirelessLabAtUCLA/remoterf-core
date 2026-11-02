@@ -211,6 +211,9 @@ class HttpsJsonAccountBackend(DeploymentAccountBackend):
                         "POST",
                         self.base + "/refresh",
                         data={"refresh_token": old["refresh_token"]},
+                        # Past Caddy's 45 s hold, so a restart answers or 502s (never sent)
+                        # instead of timing out ambiguously, which clears the saved login.
+                        overall_timeout=50.0,
                     ),
                     old["subject_id"],
                 )

@@ -65,7 +65,7 @@ VERDICTS = ("pass", "infra", "product")  # worst last
 SCENARIOS = [
     ("ready", (), 20),
     ("login", ("ready",), 60),
-    ("devices", ("login",), 30),
+    ("devices", ("login",), 120),  # waits for the test lab after a dev deploy
     ("relay_rx", ("devices",), 90),
     ("direct_rx", ("relay_rx",), 60),
     ("big_buffer", ("relay_rx",), 100),
@@ -245,8 +245,14 @@ def login(ctx):
 
 
 def devices(ctx):
-    listed = ctx["backend"].devices()["devices"]
-    ctx["sims"] = [d for d in listed if d.get("device_type") == "sim_sdr" and d.get("online")]
+    # A dev deploy restores the seed DBs, whose last-seen times are old: the test lab
+    # shows offline until its next heartbeat (every 60 s). Device lists allow one call per 10 s.
+    for _ in range(10):
+        listed = ctx["backend"].devices()["devices"]
+        ctx["sims"] = [d for d in listed if d.get("device_type") == "sim_sdr" and d.get("online")]
+        if ctx["sims"]:
+            break
+        time.sleep(10)
     check(ctx["sims"], f"no online sim_sdr among {len(listed)} devices")
     return ", ".join(f"{d['display_name']}@{d['deployment_name']}" for d in ctx["sims"])
 
