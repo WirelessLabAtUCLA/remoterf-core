@@ -183,6 +183,37 @@ def test_refresh_never_posts_a_token_another_process_spent():
     assert not transport.request.called and backend.credentials is None
 
 
+def test_account_calls_outwait_a_global_restart(monkeypatch):
+    # Caddy holds a request for up to 45 s while Global restarts: a refresh waits past
+    # that (an ambiguous timeout would clear the login), other account calls 20 s.
+    from remoterf.deployment import http
+
+    backend, transport = _backend("ACC:refresh_session")
+    backend.credentials = {"access_token": "old", "refresh_token": "r1", "access_expires_at": 0, "subject_id": HOME}
+    backend.store.load.return_value = backend.credentials
+    transport.request.return_value = {
+        "deployment_id": HOME, "subject_id": HOME, "username": "jdoe", "access_token": "new", "refresh_token": "r2",
+        "token_type": "Bearer", "access_expires_at": 10**12, "refresh_expires_at": 10**12}
+    assert backend._access() == "new"
+    assert transport.request.call_args.kwargs["overall_timeout"] == 50.0
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def stream(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        raise Stop
+
+    client = Mock()
+    client.stream.side_effect = stream
+    monkeypatch.setattr(http.httpx, "Client", lambda **kwargs: client)
+    with pytest.raises(Stop):
+        http.JsonTransport("https://home.example").request("GET", "/me")
+    assert seen["timeout"].read == 20.0
+
+
 def test_https_keeps_an_idle_connection_for_a_minute(monkeypatch):
     from remoterf.deployment import http
 

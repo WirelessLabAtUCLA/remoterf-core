@@ -74,8 +74,9 @@ class JsonTransport:
             headers["Content-Type"] = FRAMED_CONTENT_TYPE
         if access:
             headers["Authorization"] = "Bearer " + access
+        # Longer than a Global restart: Caddy holds a request until the new container answers.
         overall_timeout = (
-            5.0 if overall_timeout is None else float(overall_timeout)
+            20.0 if overall_timeout is None else float(overall_timeout)
         )
         if overall_timeout <= 0 or max_response_bytes <= 0:
             raise ValueError("invalid account operation budget")
